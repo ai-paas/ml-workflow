@@ -24,9 +24,10 @@ alembic.ini 파일이 존재하는 경로에서 아래 명령어 실행
 alembic upgrade head
 ```
 
-## 🚀 개발환경 설정
+## 🚀 개발환경 설정 (backend server)
+- 대상 디렉토리 : backend
 
- `setup-dev.sh` 스크립트를 사용하여 개발 환경을 설정할 수 있습니다.
+ `setup-dev.sh` 스크립트를 사용하여 개발 환경을 설정할 수 있습니다. (backend folder에 대해 가상환경을 구축하고 pre commit 세팅)
  이 스크립트는 **필수 패키지 설치**와 **pre-commit hook 설정**을 자동으로 처리합니다.
 
 ```shell
@@ -41,3 +42,9 @@ pipenv shell
 2. `pipenv shell` 명령어를 사용해 가상환경을 활성화시키고 개발을 수행합니다.
 
 3. 이후, **pre-commit hook**이 자동으로 설정되어 커밋 시 코드 스타일과 규칙을 검사하게 됩니다.
+
+#### 기타 디렉토리
+- ml_workflow_ui
+- predictor
+- train_eval
+에 대해서는 별도로 pipenv 가상환경을 구축하여 기동테스트 진행요망.
