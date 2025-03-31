@@ -28,6 +28,10 @@ handle_error() {
 # 스크립트 시작
 echo -e "${BLUE}=== Python Development Environment Setup ===${NC}"
 
+# backend 폴더로 이동
+log_step "backend 폴더로 이동..."
+cd backend || handle_error "backend 폴더로 이동 실패"
+
 # python 가상환경 세팅 및 package 설치
 log_step "Upgrading pip..."
 pip install --upgrade pip || handle_error "pip 업그레이드 실패"
@@ -50,6 +54,7 @@ log_success "Pre-commit hooks 설치 완료"
 
 log_step "Configuring prepare-commit-msg hook..."
 # Repository Root에서 시작
+cd ../
 cd .git/hooks
 
 # prepare-commit-msg 파일 생성
