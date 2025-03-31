@@ -1,5 +1,7 @@
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,13 +30,34 @@ class Settings(BaseSettings):
     DB_HOST: str
     DB_PORT: str
 
-    # class Config:
-    #     env_file = ".env"
+    MLFLOW_TRACKING_URI: str
+    MLFLOW_TRACKING_USERNAME: str
+    MLFLOW_TRACKING_PASSWORD: str
+    MLFLOW_EXPERIMENT_NAME: str
+
+    MLFLOW_S3_ENDPOINT_URL: str
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
+
+    REST_API_URL: str
+    DEMO_PASSWORD: str
+    LOGIN_SECRET_KEY: str
+
+    KSERVE_GPU: bool = False
+
+    USER_MODELS: dict[str, dict] = {}
 
     @property
     def get_db_uri(self) -> str:
         """Environment variables로부터 DB 정보를 받아와 URI를 반환"""
         return f"{self.DB_TYPE}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    @property
+    def user_models(self) -> dict[str, dict]:
+        return self.USER_MODELS
+
+    def add_user_model(self, key: str, value: Any):
+        self.USER_MODELS[key] = value
 
 
 @lru_cache

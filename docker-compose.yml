@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  fastapi:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "48000:8000"
+    volumes:
+      - ./backend:/app
+    env_file:
+      - ./backend/app/config/.env
+    networks:
+      - mlworkflow
+
+networks:
+  mlworkflow:
+    driver: bridge

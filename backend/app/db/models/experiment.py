@@ -3,16 +3,7 @@ from datetime import datetime
 from db.models.base import BaseModel, TimestampMixin
 from db.models.dataset import Dataset
 from db.models.model import Model
-from sqlalchemy import (
-    TIMESTAMP,
-    BigInteger,
-    Boolean,
-    Float,
-    ForeignKey,
-    Integer,
-    String,
-    Text,
-)
+from sqlalchemy import TIMESTAMP, BigInteger, Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 

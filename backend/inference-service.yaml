@@ -1,0 +1,24 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: ml-workflow-yaml
+  namespace: kubeflow-user-example-com
+spec:
+  predictor:
+    minReplicas: 1
+    model:
+      modelFormat:
+        name: huggingface
+      protocolVersion: v2
+      storageUri: file:///mnt/models
+    containers:
+      - name: kserve-container
+        image: "kfserving/tensorflow-serving:latest"  # 사용하는 모델 서빙 이미지
+        volumeMounts:
+          - name: model-volume
+            mountPath: /mnt/models
+    volumes:
+      - name: model-volume
+        hostPath:
+          path: /Users/dhk/vs-code-workspace/ml-workflow/backend/models/owlv2-base-patch16-ensemble  # 호스트의 모델 파일 위치
+          type: Directory

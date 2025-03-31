@@ -15,13 +15,13 @@ cat << 'EOF' > prepare-commit-msg
 
 FIRST_LINE=$(head -n 1 $1)
 
-COMMITFORMAT="(feat|fix|docs|style|refactor|design|comment|rename|remove|chore|!HOTFIX|!BREAKING CHANGE): (.*) \\(CSG-[0-9]{3,4}\\)$"
+COMMITFORMAT="(feat|fix|docs|style|refactor|design|comment|rename|remove|chore|!HOTFIX|!BREAKING CHANGE|revert): (.*) \\((CSG|LS)-[0-9]{2,4}\\)$"
 
 if ! [[ "$FIRST_LINE" =~ $COMMITFORMAT ]]; then
   echo ""
   echo " Commit Message 포맷을 아래 예시와 같이 지켜주세요."
   echo " Prefix : 사용가능한 commit의 Prefix는 아래와 같습니다."
-  echo " Suffix : 반드시 commit에 해당하는 JIRA Ticket 번호를 괄호(CSG-000)로 묶어서 마지막에 기입해주세요."
+  echo " Suffix : 반드시 commit에 해당하는 JIRA Ticket 번호를 괄호(CSG-000 또는 LS-000)로 묶어서 마지막에 기입해주세요."
   echo ""
   echo "======================= 반드시 콜론(:) 을 붙여야 합니다. ========================="
   echo ""
@@ -38,6 +38,7 @@ if ! [[ "$FIRST_LINE" =~ $COMMITFORMAT ]]; then
   echo "  rename:           파일 혹은 폴더명을 수정하거나 옮기는 작업만인 경우"
   echo "  remove:           파일을 삭제하는 작업만 수행한 경우"
   echo "  test:             테스트 코드 작성 등 테스트 관련 작업"
+  echo "  revert:           커밋 되돌리기 작업"
   echo ""
   echo "=================================================================================="
   echo ""
@@ -46,6 +47,7 @@ if ! [[ "$FIRST_LINE" =~ $COMMITFORMAT ]]; then
   echo "================================== E X A M P L E ================================="
   echo ""
   echo -e " git commit -m \"feat: 기능 A 추가 (CSG-123)\n\n  1. 000파일 추가 \n  2. 2222파일추가\n  3. 00 관련 비즈니스 로직 추가\""
+  echo -e " git commit -m \"fix: 버그 수정 (LS-456)\n\n  1. 000버그 수정 \n  2. 2222오류 해결\""
   echo ""
   echo "=================================================================================="
   echo ""

@@ -1,5 +1,5 @@
 from .base import Base
-from .dataset import Dataset
+from .dataset import Dataset, DatasetRegistry
 from .experiment import (
     ExperimentLog,
     ExperimentModel,
@@ -10,3 +10,4 @@ from .experiment import (
     ResourceUsage,
 )
 from .model import Model, ModelFormat, ModelProvider, ModelRegistry, ModelType
+from .user import UserModel

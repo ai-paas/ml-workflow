@@ -1,92 +1,43 @@
-# ML workflow
+# ML-Workflow
+
+ML-Workflow는 kubeflow 기반으로 하는 ML pipeline를 관리하고 다양한 종류의 앱을 손쉽게 빌드할수있는 시스템의 Backend를 담당하고 있습니다. 다양한 모델의 학습/평가/배포 과정을 No-Code 기반으로 수행할 수 있습니다.
+
+## Tech Stack
+
+![Python Icon](https://img.shields.io/badge/python-3776AB?style=flat&logo=python&logoColor=white)
+![FastAPI Icon](https://img.shields.io/badge/fastapi-009688?style=flat&logo=fastapi&logoColor=white)
+![HuggingFace Icon](https://img.shields.io/badge/huggingface-fcbf29?style=flat&logo=huggingface&logoColor=white)
+![MLFlow Icon](https://img.shields.io/badge/mlflow-0194E2?style=flat&logo=mlflow&logoColor=white)
+![MariaDB Icon](https://img.shields.io/badge/mariadb-003545?style=flat&logo=mariadb&logoColor=white)
 
 
+# System Architecture and Workflow
 
-## Getting started
+ML-Workflow의 시스템 아키텍처 및 흐름도는 아래 링크에서 확인 가능합니다.
+https://surromind.atlassian.net/jira/software/c/projects/PAAS/boards/600/backlog?selectedIssue=PAAS-250
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+# DB Migration
 
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
+alembic.ini 파일이 존재하는 경로에서 아래 명령어 실행
+```shell
+alembic upgrade head
 ```
-cd existing_repo
-git remote add origin https://gitlab.surromind.ai/gov-rnd-projects/ai-paas-2024-2026/ml-workflow.git
-git branch -M master
-git push -uf origin master
+
+## 🚀 개발환경 설정
+
+ `setup-dev.sh` 스크립트를 사용하여 개발 환경을 설정할 수 있습니다.
+ 이 스크립트는 **필수 패키지 설치**와 **pre-commit hook 설정**을 자동으로 처리합니다.
+
+```shell
+sh setup-dev.sh
+pipenv shell
 ```
 
-## Integrate with your tools
+1. **`setup-dev.sh`를 실행**하면, 아래와 같은 작업이 자동으로 처리됩니다:
+    - `pipenv`를 사용하여 가상환경을 생성하고, 개발 환경에 필요한 패키지를 설치합니다.
+    - `pre-commit`을 설치하고, `.git/hooks` 폴더에 `prepare-commit-msg`를 설정하여 커밋 메시지 형식을 자동으로 검사하도록 설정합니다.
 
-- [ ] [Set up project integrations](https://gitlab.surromind.ai/gov-rnd-projects/ai-paas-2024-2026/ml-workflow/-/settings/integrations)
+2. `pipenv shell` 명령어를 사용해 가상환경을 활성화시키고 개발을 수행합니다.
 
-## Collaborate with your team
-
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Automatically merge when pipeline succeeds](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing(SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thank you to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+3. 이후, **pre-commit hook**이 자동으로 설정되어 커밋 시 코드 스타일과 규칙을 검사하게 됩니다.

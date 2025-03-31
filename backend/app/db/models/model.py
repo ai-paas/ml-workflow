@@ -1,9 +1,4 @@
-from db.models.base import (
-    BaseModel,
-    TimestampCreateMixin,
-    TimestampMixin,
-    TimestampUpdateMixin,
-)
+from db.models.base import BaseModel, TimestampCreateMixin, TimestampMixin, TimestampUpdateMixin
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

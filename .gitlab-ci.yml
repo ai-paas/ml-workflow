@@ -1,0 +1,32 @@
+stages:
+  - lint
+
+lint_isort:
+  stage: lint
+  script:
+    - pip install isort
+    - isort --check --profile black --line-length 120 .  # black 프로필 추가
+  only:
+    - merge_requests
+    - master
+    - dev
+
+lint_black:
+  stage: lint
+  script:
+    - pip install black
+    - black --check --line-length 120 .
+  only:
+    - merge_requests
+    - master
+    - dev
+
+lint_flake8:
+  stage: lint
+  script:
+    - pip install flake8
+    - flake8 --max-line-length 120 --ignore=E203,W503,W605,E712,E266,F401,E402,F821,E711 .
+  only:
+    - merge_requests
+    - master
+    - dev
