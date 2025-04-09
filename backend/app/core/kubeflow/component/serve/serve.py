@@ -86,12 +86,16 @@ def serving_component(
                     f"--aws_secret_access_key={aws_secret_access_key}",
                 ],
                 resources=client.V1ResourceRequirements(
-                    requests={"memory": "2Gi", "cpu": "200m", "nvidia.com/gpu": "1"}
-                    if kserve_gpu
-                    else {"memory": "2Gi", "cpu": "200m"},
-                    limits={"memory": "4Gi", "cpu": "500m", "nvidia.com/gpu": "1"}
-                    if kserve_gpu
-                    else {"memory": "4Gi", "cpu": "500m"},
+                    requests=(
+                        {"memory": "2Gi", "cpu": "200m", "nvidia.com/gpu": "1"}
+                        if kserve_gpu
+                        else {"memory": "2Gi", "cpu": "200m"}
+                    ),
+                    limits=(
+                        {"memory": "4Gi", "cpu": "500m", "nvidia.com/gpu": "1"}
+                        if kserve_gpu
+                        else {"memory": "4Gi", "cpu": "500m"}
+                    ),
                 ),
             )
         ],
