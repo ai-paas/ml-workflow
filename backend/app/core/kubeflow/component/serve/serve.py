@@ -86,22 +86,12 @@ def serving_component(
                     f"--aws_secret_access_key={aws_secret_access_key}",
                 ],
                 resources=client.V1ResourceRequirements(
-                    requests=(
-                        {"memory": "2Gi", "cpu": "200m", "nvidia.com/gpu": "1"}  # GPU 리소스 제한
-                        if kserve_gpu
-                        else {
-                            "memory": "2Gi",
-                            "cpu": "200m",
-                        }
-                    ),
-                    limits=(
-                        {"memory": "4Gi", "cpu": "500m", "nvidia.com/gpu": "1"}  # GPU 리소스 제한
-                        if kserve_gpu
-                        else {
-                            "memory": "4Gi",
-                            "cpu": "500m",
-                        }
-                    ),
+                    requests={"memory": "2Gi", "cpu": "200m", "nvidia.com/gpu": "1"}
+                    if kserve_gpu
+                    else {"memory": "2Gi", "cpu": "200m"},
+                    limits={"memory": "4Gi", "cpu": "500m", "nvidia.com/gpu": "1"}
+                    if kserve_gpu
+                    else {"memory": "4Gi", "cpu": "500m"},
                 ),
             )
         ],
@@ -115,6 +105,11 @@ def serving_component(
         metadata=client.V1ObjectMeta(
             name=inference_service_name,
             namespace=namespace,
+            annotations={
+                "serving.kserve.io/enable-metric-aggregation": "true",
+                "serving.kserve.io/enable-prometheus-scraping": "true",
+                # "prometheus.kserve.io/path": "/metrics",
+            },
         ),
         spec=inference_service_spec,
     )
