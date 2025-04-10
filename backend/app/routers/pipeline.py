@@ -143,7 +143,13 @@ def serve(
         model_uri: str,
         model_name: str,
         s3_storage_uri: str,
-        kserve_gpu: bool,
+        kserve_gpu_yn: bool,
+        request_gpu: str,
+        request_cpu: str,
+        request_memory: str,
+        limit_gpu: str,
+        limit_cpu: str,
+        limit_memory: str,
     ) -> str:
         task = serving_component(
             inference_service_name=inference_service_name,
@@ -155,7 +161,13 @@ def serve(
             model_name=model_name,
             model_uri=model_uri,
             s3_storage_uri=s3_storage_uri,
-            kserve_gpu=kserve_gpu,
+            kserve_gpu_yn=kserve_gpu_yn,
+            request_gpu=request_gpu,
+            request_cpu=request_cpu,
+            request_memory=request_memory,
+            limit_gpu=limit_gpu,
+            limit_cpu=limit_cpu,
+            limit_memory=limit_memory,
         )
         return task.output
 
@@ -197,6 +209,13 @@ def serve(
                 "model_uri": model_uri,
                 "s3_storage_uri": s3_storage_uri,
                 "kserve_gpu": settings.KSERVE_GPU,
+                # TODO: 추후 외부에서 인자로 받아야함.
+                "request_gpu": "1",
+                "request_cpu": "200m",
+                "request_memory": "2Gi",
+                "limit_gpu": "1",
+                "limit_cpu": "500m",
+                "limit_memory": "4Gi",
             },
         )
         return True
