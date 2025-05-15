@@ -130,12 +130,6 @@ def serve(
     db: Session = SessionDepends,
     model_id: int,
     inference_service_name: str,
-    request_gpu: str = "1",
-    request_cpu: str = "200m",
-    request_memory: str = "2Gi",
-    limit_gpu: str = "1",
-    limit_cpu: str = "500m",
-    limit_memory: str = "4Gi",
     current_user: UserSchema = Depends(get_current_user),
 ):
     @dsl.pipeline
@@ -149,13 +143,7 @@ def serve(
         model_uri: str,
         model_name: str,
         s3_storage_uri: str,
-        kserve_gpu_yn: bool,
-        request_gpu: str,
-        request_cpu: str,
-        request_memory: str,
-        limit_gpu: str,
-        limit_cpu: str,
-        limit_memory: str,
+        kserve_gpu: bool,
     ) -> str:
         task = serving_component(
             inference_service_name=inference_service_name,
@@ -167,13 +155,7 @@ def serve(
             model_name=model_name,
             model_uri=model_uri,
             s3_storage_uri=s3_storage_uri,
-            kserve_gpu_yn=kserve_gpu_yn,
-            request_gpu=request_gpu,
-            request_cpu=request_cpu,
-            request_memory=request_memory,
-            limit_gpu=limit_gpu,
-            limit_cpu=limit_cpu,
-            limit_memory=limit_memory,
+            kserve_gpu=kserve_gpu,
         )
         return task.output
 
@@ -215,13 +197,6 @@ def serve(
                 "model_uri": model_uri,
                 "s3_storage_uri": s3_storage_uri,
                 "kserve_gpu": settings.KSERVE_GPU,
-                # TODO: 추후 외부에서 인자로 받아야함.
-                "request_gpu": request_gpu,
-                "request_cpu": request_cpu,
-                "request_memory": request_memory,
-                "limit_gpu": limit_gpu,
-                "limit_cpu": limit_cpu,
-                "limit_memory": limit_memory,
             },
         )
         return True

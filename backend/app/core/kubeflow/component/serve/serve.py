@@ -25,13 +25,7 @@ def serving_component(
     model_name: str,
     model_uri: str = None,
     s3_storage_uri: str = None,
-    kserve_gpu_yn: bool = False,
-    request_gpu: str = "1",
-    request_cpu: str = "200m",
-    request_memory: str = "2Gi",
-    limit_gpu: str = "1",
-    limit_cpu: str = "500m",
-    limit_memory: str = "4Gi",
+    kserve_gpu: bool = False,
 ) -> str:
     import logging
 
@@ -72,7 +66,7 @@ def serving_component(
     #     protocol_version="v2",
     #     storage_uri=model_storage_uri,
     # )
-    logger.info(f"Use GPU = {kserve_gpu_yn}")
+    logger.info(f"Use GPU = {kserve_gpu}")
     predictor_spec = V1beta1PredictorSpec(
         # TODO: s3_storage 지원시 활용 필요
         # model=model_spec,
@@ -93,14 +87,20 @@ def serving_component(
                 ],
                 resources=client.V1ResourceRequirements(
                     requests=(
-                        {"memory": request_memory, "cpu": request_cpu, "nvidia.com/gpu": request_gpu}
-                        if kserve_gpu_yn
-                        else {"memory": request_memory, "cpu": request_cpu}
+                        {"memory": "2Gi", "cpu": "200m", "nvidia.com/gpu": "1"}  # GPU 리소스 제한
+                        if kserve_gpu
+                        else {
+                            "memory": "2Gi",
+                            "cpu": "200m",
+                        }
                     ),
                     limits=(
-                        {"memory": limit_memory, "cpu": limit_cpu, "nvidia.com/gpu": limit_gpu}
-                        if kserve_gpu_yn
-                        else {"memory": limit_memory, "cpu": limit_cpu}
+                        {"memory": "4Gi", "cpu": "500m", "nvidia.com/gpu": "1"}  # GPU 리소스 제한
+                        if kserve_gpu
+                        else {
+                            "memory": "4Gi",
+                            "cpu": "500m",
+                        }
                     ),
                 ),
             )
@@ -115,11 +115,6 @@ def serving_component(
         metadata=client.V1ObjectMeta(
             name=inference_service_name,
             namespace=namespace,
-            annotations={
-                "serving.kserve.io/enable-metric-aggregation": "true",
-                "serving.kserve.io/enable-prometheus-scraping": "true",
-                # "prometheus.kserve.io/path": "/metrics",
-            },
         ),
         spec=inference_service_spec,
     )

@@ -1,3 +1,4 @@
+.cursorrules
 backend/models/*
 .vscode
 local_outputs/
