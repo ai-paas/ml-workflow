@@ -128,7 +128,10 @@ def validate_label_files(label_path, class_count):
 
             parts = line.split()
             if len(parts) != 5:
-                raise ValueError(f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 형식이 있습니다. 5개의 값이 있어야 합니다.")
+                raise ValueError(
+                    f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 형식이 있습니다. \
+                                 5개의 값이 있어야 합니다."
+                )
 
             # 클래스 인덱스 검증
             try:
@@ -139,7 +142,10 @@ def validate_label_files(label_path, class_count):
                             {class_idx} (0~{class_count-1} 사이여야 함)"
                     )
             except ValueError:
-                raise ValueError(f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 클래스 인덱스가 있습니다: {parts[0]}")
+                raise ValueError(
+                    f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 클래스 인덱스가 있습니다: \
+                                 {parts[0]}"
+                )
 
             # 바운딩 박스 값 검증 (0~1 사이)
             for i in range(1, 5):
@@ -147,10 +153,14 @@ def validate_label_files(label_path, class_count):
                     value = float(parts[i])
                     if not 0 <= value <= 1:
                         raise ValueError(
-                            f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 범위를 벗어난 바운딩 박스 값이 있습니다: {value} (0~1 사이여야 함)"
+                            f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 범위를 벗어난 바운딩 박스 값이 있습니다: \
+                                {value} (0~1 사이여야 함)"
                         )
                 except ValueError:
-                    raise ValueError(f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 바운딩 박스 값이 있습니다: {parts[i]}")
+                    raise ValueError(
+                        f"라벨 파일 '{label_path.name}' {line_num}번째 줄에 유효하지 않은 바운딩 박스 값이 있습니다: \
+                                     {parts[i]}"
+                    )
 
 
 def validate_dataset_structure(root_dir):
@@ -177,7 +187,10 @@ def validate_dataset_structure(root_dir):
 
     # names 길이와 nc 일치 여부 확인
     if len(yaml_data["names"]) != yaml_data["nc"]:
-        raise ValueError(f"data.yaml의 'nc' 값({yaml_data['nc']})과 'names' 배열 길이({len(yaml_data['names'])})가 일치하지 않습니다.")
+        raise ValueError(
+            f"data.yaml의 'nc' 값({yaml_data['nc']})과 \
+                         'names' 배열 길이({len(yaml_data['names'])})가 일치하지 않습니다."
+        )
 
     class_count = yaml_data["nc"]
 
