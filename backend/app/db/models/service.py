@@ -1,8 +1,7 @@
 from db.models.base import BaseModel, TimestampCreateMixin, TimestampMixin, TimestampUpdateMixin
+from db.models.model import Model
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from backend.app.db.models.model import Model
 
 
 class ServiceEndpoint(BaseModel, TimestampMixin):
