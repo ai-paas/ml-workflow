@@ -34,7 +34,7 @@ class Hyperparamter(BaseModel):
     __tablename__ = "hyperparameter"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
-    reference_model_id: Mapped[int] = mapped_column(ForeignKey("model.id"))
+    experiment_id: Mapped[int] = mapped_column(ForeignKey("experiment.id"))
     hyperparameter_type_id: Mapped[int] = mapped_column(ForeignKey("hyperparameter_type.id"))
 
     reference_model: Mapped["Model"] = relationship("Model")
