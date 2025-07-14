@@ -24,7 +24,7 @@ RUN pipenv install --deploy --system
 
 # Copy YOLOX folder for installation
 COPY YOLOX ./YOLOX
-RUN pip install --no-build-isolation -v -e ./YOLOX
+RUN pip install --no-build-isolation -v -e YOLOX/.
 
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
