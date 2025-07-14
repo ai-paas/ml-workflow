@@ -22,7 +22,7 @@ COPY Pipfile Pipfile.lock ./
 
 # Install the dependencies via pipenv
 RUN pipenv install --deploy --system
-RUN pipenv run pip install --no-build-isolation -v -e YOLOX/.
+RUN pip install --no-build-isolation -v -e YOLOX/.
 
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
