@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  train-eval:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: '4g'  # shared memory 크기 설정 (YOLOX 학습 시 필요)
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+      - ./YOLOX_outputs:/app/YOLOX_outputs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONPATH=/app
+    networks:
+      - mlworkflow
+    stdin_open: true
+    tty: true
+
+networks:
+  mlworkflow:
+    driver: bridge 

@@ -1,14 +1,13 @@
 from .base import Base
 from .dataset import Dataset, DatasetRegistry
-from .experiment import ExperimentModel, HyperparameterType, Hyperparamter
-from .model import (
-    InferenceImageRegistry,
-    Model,
-    ModelFormat,
-    ModelProvider,
-    ModelRegistry,
-    ModelType,
-    TrainImageRegistry,
+from .experiment import (
+    ExperimentLog,
+    ExperimentModel,
+    HyperparameterType,
+    Hyperparamter,
+    ImageRegistry,
+    Metric,
+    ResourceUsage,
 )
-from .service import ServiceEndpoint, ServiceParamType
+from .model import Model, ModelFormat, ModelProvider, ModelRegistry, ModelType
 from .user import UserModel

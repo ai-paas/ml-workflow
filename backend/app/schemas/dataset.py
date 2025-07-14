@@ -1,42 +1,48 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from schemas.base import TimeStampSchemaMixin
 
 
-class DatasetBaseSchema(TimeStampSchemaMixin):
+class DatasetBaseSchema(BaseModel):
     name: str
-    version: int
-    subversion: int
-    train_ratio: float
-    validation_ratio: float
-    test_ratio: float
+    description: str
+    dataset_format_id: int
 
 
-class DatasetReadSchema(TimeStampSchemaMixin):
+class DatasetReadSchema(BaseModel):
     id: int
     name: str
-    version: int
-    subversion: int
-    train_ratio: float
-    validation_ratio: float
-    test_ratio: float
+    description: str
+    dataset_format: DatasetFormatReadSchema
     dataset_registry: DatasetRegistryReadSchema
 
     class Config:
         from_attributes = True
 
 
-class DatasetRegistryBaseSchema(TimeStampSchemaMixin):
+class DatasetFormatReadSchema(BaseModel):
+    id: int
+    name: str
+    description: str
+
+    class Config:
+        from_attributes = True
+
+
+class DatasetRegistryBaseSchema(BaseModel):
+    run_id: str
+    version: int | None = None
     artifact_path: str
-    uri: str
+    dataset_uri: str
     dataset_id: int
 
 
-class DatasetRegistryReadSchema(TimeStampSchemaMixin):
+class DatasetRegistryReadSchema(BaseModel):
     id: int
+    run_id: str
+    version: int | None = None
     artifact_path: str
-    uri: str
+    dataset_uri: str
     dataset_id: int
 
     class Config:
