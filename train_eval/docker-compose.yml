@@ -18,8 +18,9 @@ services:
       - ./data:/app/data
       - ./YOLOX_outputs:/app/YOLOX_outputs
     environment:
-      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - PYTHONPATH=/app
+    runtime: nvidia
     networks:
       - mlworkflow
     stdin_open: true

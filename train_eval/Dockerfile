@@ -24,7 +24,7 @@ RUN pipenv install --deploy --system
 
 # Copy YOLOX folder for installation
 COPY YOLOX ./YOLOX
-RUN pip install --no-build-isolation -v -e ./YOLOX
+RUN cd YOLOX && pip install --no-build-isolation --use-pep517 -v -e .
 
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
@@ -37,7 +37,13 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # Install dependencies without unattended-upgrades
 RUN apt-get update && apt-get install -y wget \
-    cmake && \
+    cmake \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 && \
     wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
     dpkg -i cuda-keyring_1.1-1_all.deb && \
     rm cuda-keyring_1.1-1_all.deb
@@ -59,4 +65,4 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy the FastAPI app code into the container
 COPY . .
 
-ENTRYPOINT ["python", "-m", "app.train_test", "-f", "../YOLOX/exps/example/yolox_voc/yolox_voc_s.py", "-d", "0", "-b", "8", "--fp16", "-o"]
+ENTRYPOINT ["python", "-m", "app.train_test", "-f", "../YOLOX/exps/example/yolox_voc/yolox_voc_s.py", "-d", "1", "-b", "8", "--fp16", "-o"]
