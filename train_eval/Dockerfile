@@ -16,13 +16,15 @@ RUN apt-get update && apt-get install -y \
     sudo \
     && pip3 install pipenv
 
-
 # Copy only the Pipfile and Pipfile.lock to leverage Docker cache
 COPY Pipfile Pipfile.lock ./
 
 # Install the dependencies via pipenv
 RUN pipenv install --deploy --system
-RUN pip install --no-build-isolation -v -e ./YOLOX/.
+
+# Copy YOLOX folder for installation
+COPY YOLOX/ ./YOLOX/
+RUN pip install --no-build-isolation -v -e ./YOLOX/
 
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
