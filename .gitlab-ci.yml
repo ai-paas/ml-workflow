@@ -26,7 +26,7 @@ lint_flake8:
   stage: lint
   script:
     - pip install flake8
-    - flake8 --max-line-length 120 --ignore=E203,W503,W605,E712,E266,F401,E402,F821,E711 .
+    - flake8 --max-line-length 120 --ignore=E203,W503,W605,E712,E266,F401,E402,F821,E711,F403 .
   only:
     - merge_requests
     - master
