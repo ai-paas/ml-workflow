@@ -2,22 +2,19 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import argparse
-
-import megengine as mge
 import numpy as np
-from megengine import jit
 
+import argparse
+import megengine as mge
 from build import build_and_load
+from megengine import jit
 
 
 def make_parser():
     parser = argparse.ArgumentParser("YOLOX Demo Dump")
     parser.add_argument("-n", "--name", type=str, default="yolox-s", help="model name")
     parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
-    parser.add_argument(
-        "--dump_path", default="model.mge", help="path to save the dumped model"
-    )
+    parser.add_argument("--dump_path", default="model.mge", help="path to save the dumped model")
     return parser
 
 

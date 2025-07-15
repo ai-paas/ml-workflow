@@ -19,15 +19,15 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
 import os
-import sys
-from unittest import mock
-from sphinx.domains import Domain
-from typing import Dict, List, Tuple
 
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
 import sphinx_rtd_theme
+import sys
+from sphinx.domains import Domain
+from typing import Dict, List, Tuple
+from unittest import mock
 
 
 class GithubURLDomain(Domain):
@@ -38,7 +38,9 @@ class GithubURLDomain(Domain):
     name = "githuburl"
     ROOT = "https://github.com/Megvii-BaseDetection/YOLOX"
     # LINKED_DOC = ["tutorials/install", "tutorials/getting_started"]
-    LINKED_DOC = ["tutorials/install",]
+    LINKED_DOC = [
+        "tutorials/install",
+    ]
 
     def resolve_any_xref(self, env, fromdocname, builder, target, node, contnode):
         github_url = None
@@ -138,7 +140,7 @@ extensions = [
     "sphinx.ext.mathjax",
     "sphinx.ext.viewcode",
     "sphinx.ext.githubpages",
-    'sphinx_markdown_tables',
+    "sphinx_markdown_tables",
 ]
 
 # -- Configurations for plugins ------------
@@ -241,9 +243,7 @@ latex_elements = {
 # Grouping the document tree into LaTeX files. List of tuples
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
-latex_documents = [
-    (master_doc, "yolox.tex", "yolox Documentation", "yolox contributors", "manual")
-]
+latex_documents = [(master_doc, "yolox.tex", "yolox Documentation", "yolox contributors", "manual")]
 
 
 # -- Options for manual page output ------------------------------------------
@@ -299,9 +299,7 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
         "WarmupMultiStepLR",
     }
     try:
-        if name in HIDDEN or (
-            hasattr(obj, "__doc__") and obj.__doc__.lower().strip().startswith("deprecated")
-        ):
+        if name in HIDDEN or (hasattr(obj, "__doc__") and obj.__doc__.lower().strip().startswith("deprecated")):
             print("Skipping deprecated object: {}".format(name))
             return True
     except:

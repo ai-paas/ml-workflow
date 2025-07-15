@@ -2,19 +2,19 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import argparse
-import os
-import time
-
-import cv2
-import megengine as mge
-import megengine.functional as F
 from loguru import logger
 
+import cv2
+
+from yolox.data.data_augment import preproc as preprocess
 from yolox.data.datasets import COCO_CLASSES
 from yolox.utils import vis
-from yolox.data.data_augment import preproc as preprocess
 
+import argparse
+import megengine as mge
+import megengine.functional as F
+import os
+import time
 from build import build_and_load
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
@@ -22,9 +22,7 @@ IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
 def make_parser():
     parser = argparse.ArgumentParser("YOLOX Demo!")
-    parser.add_argument(
-        "demo", default="image", help="demo type, eg. image, video and webcam"
-    )
+    parser.add_argument("demo", default="image", help="demo type, eg. image, video and webcam")
     parser.add_argument("-n", "--name", type=str, default="yolox-s", help="model name")
     parser.add_argument("--path", default="./test.png", help="path to images or video")
     parser.add_argument("--camid", type=int, default=0, help="webcam demo camera id")
@@ -62,13 +60,12 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45):
 
     output = [None for _ in range(len(prediction))]
     for i, image_pred in enumerate(prediction):
-
         # If none are remaining => process next image
         if not image_pred.shape[0]:
             continue
         # Get score and class with highest confidence
-        class_conf = F.max(image_pred[:, 5: 5 + num_classes], 1, keepdims=True)
-        class_pred = F.argmax(image_pred[:, 5: 5 + num_classes], 1, keepdims=True)
+        class_conf = F.max(image_pred[:, 5 : 5 + num_classes], 1, keepdims=True)
+        class_pred = F.argmax(image_pred[:, 5 : 5 + num_classes], 1, keepdims=True)
 
         class_conf_squeeze = F.squeeze(class_conf)
         conf_mask = image_pred[:, 4] * class_conf_squeeze >= conf_thre
@@ -78,7 +75,9 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45):
             continue
 
         nms_out_index = F.vision.nms(
-            detections[:, :4], detections[:, 4] * detections[:, 5], nms_thre,
+            detections[:, :4],
+            detections[:, 4] * detections[:, 5],
+            nms_thre,
         )
         detections = detections[nms_out_index]
         if output[i] is None:
@@ -160,9 +159,7 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
         outputs, img_info = predictor.inference(image_name)
         result_image = predictor.visual(outputs[0], img_info)
         if save_result:
-            save_folder = os.path.join(
-                vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-            )
+            save_folder = os.path.join(vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time))
             os.makedirs(save_folder, exist_ok=True)
             save_file_name = os.path.join(save_folder, os.path.basename(image_name))
             logger.info("Saving detection result in {}".format(save_file_name))
@@ -177,18 +174,14 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
     fps = cap.get(cv2.CAP_PROP_FPS)
-    save_folder = os.path.join(
-        vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
-    )
+    save_folder = os.path.join(vis_folder, time.strftime("%Y_%m_%d_%H_%M_%S", current_time))
     os.makedirs(save_folder, exist_ok=True)
     if args.demo == "video":
         save_path = os.path.join(save_folder, os.path.basename(args.path))
     else:
         save_path = os.path.join(save_folder, "camera.mp4")
     logger.info(f"video save_path is {save_path}")
-    vid_writer = cv2.VideoWriter(
-        save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
-    )
+    vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height)))
     while True:
         ret_val, frame = cap.read()
         if ret_val:

@@ -2,17 +2,16 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import unittest
-
 import torch
 from torch import nn
 
-from yolox.utils import adjust_status, freeze_module
 from yolox.exp import get_exp
+from yolox.utils import adjust_status, freeze_module
+
+import unittest
 
 
 class TestModelUtils(unittest.TestCase):
-
     def setUp(self):
         self.model: nn.Module = get_exp(exp_name="yolox-s").get_model()
 
@@ -31,10 +30,7 @@ class TestModelUtils(unittest.TestCase):
                 model(data)
             model_state = model.state_dict()
             self.assertTrue(len(model_state) == len(prev_state))
-            self.assertEqual(
-                result,
-                all([torch.allclose(v, model_state[k]) for k, v in prev_state.items()])
-            )
+            self.assertEqual(result, all([torch.allclose(v, model_state[k]) for k, v in prev_state.items()]))
 
         # test recurrsive context case
         prev_state = model.state_dict()
@@ -43,9 +39,7 @@ class TestModelUtils(unittest.TestCase):
                 model(data)
         model_state = model.state_dict()
         self.assertTrue(len(model_state) == len(prev_state))
-        self.assertTrue(
-            all([torch.allclose(v, model_state[k]) for k, v in prev_state.items()])
-        )
+        self.assertTrue(all([torch.allclose(v, model_state[k]) for k, v in prev_state.items()]))
 
     def test_model_effect_adjust_status(self):
         # test context effect
@@ -82,9 +76,7 @@ class TestModelUtils(unittest.TestCase):
         freeze_module(model[1])
         model(data)
         after_states = model[1].state_dict()
-        self.assertTrue(
-            all([torch.allclose(v, after_states[k]) for k, v in before_states.items()])
-        )
+        self.assertTrue(all([torch.allclose(v, after_states[k]) for k, v in before_states.items()]))
 
         # yolox test
         self.model.train()

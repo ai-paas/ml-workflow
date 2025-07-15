@@ -5,8 +5,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import sys
-from datetime import timedelta
 from loguru import logger
 
 import torch
@@ -14,6 +12,9 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import yolox.utils.dist as comm
+
+import sys
+from datetime import timedelta
 
 __all__ = ["launch"]
 
@@ -62,9 +63,7 @@ def launch(
         # TODO prctl in spawned processes
 
         if dist_url == "auto":
-            assert (
-                num_machines == 1
-            ), "dist_url=auto cannot work with distributed training."
+            assert num_machines == 1, "dist_url=auto cannot work with distributed training."
             port = _find_free_port()
             dist_url = f"tcp://127.0.0.1:{port}"
 
@@ -74,8 +73,7 @@ def launch(
         # To use numpy memmap for caching image into RAM, we have to use fork method
         if cache:
             assert sys.platform != "win32", (
-                "As Windows platform doesn't support fork method, "
-                "do not add --cache in your training command."
+                "As Windows platform doesn't support fork method, " "do not add --cache in your training command."
             )
             start_method = "fork"
 
@@ -109,9 +107,7 @@ def _distributed_worker(
     args,
     timeout=DEFAULT_TIMEOUT,
 ):
-    assert (
-        torch.cuda.is_available()
-    ), "cuda is not available. Please check your installation."
+    assert torch.cuda.is_available(), "cuda is not available. Please check your installation."
     global_rank = machine_rank * num_gpus_per_machine + local_rank
     logger.info("Rank {} initialization finished.".format(global_rank))
     try:
@@ -130,9 +126,7 @@ def _distributed_worker(
     assert comm._LOCAL_PROCESS_GROUP is None
     num_machines = world_size // num_gpus_per_machine
     for i in range(num_machines):
-        ranks_on_i = list(
-            range(i * num_gpus_per_machine, (i + 1) * num_gpus_per_machine)
-        )
+        ranks_on_i = list(range(i * num_gpus_per_machine, (i + 1) * num_gpus_per_machine))
         pg = dist.new_group(ranks_on_i)
         if i == machine_rank:
             comm._LOCAL_PROCESS_GROUP = pg

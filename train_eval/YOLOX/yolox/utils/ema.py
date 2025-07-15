@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-import math
-from copy import deepcopy
-
 import torch
 import torch.nn as nn
+
+import math
+from copy import deepcopy
 
 __all__ = ["ModelEMA", "is_parallel"]
 
@@ -51,9 +51,7 @@ class ModelEMA:
             self.updates += 1
             d = self.decay(self.updates)
 
-            msd = (
-                model.module.state_dict() if is_parallel(model) else model.state_dict()
-            )  # model state_dict
+            msd = model.module.state_dict() if is_parallel(model) else model.state_dict()  # model state_dict
             for k, v in self.ema.state_dict().items():
                 if v.dtype.is_floating_point:
                     v *= d

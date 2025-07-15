@@ -2,12 +2,12 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import pickle
-from collections import OrderedDict
-
 import torch
 from torch import distributed as dist
 from torch import nn
+
+import pickle
+from collections import OrderedDict
 
 from .dist import _get_global_gloo_group, get_world_size
 
@@ -87,10 +87,7 @@ def all_reduce(py_dict, op="sum", group=None):
     if op == "mean":
         flatten_tensor /= world_size
 
-    split_tensors = [
-        x.reshape(shape)
-        for x, shape in zip(torch.split(flatten_tensor, tensor_numels), tensor_shapes)
-    ]
+    split_tensors = [x.reshape(shape) for x, shape in zip(torch.split(flatten_tensor, tensor_numels), tensor_shapes)]
     return OrderedDict({k: v for k, v in zip(py_key, split_tensors)})
 
 

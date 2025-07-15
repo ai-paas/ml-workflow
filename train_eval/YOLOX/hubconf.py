@@ -18,5 +18,5 @@ from yolox.models import (  # isort:skip  # noqa: F401, E402
     yolox_l,
     yolox_x,
     yolov3,
-    yolox_custom
+    yolox_custom,
 )

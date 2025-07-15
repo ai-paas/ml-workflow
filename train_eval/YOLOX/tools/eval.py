@@ -2,10 +2,6 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import argparse
-import os
-import random
-import warnings
 from loguru import logger
 
 import torch
@@ -14,14 +10,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from yolox.core import launch
 from yolox.exp import get_exp
-from yolox.utils import (
-    configure_module,
-    configure_nccl,
-    fuse_model,
-    get_local_rank,
-    get_model_info,
-    setup_logger
-)
+from yolox.utils import configure_module, configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
+
+import argparse
+import os
+import random
+import warnings
 
 
 def make_parser():
@@ -30,9 +24,7 @@ def make_parser():
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
 
     # distributed
-    parser.add_argument(
-        "--dist-backend", default="nccl", type=str, help="distributed backend"
-    )
+    parser.add_argument("--dist-backend", default="nccl", type=str, help="distributed backend")
     parser.add_argument(
         "--dist-url",
         default=None,
@@ -40,15 +32,9 @@ def make_parser():
         help="url used to set up distributed training",
     )
     parser.add_argument("-b", "--batch-size", type=int, default=64, help="batch size")
-    parser.add_argument(
-        "-d", "--devices", default=None, type=int, help="device for training"
-    )
-    parser.add_argument(
-        "--num_machines", default=1, type=int, help="num of node for training"
-    )
-    parser.add_argument(
-        "--machine_rank", default=0, type=int, help="node rank for multi-node training"
-    )
+    parser.add_argument("-d", "--devices", default=None, type=int, help="device for training")
+    parser.add_argument("--num_machines", default=1, type=int, help="num of node for training")
+    parser.add_argument("--machine_rank", default=0, type=int, help="node rank for multi-node training")
     parser.add_argument(
         "-f",
         "--exp_file",
@@ -118,9 +104,7 @@ def main(exp, args, num_gpu):
         random.seed(args.seed)
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
-        warnings.warn(
-            "You have chosen to seed testing. This will turn on the CUDNN deterministic setting, "
-        )
+        warnings.warn("You have chosen to seed testing. This will turn on the CUDNN deterministic setting, ")
 
     is_distributed = num_gpu > 1
 
@@ -180,9 +164,7 @@ def main(exp, args, num_gpu):
             not args.fuse and not is_distributed and args.batch_size == 1
         ), "TensorRT model is not support model fusing and distributed inferencing!"
         trt_file = os.path.join(file_name, "model_trt.pth")
-        assert os.path.exists(
-            trt_file
-        ), "TensorRT model is not found!\n Run tools/trt.py first!"
+        assert os.path.exists(trt_file), "TensorRT model is not found!\n Run tools/trt.py first!"
         model.head.decode_in_inference = False
         decoder = model.head.decode_outputs
     else:
@@ -190,9 +172,7 @@ def main(exp, args, num_gpu):
         decoder = None
 
     # start evaluate
-    *_, summary = evaluator.evaluate(
-        model, is_distributed, args.fp16, trt_file, decoder, exp.test_size
-    )
+    *_, summary = evaluator.evaluate(model, is_distributed, args.fp16, trt_file, decoder, exp.test_size)
     logger.info("\n" + summary)
 
 

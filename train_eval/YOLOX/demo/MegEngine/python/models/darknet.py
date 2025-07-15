@@ -12,7 +12,11 @@ class Darknet(M.Module):
     depth2blocks = {21: [1, 2, 2, 1], 53: [2, 8, 8, 4]}
 
     def __init__(
-        self, depth, in_channels=3, stem_out_channels=32, out_features=("dark3", "dark4", "dark5"),
+        self,
+        depth,
+        in_channels=3,
+        stem_out_channels=32,
+        out_features=("dark3", "dark4", "dark5"),
     ):
         """
         Args:
@@ -50,7 +54,7 @@ class Darknet(M.Module):
         "starts with conv layer then has `num_blocks` `ResLayer`"
         return [
             BaseConv(in_channels, in_channels * 2, ksize=3, stride=stride, act="lrelu"),
-            *[(ResLayer(in_channels * 2)) for _ in range(num_blocks)]
+            *[(ResLayer(in_channels * 2)) for _ in range(num_blocks)],
         ]
 
     def make_spp_block(self, filters_list, in_filters):
@@ -58,11 +62,7 @@ class Darknet(M.Module):
             *[
                 BaseConv(in_filters, filters_list[0], 1, stride=1, act="lrelu"),
                 BaseConv(filters_list[0], filters_list[1], 3, stride=1, act="lrelu"),
-                SPPBottleneck(
-                    in_channels=filters_list[1],
-                    out_channels=filters_list[0],
-                    activation="lrelu"
-                ),
+                SPPBottleneck(in_channels=filters_list[1], out_channels=filters_list[0], activation="lrelu"),
                 BaseConv(filters_list[0], filters_list[1], 3, stride=1, act="lrelu"),
                 BaseConv(filters_list[1], filters_list[0], 1, stride=1, act="lrelu"),
             ]
@@ -85,11 +85,13 @@ class Darknet(M.Module):
 
 
 class CSPDarknet(M.Module):
-
     def __init__(
-        self, dep_mul, wid_mul,
+        self,
+        dep_mul,
+        wid_mul,
         out_features=("dark3", "dark4", "dark5"),
-        depthwise=False, act="silu",
+        depthwise=False,
+        act="silu",
     ):
         super().__init__()
         assert out_features, "please provide output features of Darknet"
@@ -105,18 +107,18 @@ class CSPDarknet(M.Module):
         # dark2
         self.dark2 = M.Sequential(
             Conv(base_channels, base_channels * 2, 3, 2, act=act),
-            CSPLayer(
-                base_channels * 2, base_channels * 2,
-                n=base_depth, depthwise=depthwise, act=act
-            ),
+            CSPLayer(base_channels * 2, base_channels * 2, n=base_depth, depthwise=depthwise, act=act),
         )
 
         # dark3
         self.dark3 = M.Sequential(
             Conv(base_channels * 2, base_channels * 4, 3, 2, act=act),
             CSPLayer(
-                base_channels * 4, base_channels * 4,
-                n=base_depth * 3, depthwise=depthwise, act=act,
+                base_channels * 4,
+                base_channels * 4,
+                n=base_depth * 3,
+                depthwise=depthwise,
+                act=act,
             ),
         )
 
@@ -124,8 +126,11 @@ class CSPDarknet(M.Module):
         self.dark4 = M.Sequential(
             Conv(base_channels * 4, base_channels * 8, 3, 2, act=act),
             CSPLayer(
-                base_channels * 8, base_channels * 8,
-                n=base_depth * 3, depthwise=depthwise, act=act,
+                base_channels * 8,
+                base_channels * 8,
+                n=base_depth * 3,
+                depthwise=depthwise,
+                act=act,
             ),
         )
 
@@ -134,8 +139,12 @@ class CSPDarknet(M.Module):
             Conv(base_channels * 8, base_channels * 16, 3, 2, act=act),
             SPPBottleneck(base_channels * 16, base_channels * 16, activation=act),
             CSPLayer(
-                base_channels * 16, base_channels * 16, n=base_depth,
-                shortcut=False, depthwise=depthwise, act=act,
+                base_channels * 16,
+                base_channels * 16,
+                n=base_depth,
+                shortcut=False,
+                depthwise=depthwise,
+                act=act,
             ),
         )
 

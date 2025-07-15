@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import os
-import random
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+
+import os
+import random
 
 from .base_exp import BaseExp
 
@@ -109,7 +109,7 @@ class Exp(BaseExp):
         self.nmsthre = 0.65
 
     def get_model(self):
-        from yolox.models import YOLOX, YOLOPAFPN, YOLOXHead
+        from yolox.models import YOLOPAFPN, YOLOX, YOLOXHead
 
         def init_yolo(M):
             for m in M.modules():
@@ -143,11 +143,7 @@ class Exp(BaseExp):
             data_dir=self.data_dir,
             json_file=self.train_ann,
             img_size=self.input_size,
-            preproc=TrainTransform(
-                max_labels=50,
-                flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob
-            ),
+            preproc=TrainTransform(max_labels=50, flip_prob=self.flip_prob, hsv_prob=self.hsv_prob),
             cache=cache,
             cache_type=cache_type,
         )
@@ -163,11 +159,11 @@ class Exp(BaseExp):
                 None: Do not use cache, in this case cache_data is also None.
         """
         from yolox.data import (
-            TrainTransform,
-            YoloBatchSampler,
             DataLoader,
             InfiniteSampler,
             MosaicDetection,
+            TrainTransform,
+            YoloBatchSampler,
             worker_init_reset_seed,
         )
         from yolox.utils import wait_for_the_master
@@ -176,18 +172,14 @@ class Exp(BaseExp):
         # else we will create self.dataset after launch
         if self.dataset is None:
             with wait_for_the_master():
-                assert cache_img is None, \
-                    "cache_img must be None if you didn't create self.dataset before launch"
+                assert cache_img is None, "cache_img must be None if you didn't create self.dataset before launch"
                 self.dataset = self.get_dataset(cache=False, cache_type=cache_img)
 
         self.dataset = MosaicDetection(
             dataset=self.dataset,
             mosaic=not no_aug,
             img_size=self.input_size,
-            preproc=TrainTransform(
-                max_labels=120,
-                flip_prob=self.flip_prob,
-                hsv_prob=self.hsv_prob),
+            preproc=TrainTransform(max_labels=120, flip_prob=self.flip_prob, hsv_prob=self.hsv_prob),
             degrees=self.degrees,
             translate=self.translate,
             mosaic_scale=self.mosaic_scale,
@@ -226,7 +218,7 @@ class Exp(BaseExp):
 
         if rank == 0:
             size_factor = self.input_size[1] * 1.0 / self.input_size[0]
-            if not hasattr(self, 'random_size'):
+            if not hasattr(self, "random_size"):
                 min_size = int(self.input_size[0] / 32) - self.multiscale_range
                 max_size = int(self.input_size[0] / 32) + self.multiscale_range
                 self.random_size = (min_size, max_size)
@@ -246,9 +238,7 @@ class Exp(BaseExp):
         scale_y = tsize[0] / self.input_size[0]
         scale_x = tsize[1] / self.input_size[1]
         if scale_x != 1 or scale_y != 1:
-            inputs = nn.functional.interpolate(
-                inputs, size=tsize, mode="bilinear", align_corners=False
-            )
+            inputs = nn.functional.interpolate(inputs, size=tsize, mode="bilinear", align_corners=False)
             targets[..., 1::2] = targets[..., 1::2] * scale_x
             targets[..., 2::2] = targets[..., 2::2] * scale_y
         return inputs, targets
@@ -270,12 +260,8 @@ class Exp(BaseExp):
                 elif hasattr(v, "weight") and isinstance(v.weight, nn.Parameter):
                     pg1.append(v.weight)  # apply decay
 
-            optimizer = torch.optim.SGD(
-                pg0, lr=lr, momentum=self.momentum, nesterov=True
-            )
-            optimizer.add_param_group(
-                {"params": pg1, "weight_decay": self.weight_decay}
-            )  # add pg1 with weight_decay
+            optimizer = torch.optim.SGD(pg0, lr=lr, momentum=self.momentum, nesterov=True)
+            optimizer.add_param_group({"params": pg1, "weight_decay": self.weight_decay})  # add pg1 with weight_decay
             optimizer.add_param_group({"params": pg2})
             self.optimizer = optimizer
 
@@ -298,6 +284,7 @@ class Exp(BaseExp):
 
     def get_eval_dataset(self, **kwargs):
         from yolox.data import COCODataset, ValTransform
+
         testdev = kwargs.get("testdev", False)
         legacy = kwargs.get("legacy", False)
 
@@ -314,9 +301,7 @@ class Exp(BaseExp):
 
         if is_distributed:
             batch_size = batch_size // dist.get_world_size()
-            sampler = torch.utils.data.distributed.DistributedSampler(
-                valdataset, shuffle=False
-            )
+            sampler = torch.utils.data.distributed.DistributedSampler(valdataset, shuffle=False)
         else:
             sampler = torch.utils.data.SequentialSampler(valdataset)
 
@@ -334,8 +319,7 @@ class Exp(BaseExp):
         from yolox.evaluators import COCOEvaluator
 
         return COCOEvaluator(
-            dataloader=self.get_eval_loader(batch_size, is_distributed,
-                                            testdev=testdev, legacy=legacy),
+            dataloader=self.get_eval_loader(batch_size, is_distributed, testdev=testdev, legacy=legacy),
             img_size=self.test_size,
             confthre=self.test_conf,
             nmsthre=self.nmsthre,
@@ -345,6 +329,7 @@ class Exp(BaseExp):
 
     def get_trainer(self, args):
         from yolox.core import Trainer
+
         trainer = Trainer(self, args)
         # NOTE: trainer shouldn't be an attribute of exp object
         return trainer

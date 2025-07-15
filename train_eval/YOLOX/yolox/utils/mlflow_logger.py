@@ -13,31 +13,35 @@ For changing default logging Behaviour you can change mlflow environment variabl
 For more information, please refer to:
 https://mlflow.org/docs/latest/introduction/index.html
 """
-import importlib.metadata
-import importlib.util
-import json
-import os
-from collections.abc import MutableMapping
-import packaging.version
 from loguru import logger
 
 import torch
 
 from yolox.utils import is_main_process
 
+import importlib.metadata
+import importlib.util
+import json
+import os
+import packaging.version
+from collections.abc import MutableMapping
+
 
 class MlflowLogger:
     """
     Main Mlflow logging class to log hyperparameters, metrics, and models to Mlflow.
     """
+
     def __init__(self):
         if not self.is_required_library_available():
             raise RuntimeError(
                 "MLflow Logging requires mlflow and python-dotenv to be installed. "
-                "Run `pip install mlflow python-dotenv`.")
+                "Run `pip install mlflow python-dotenv`."
+            )
 
         import mlflow
         from dotenv import find_dotenv, load_dotenv
+
         load_dotenv(find_dotenv())
         self.ENV_VARS_TRUE_VALUES = {"1", "ON", "YES", "TRUE"}
         self._MAX_PARAM_VAL_LENGTH = mlflow.utils.validation.MAX_PARAM_VAL_LENGTH
@@ -154,26 +158,24 @@ class MlflowLogger:
         """
         self._tracking_uri = os.getenv("MLFLOW_TRACKING_URI", None)
         self._experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", None)
-        self._mlflow_log_artifacts = os.getenv("YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS",
-                                               "False").upper() in self.ENV_VARS_TRUE_VALUES
-        self._mlflow_log_model_per_n_epochs = int(os.getenv(
-            "YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS", 30))
+        self._mlflow_log_artifacts = (
+            os.getenv("YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS", "False").upper() in self.ENV_VARS_TRUE_VALUES
+        )
+        self._mlflow_log_model_per_n_epochs = int(os.getenv("YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS", 30))
 
-        self._mlflow_log_nth_epoch_models = os.getenv("YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS",
-                                                      "False").upper() in self.ENV_VARS_TRUE_VALUES
+        self._mlflow_log_nth_epoch_models = (
+            os.getenv("YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS", "False").upper() in self.ENV_VARS_TRUE_VALUES
+        )
         self.run_name = os.getenv("YOLOX_MLFLOW_RUN_NAME", None)
         self.run_name = None if len(self.run_name.strip()) == 0 else self.run_name
-        self._flatten_params = os.getenv("YOLOX_MLFLOW_FLATTEN_PARAMS",
-                                         "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
-        self._nested_run = os.getenv("MLFLOW_NESTED_RUN",
-                                     "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
+        self._flatten_params = os.getenv("YOLOX_MLFLOW_FLATTEN_PARAMS", "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
+        self._nested_run = os.getenv("MLFLOW_NESTED_RUN", "FALSE").upper() in self.ENV_VARS_TRUE_VALUES
         self._run_id = os.getenv("MLFLOW_RUN_ID", None)
 
         # "synchronous" flag is only available with mlflow version >= 2.8.0
         # https://github.com/mlflow/mlflow/pull/9705
         # https://github.com/mlflow/mlflow/releases/tag/v2.8.0
-        self._async_log = packaging.version.parse(
-            self._ml_flow.__version__) >= packaging.version.parse("2.8.0")
+        self._async_log = packaging.version.parse(self._ml_flow.__version__) >= packaging.version.parse("2.8.0")
 
         logger.debug(
             f"MLflow experiment_name={self._experiment_name}, run_name={self.run_name}, "
@@ -197,13 +199,21 @@ class MlflowLogger:
                     # Use of set_experiment() ensure that Experiment is created if not exists
                     self._ml_flow.set_experiment(self._experiment_name)
                 self._ml_flow.start_run(run_name=self.run_name, nested=self._nested_run)
-                logger.debug(
-                    f"MLflow run started with run_id={self._ml_flow.active_run().info.run_id}")
+                logger.debug(f"MLflow run started with run_id={self._ml_flow.active_run().info.run_id}")
                 self._auto_end_run = True
                 self._initialized = True
             # filters these params from args
-            keys = ['experiment_name', 'batch_size', 'exp_file', 'resume', 'ckpt', 'start_epoch',
-                    'num_machines', 'fp16', 'logger']
+            keys = [
+                "experiment_name",
+                "batch_size",
+                "exp_file",
+                "resume",
+                "ckpt",
+                "start_epoch",
+                "num_machines",
+                "fp16",
+                "logger",
+            ]
             combined_dict = {k: v for k, v in vars(args).items() if k in keys}
             if exp is not None:
                 exp_dict = self.convert_exp_todict(exp)
@@ -234,10 +244,10 @@ class MlflowLogger:
                 if len(str(value)) > self._MAX_PARAM_VAL_LENGTH:
                     logger.warning(
                         f'Trainer is attempting to log a value of "{value}" for key "{name}" as a '
-                        f'parameter. MLflow\'s log_param() only accepts values no longer than 250 '
-                        f'characters so we dropped this attribute. You can use '
-                        f'`MLFLOW_FLATTEN_PARAMS` environment variable to flatten the parameters '
-                        f'and avoid this message.'
+                        f"parameter. MLflow's log_param() only accepts values no longer than 250 "
+                        f"characters so we dropped this attribute. You can use "
+                        f"`MLFLOW_FLATTEN_PARAMS` environment variable to flatten the parameters "
+                        f"and avoid this message."
                     )
                     del params_dict[name]
             # MLflow cannot log more than 100 values in one go, so we have to split it
@@ -245,13 +255,10 @@ class MlflowLogger:
             for i in range(0, len(combined_dict_items), self._MAX_PARAMS_TAGS_PER_BATCH):
                 if self._async_log:
                     self._ml_flow.log_params(
-                        dict(combined_dict_items[i: i + self._MAX_PARAMS_TAGS_PER_BATCH]),
-                        synchronous=False
+                        dict(combined_dict_items[i : i + self._MAX_PARAMS_TAGS_PER_BATCH]), synchronous=False
                     )
                 else:
-                    self._ml_flow.log_params(
-                        dict(combined_dict_items[i: i + self._MAX_PARAMS_TAGS_PER_BATCH])
-                    )
+                    self._ml_flow.log_params(dict(combined_dict_items[i : i + self._MAX_PARAMS_TAGS_PER_BATCH]))
 
     def convert_exp_todict(self, exp):
         """
@@ -264,11 +271,19 @@ class MlflowLogger:
             exp_dict(dict): dict of experiment parameters
 
         """
-        filter_keys = ['max_epoch', 'num_classes', 'input_size', 'output_dir',
-                       'data_dir', 'train_ann', 'val_ann', 'test_ann',
-                       'test_conf', 'nmsthre']
-        exp_dict = {k: v for k, v in exp.__dict__.items()
-                    if not k.startswith("__") and k in filter_keys}
+        filter_keys = [
+            "max_epoch",
+            "num_classes",
+            "input_size",
+            "output_dir",
+            "data_dir",
+            "train_ann",
+            "val_ann",
+            "test_ann",
+            "test_conf",
+            "nmsthre",
+        ]
+        exp_dict = {k: v for k, v in exp.__dict__.items() if not k.startswith("__") and k in filter_keys}
         return exp_dict
 
     def on_log(self, args, exp, step, logs):
@@ -298,7 +313,7 @@ class MlflowLogger:
                     logger.warning(
                         f'Trainer is attempting to log a value of "{v}" of type {type(v)} for key '
                         f'"{k}" as a metric. MLflow log_metric() only accepts float and int types '
-                        f'so we dropped this attribute.'
+                        f"so we dropped this attribute."
                     )
 
             if self._async_log:
@@ -395,13 +410,14 @@ class MlflowLogger:
         if is_main_process() and self._initialized and self._mlflow_log_artifacts:
             logger.info(
                 f"Logging checkpoint {artifact_path} artifacts in mlflow artifact path: "
-                f"{mlflow_out_dir}. This may take time.")
+                f"{mlflow_out_dir}. This may take time."
+            )
             if os.path.exists(artifact_path):
                 self._ml_flow.pyfunc.log_model(
                     mlflow_out_dir,
                     artifacts={"model_path": artifact_path},
                     python_model=self._ml_flow.pyfunc.PythonModel(),
-                    metadata=metadata
+                    metadata=metadata,
                 )
 
     def __del__(self):
@@ -413,8 +429,8 @@ class MlflowLogger:
         Return: None
         """
         if (
-                self._auto_end_run
-                and callable(getattr(self._ml_flow, "active_run", None))
-                and self._ml_flow.active_run() is not None
+            self._auto_end_run
+            and callable(getattr(self._ml_flow, "active_run", None))
+            and self._ml_flow.active_run() is not None
         ):
             self._ml_flow.end_run()

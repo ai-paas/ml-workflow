@@ -2,11 +2,12 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import os
-import subprocess
 from loguru import logger
 
 import cv2
+
+import os
+import subprocess
 
 from .dist import get_world_size, is_main_process
 
@@ -42,9 +43,7 @@ def configure_omp(num_threads=1):
                 "\n***************************************************************\n"
                 "We set `OMP_NUM_THREADS` for each process to {} to speed up.\n"
                 "please further tune the variable for optimal performance.\n"
-                "***************************************************************".format(
-                    os.environ["OMP_NUM_THREADS"]
-                )
+                "***************************************************************".format(os.environ["OMP_NUM_THREADS"])
             )
 
 

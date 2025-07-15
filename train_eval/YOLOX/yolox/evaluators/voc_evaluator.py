@@ -2,10 +2,6 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import sys
-import tempfile
-import time
-from collections import ChainMap
 from loguru import logger
 from tqdm import tqdm
 
@@ -14,6 +10,11 @@ import numpy as np
 import torch
 
 from yolox.utils import gather, is_main_process, postprocess, synchronize, time_synchronized
+
+import sys
+import tempfile
+import time
+from collections import ChainMap
 
 
 class VOCEvaluator:
@@ -39,8 +40,14 @@ class VOCEvaluator:
         self.num_images = len(dataloader.dataset)
 
     def evaluate(
-        self, model, distributed=False, half=False, trt_file=None,
-        decoder=None, test_size=None, return_outputs=False,
+        self,
+        model,
+        distributed=False,
+        half=False,
+        trt_file=None,
+        decoder=None,
+        test_size=None,
+        return_outputs=False,
     ):
         """
         VOC average precision (AP) Evaluation. Iterate inference on the test dataset
@@ -96,9 +103,7 @@ class VOCEvaluator:
                     infer_end = time_synchronized()
                     inference_time += infer_end - start
 
-                outputs = postprocess(
-                    outputs, self.num_classes, self.confthre, self.nmsthre
-                )
+                outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
                 if is_time_record:
                     nms_end = time_synchronized()
                     nms_time += nms_end - infer_end
@@ -161,9 +166,7 @@ class VOCEvaluator:
         )
         info = time_info + "\n"
 
-        all_boxes = [
-            [[] for _ in range(self.num_images)] for _ in range(self.num_classes)
-        ]
+        all_boxes = [[[] for _ in range(self.num_images)] for _ in range(self.num_classes)]
         for img_num in range(self.num_images):
             bboxes, cls, scores = data_dict[img_num]
             if bboxes is None:

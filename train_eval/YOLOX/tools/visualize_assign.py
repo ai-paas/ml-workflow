@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import os
-import sys
-import random
-import time
-import warnings
 from loguru import logger
 
 import torch
 import torch.backends.cudnn as cudnn
 
-from yolox.exp import Exp, get_exp
 from yolox.core import Trainer
-from yolox.utils import configure_module, configure_omp
+from yolox.exp import Exp, get_exp
 from yolox.tools.train import make_parser
+from yolox.utils import configure_module, configure_omp
+
+import os
+import random
+import sys
+import time
+import warnings
 
 
 class AssignVisualizer(Trainer):
-
     def __init__(self, exp: Exp, args):
         super().__init__(exp, args)
         self.batch_cnt = 0

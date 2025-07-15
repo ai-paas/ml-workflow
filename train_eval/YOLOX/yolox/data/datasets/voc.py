@@ -6,22 +6,21 @@
 # Copyright (c) Ellis Brown, Max deGroot.
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import os
-import os.path
-import pickle
-import xml.etree.ElementTree as ET
-
 import cv2
 import numpy as np
 
 from yolox.evaluators.voc_eval import voc_eval
+
+import os
+import os.path
+import pickle
+import xml.etree.ElementTree as ET
 
 from .datasets_wrapper import CacheDataset, cache_read_img
 from .voc_classes import VOC_CLASSES
 
 
 class AnnotationTransform(object):
-
     """Transforms a VOC annotation into a Tensor of bbox coords and label index
     Initilized with a dictionary lookup of classnames to indexes
 
@@ -35,9 +34,7 @@ class AnnotationTransform(object):
     """
 
     def __init__(self, class_to_ind=None, keep_difficult=True):
-        self.class_to_ind = class_to_ind or dict(
-            zip(VOC_CLASSES, range(len(VOC_CLASSES)))
-        )
+        self.class_to_ind = class_to_ind or dict(zip(VOC_CLASSES, range(len(VOC_CLASSES))))
         self.keep_difficult = keep_difficult
 
     def __call__(self, target):
@@ -80,7 +77,6 @@ class AnnotationTransform(object):
 
 
 class VOCDetection(CacheDataset):
-
     """
     VOC Detection Dataset Object
 
@@ -118,26 +114,19 @@ class VOCDetection(CacheDataset):
         self._annopath = os.path.join("%s", "Annotations", "%s.xml")
         self._imgpath = os.path.join("%s", "JPEGImages", "%s.jpg")
         self._classes = VOC_CLASSES
-        self.cats = [
-            {"id": idx, "name": val} for idx, val in enumerate(VOC_CLASSES)
-        ]
+        self.cats = [{"id": idx, "name": val} for idx, val in enumerate(VOC_CLASSES)]
         self.class_ids = list(range(len(VOC_CLASSES)))
         self.ids = list()
-        for (year, name) in image_sets:
+        for year, name in image_sets:
             self._year = year
             rootpath = os.path.join(self.root, "VOC" + year)
-            for line in open(
-                os.path.join(rootpath, "ImageSets", "Main", name + ".txt")
-            ):
+            for line in open(os.path.join(rootpath, "ImageSets", "Main", name + ".txt")):
                 self.ids.append((rootpath, line.strip()))
         self.num_imgs = len(self.ids)
 
         self.annotations = self._load_coco_annotations()
 
-        path_filename = [
-            (self._imgpath % self.ids[i]).split(self.root + "/")[1]
-            for i in range(self.num_imgs)
-        ]
+        path_filename = [(self._imgpath % self.ids[i]).split(self.root + "/")[1] for i in range(self.num_imgs)]
         super().__init__(
             input_dimension=img_size,
             num_imgs=self.num_imgs,
@@ -145,7 +134,7 @@ class VOCDetection(CacheDataset):
             cache_dir_name=f"cache_{self.name}",
             path_filename=path_filename,
             cache=cache,
-            cache_type=cache_type
+            cache_type=cache_type,
         )
 
     def __len__(self):
@@ -228,9 +217,7 @@ class VOCDetection(CacheDataset):
         all_boxes[class][image] = [] or np.array of shape #dets x 5
         """
         self._write_voc_results_file(all_boxes)
-        IouTh = np.linspace(
-            0.5, 0.95, int(np.round((0.95 - 0.5) / 0.05)) + 1, endpoint=True
-        )
+        IouTh = np.linspace(0.5, 0.95, int(np.round((0.95 - 0.5) / 0.05)) + 1, endpoint=True)
         mAPs = []
         for iou in IouTh:
             mAP = self._do_python_eval(output_dir, iou)
@@ -280,9 +267,7 @@ class VOCDetection(CacheDataset):
         name = self.image_set[0][1]
         annopath = os.path.join(rootpath, "Annotations", "{:s}.xml")
         imagesetfile = os.path.join(rootpath, "ImageSets", "Main", name + ".txt")
-        cachedir = os.path.join(
-            self.root, "annotations_cache", "VOC" + self._year, name
-        )
+        cachedir = os.path.join(self.root, "annotations_cache", "VOC" + self._year, name)
         if not os.path.exists(cachedir):
             os.makedirs(cachedir)
         aps = []
@@ -292,7 +277,6 @@ class VOCDetection(CacheDataset):
         if output_dir is not None and not os.path.isdir(output_dir):
             os.mkdir(output_dir)
         for i, cls in enumerate(VOC_CLASSES):
-
             if cls == "__background__":
                 continue
 
