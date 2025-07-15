@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-from loguru import logger
-
-import torch
-import torch.backends.cudnn as cudnn
-
-from yolox.core import Trainer
-from yolox.exp import Exp, get_exp
-from yolox.tools.train import make_parser
-from yolox.utils import configure_module, configure_omp
-
 import os
 import random
 import sys
 import time
 import warnings
+
+import torch
+import torch.backends.cudnn as cudnn
+from loguru import logger
+from yolox.core import Trainer
+from yolox.exp import Exp, get_exp
+from yolox.tools.train import make_parser
+from yolox.utils import configure_module, configure_omp
 
 
 class AssignVisualizer(Trainer):

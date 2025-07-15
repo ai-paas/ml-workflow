@@ -2,12 +2,12 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import torch
-import torch.nn as nn
-
 import contextlib
 from copy import deepcopy
 from typing import Sequence
+
+import torch
+import torch.nn as nn
 
 __all__ = [
     "fuse_conv_and_bn",

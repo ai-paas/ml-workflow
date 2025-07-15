@@ -2,14 +2,12 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-from loguru import logger
-
-import torch
-
-from yolox.exp import get_exp
-
 import argparse
 import os
+
+import torch
+from loguru import logger
+from yolox.exp import get_exp
 
 
 def make_parser():

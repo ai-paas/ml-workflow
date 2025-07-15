@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import cv2
-import numpy as np
-
 import os
 import random
+
+import cv2
+import numpy as np
 
 __all__ = ["mkdir", "nms", "multiclass_nms", "demo_postprocess", "random_color", "visualize_assign"]
 

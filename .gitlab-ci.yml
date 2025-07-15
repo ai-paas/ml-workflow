@@ -2,21 +2,21 @@ stages:
   - lint
   - sonar
 
-lint_isort:
-  stage: lint
-  script:
-    - pip install isort
-    - isort --check --profile black --line-length 120 .  # black 프로필 추가
-  only:
-    - merge_requests
-    - master
-    - dev
-
 lint_black:
   stage: lint
   script:
     - pip install black
     - black --check --line-length 120 .
+  only:
+    - merge_requests
+    - master
+    - dev
+
+lint_isort:
+  stage: lint
+  script:
+    - pip install isort
+    - isort --check --profile black --line-length 120 .  # black 프로필 추가
   only:
     - merge_requests
     - master

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-import torch
-import torch.nn as nn
-
 import math
 from copy import deepcopy
+
+import torch
+import torch.nn as nn
 
 __all__ = ["ModelEMA", "is_parallel"]
 

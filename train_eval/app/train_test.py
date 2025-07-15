@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from loguru import logger
-
 import argparse
 import os
 import subprocess
@@ -10,6 +8,8 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Optional
+
+from loguru import logger
 
 # 현재 파일의 절대 경로 얻기
 current_path = Path(__file__).absolute().parent

@@ -2,13 +2,12 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
+import unittest
+
 import torch
 from torch import nn
-
 from yolox.exp import get_exp
 from yolox.utils import adjust_status, freeze_module
-
-import unittest
 
 
 class TestModelUtils(unittest.TestCase):

@@ -4,11 +4,11 @@
 # Copyright (c) Bharath Hariharan.
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import numpy as np
-
 import os
 import pickle
 import xml.etree.ElementTree as ET
+
+import numpy as np
 
 
 def parse_rec(filename):

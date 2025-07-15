@@ -2,17 +2,6 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-from loguru import logger
-from tabulate import tabulate
-from tqdm import tqdm
-
-import numpy as np
-
-import torch
-
-from yolox.data.datasets import COCO_CLASSES
-from yolox.utils import gather, is_main_process, postprocess, synchronize, time_synchronized, xyxy2xywh
-
 import contextlib
 import io
 import itertools
@@ -20,6 +9,14 @@ import json
 import tempfile
 import time
 from collections import ChainMap, defaultdict
+
+import numpy as np
+import torch
+from loguru import logger
+from tabulate import tabulate
+from tqdm import tqdm
+from yolox.data.datasets import COCO_CLASSES
+from yolox.utils import gather, is_main_process, postprocess, synchronize, time_synchronized, xyxy2xywh
 
 
 def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):

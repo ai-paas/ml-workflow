@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from loguru import logger
-
-import torch
-
-from yolox.core import launch
-from yolox.exp import get_exp
-from yolox.utils import configure_nccl, configure_omp, get_num_devices
-
 import argparse
 import json
 import logging
-import mlflow
 import os
-import requests
 import traceback
-from mlflow import MlflowClient
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+import mlflow
+import requests
+import torch
+from loguru import logger
+from mlflow import MlflowClient
+from yolox.core import launch
+from yolox.exp import get_exp
+from yolox.utils import configure_nccl, configure_omp, get_num_devices
 
 # 현재 파일의 절대 경로 얻기
 current_path = Path(__file__).absolute().parent

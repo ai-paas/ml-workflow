@@ -91,7 +91,6 @@ class JitOp:
 
     def jit_load(self, verbose=True):
         from loguru import logger
-
         from torch.utils.cpp_extension import load
 
         try:

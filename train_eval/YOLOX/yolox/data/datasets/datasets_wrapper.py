@@ -2,15 +2,6 @@
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-import psutil
-from loguru import logger
-from tqdm import tqdm
-
-import numpy as np
-
-from torch.utils.data.dataset import ConcatDataset as torchConcatDataset
-from torch.utils.data.dataset import Dataset as torchDataset
-
 import bisect
 import copy
 import os
@@ -18,6 +9,13 @@ import random
 from abc import ABCMeta, abstractmethod
 from functools import partial, wraps
 from multiprocessing.pool import ThreadPool
+
+import numpy as np
+import psutil
+from loguru import logger
+from torch.utils.data.dataset import ConcatDataset as torchConcatDataset
+from torch.utils.data.dataset import Dataset as torchDataset
+from tqdm import tqdm
 
 
 class ConcatDataset(torchConcatDataset):

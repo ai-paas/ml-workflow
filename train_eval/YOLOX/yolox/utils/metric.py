@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Megvii Inc. All rights reserved.
-import psutil
-
-import numpy as np
-
-import torch
-
 import functools
 import os
 import time
 from collections import defaultdict, deque
+
+import numpy as np
+import psutil
+import torch
 
 __all__ = ["AverageMeter", "MeterBuffer", "get_total_and_free_memory_in_Mb", "occupy_mem", "gpu_mem_usage", "mem_usage"]
 

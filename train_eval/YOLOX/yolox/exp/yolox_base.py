@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii Inc. All rights reserved.
 
+import os
+import random
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-
-import os
-import random
 
 from .base_exp import BaseExp
 

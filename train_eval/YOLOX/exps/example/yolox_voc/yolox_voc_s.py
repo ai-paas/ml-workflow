@@ -1,8 +1,8 @@
 # encoding: utf-8
+import os
+
 from yolox.data import get_yolox_datadir
 from yolox.exp import Exp as MyExp
-
-import os
 
 
 class Exp(MyExp):

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
 
-from loguru import logger
+import datetime
+import os
+import time
 
 import torch
+from loguru import logger
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-
 from yolox.data import DataPrefetcher
 from yolox.exp import Exp
 from yolox.utils import (
@@ -29,10 +31,6 @@ from yolox.utils import (
     setup_logger,
     synchronize,
 )
-
-import datetime
-import os
-import time
 
 
 class Trainer:

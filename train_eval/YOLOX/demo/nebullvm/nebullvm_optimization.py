@@ -1,9 +1,8 @@
-import torch
-
-from yolox.exp import get_exp
-
 import time
+
+import torch
 from nebullvm.api.functions import optimize_model  # Install DL compilers
+from yolox.exp import get_exp
 
 # Get YOLO model
 exp = get_exp(None, "yolox-s")  # select model name
