@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 
 class ModelRepository(CRUDBase[Model, ModelBaseSchema, ModelBaseSchema]):
-    pass
+    def get_by_name(self, db: Session, name: str) -> Model:
+        return db.query(self.model).filter(self.model.name == name).first()
 
 
 class ModelRegistryRepository(CRUDBase[ModelRegistry, ModelRegistryBaseSchema, ModelRegistryBaseSchema]):

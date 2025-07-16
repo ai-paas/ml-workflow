@@ -12,6 +12,9 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     provider_id: int
     type_id: int
     format_id: int
+    learning_enable_yn: bool
+    version: int
+    subversion: int
 
 
 class ModelReadSchema(TimeStampSchemaMixin):

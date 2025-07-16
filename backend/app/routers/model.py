@@ -3,7 +3,6 @@ import logging
 from datetime import datetime
 from typing import Annotated, Optional
 
-from albumentations import Any
 from config.db.connect import SessionDepends
 from config.settings import get_settings
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -29,9 +28,9 @@ def create_model(
     db: Session = SessionDepends,
     name: Annotated[str, Form()],
     description: Annotated[str, Form()],
-    model_provider_id: Annotated[int, Form()],
-    model_type_id: Annotated[int, Form()],
-    model_format_id: Annotated[int, Form()],
+    provider_id: Annotated[int, Form()],
+    type_id: Annotated[int, Form()],
+    format_id: Annotated[int, Form()],
     model_registry_schema: Annotated[str, Form()] = None,
     file: Annotated[UploadFile, File()] = None,
     current_user: UserSchema = Depends(get_current_user),
@@ -70,16 +69,19 @@ def create_model(
     model = ModelBaseSchema(
         name=name,
         description=description,
-        model_provider_id=model_provider_id,
-        model_type_id=model_type_id,
-        model_format_id=model_format_id,
+        provider_id=provider_id,
+        type_id=type_id,
+        format_id=format_id,
+        learning_enable_yn=True if "yolo" in name.lower() else False,
+        version=1,
+        subversion=1,
     )
     custom_model_provider = ModelProviderService.get_by_name(db, "custom")
     huggingface_model_provider = ModelProviderService.get_by_name(db, "huggingface")
     try:
-        if model_provider_id == huggingface_model_provider.id:  # HuggingFace
+        if provider_id == huggingface_model_provider.id:  # HuggingFace
             result = HuggingFaceModelService().create(db, model_schema=model)
-        elif model_provider_id == custom_model_provider.id:  # Custom
+        elif provider_id == custom_model_provider.id:  # Custom
             result = CustomModelService().create(
                 db, model_schema=model, model_registry_schema=model_registry_schema, file=file
             )

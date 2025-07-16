@@ -1,3 +1,5 @@
+from typing import Optional
+
 from db.models.base import BaseModel, TimestampCreateMixin, TimestampMixin, TimestampUpdateMixin
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,10 +14,10 @@ class Model(BaseModel, TimestampMixin):
     provider_id: Mapped[int] = mapped_column(ForeignKey("model_provider.id"))
     type_id: Mapped[int] = mapped_column(ForeignKey("model_type.id"))
     format_id: Mapped[int] = mapped_column(ForeignKey("model_format.id"))
-    parent_model_id: Mapped[int] = mapped_column(ForeignKey("model.id"))
-    learning_enable_yn: Mapped[str] = mapped_column(Boolean, nullable=False)
-    train_image_registry_id: Mapped[int] = mapped_column(ForeignKey("train_image_registry.id"))
-    inference_image_registry_id: Mapped[int] = mapped_column(ForeignKey("inference_image_registry.id"))
+    parent_model_id: Mapped[int] = mapped_column(ForeignKey("model.id"), nullable=True)
+    learning_enable_yn: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    train_image_registry_id: Mapped[int] = mapped_column(ForeignKey("train_image_registry.id"), nullable=True)
+    inference_image_registry_id: Mapped[int] = mapped_column(ForeignKey("inference_image_registry.id"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     subversion: Mapped[int] = mapped_column(Integer, nullable=False)
 

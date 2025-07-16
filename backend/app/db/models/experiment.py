@@ -37,5 +37,5 @@ class Hyperparamter(BaseModel):
     experiment_id: Mapped[int] = mapped_column(ForeignKey("experiment.id"))
     hyperparameter_type_id: Mapped[int] = mapped_column(ForeignKey("hyperparameter_type.id"))
 
-    reference_model: Mapped["Model"] = relationship("Model")
+    experiment: Mapped["ExperimentModel"] = relationship("ExperimentModel")
     hyperparameter_type: Mapped["HyperparameterType"] = relationship("HyperparameterType")
