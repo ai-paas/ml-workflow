@@ -3,24 +3,24 @@ from __future__ import annotations
 from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 
 
-class ModelBaseSchema(BaseModel):
+class ModelBaseSchema(TimeStampSchemaMixin):
     name: str
     description: str
-    model_provider_id: int
-    model_type_id: int
-    model_format_id: int
+    provider_id: int
+    type_id: int
+    format_id: int
 
 
-class ModelReadSchema(BaseModel):
+class ModelReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
     description: str
-    model_provider: ModelProviderReadSchema
-    model_type: ModelTypeReadSchema
-    model_format: ModelFormatReadSchema
-    model_registry: ModelRegistryReadSchema
+    provider_info: ModelProviderReadSchema
+    type_info: ModelTypeReadSchema
+    format_info: ModelFormatReadSchema
 
     class Config:
         from_attributes = True
@@ -36,7 +36,6 @@ class ModelProviderReadSchema(BaseModel):
     id: int
     name: str
     description: str
-    link: str
 
     class Config:
         from_attributes = True
@@ -60,28 +59,22 @@ class ModelFormatReadSchema(BaseModel):
         from_attributes = True
 
 
-class ModelRegistryRequestSchema(BaseModel):
-    run_id: str
-    versions: int
+class ModelRegistryRequestSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
-    model_uri: str
+    uri: str
 
 
-class ModelRegistryBaseSchema(BaseModel):
-    run_id: str
-    version: int
+class ModelRegistryBaseSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
-    model_uri: str
-    model_id: int
+    uri: str
+    reference_model_id: int
 
 
-class ModelRegistryReadSchema(BaseModel):
+class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
     id: int
-    run_id: str
-    version: int
     artifact_path: str
-    model_uri: str
-    model_id: int
+    uri: str
+    reference_model_id: int
 
     class Config:
         from_attributes = True

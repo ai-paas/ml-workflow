@@ -48,3 +48,10 @@ pipenv shell
 - predictor
 - train_eval
 에 대해서는 별도로 pipenv 가상환경을 구축하여 기동테스트 진행요망.
+
+## 데이터 초기화
+
+RDB 데이터를 초기화 합니다.
+root directory로 이동하여 아래 예시 명령어 처럼 실행
+ex)
+`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v1`

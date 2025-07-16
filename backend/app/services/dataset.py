@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any
 
 import pandas as pd
+from core.kubeflow.s3.s3_manager import S3Manager
 from fastapi import UploadFile
 from repos.dataset import dataset_registry_repository, dataset_repository
 from schemas.dataset import DatasetBaseSchema, DatasetReadSchema, DatasetRegistryBaseSchema, DatasetRegistryReadSchema
@@ -37,44 +38,26 @@ class DatasetService:
         #     result = ""
         return ""
 
-    def create(self, db: Session, *, dataset_schema: DatasetBaseSchema, file: list[UploadFile]):
-        # TODO: csv나 기타 여러 문서 타입을 지원해야 할것
-        # with tempfile.NamedTemporaryFile(delete=True, suffix=".csv") as temp_file:
-        #     temp_file.write(file.file.read())
-        #     temp_file_path = temp_file.name
-        #     run_id, artifact_uri, dataset_version, dataset_uri = DatasetRegistry().log_dataset(
-        #         dataset_dir=temp_file_path, dataset_name=dataset_schema.name)
+    def create(self, db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile):
+        # S3 매니저 인스턴스 가져오기
+        s3_manager = S3Manager.get_instance()
 
-        # 1. 임시 디렉토리 생성
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # 임시 파일 경로 지정
-            temp_train_path = os.path.join(temp_dir, file[0].filename)
-            temp_test_path = os.path.join(temp_dir, file[1].filename)
-            # 2. UploadFile 내용을 임시 파일로 저장
-            with open(temp_train_path, "wb") as temp_file:
-                content = file[0].file.read()
-                temp_file.write(content)
-            with open(temp_test_path, "wb") as temp_file:
-                content = file[1].file.read()
-                temp_file.write(content)
-            run_id, version, artifact_uri, dataset_uri = DatasetRegistry().log_dataset(
-                dataset_dir=temp_dir,
-                dataset_name=dataset_schema.name,
-                # dataset={"train": pd.read_csv(file[0].file),
-                #          "test": pd.read_csv(file[1].file)}
-            )
+        # 파일을 객체 스토리지에 업로드
+        s3_file_url = s3_manager.upload_file(file)
 
-        dataset_obj = dataset_repository.create(db, obj_in=dataset_schema)
+        # 데이터셋 객체 생성
+        dataset_obj = dataset_repository.create(db, obj_in=obj_in)
         dataset_id = dataset_obj.id
+
+        # 데이터셋 레지스트리 정보 생성
         dataset_registry_repository.create(
             db,
             obj_in=DatasetRegistryBaseSchema(
-                run_id=run_id,
-                artifact_path=artifact_uri,
-                dataset_uri=dataset_uri,
+                artifact_path=s3_file_url,
+                uri=s3_file_url,
                 dataset_id=dataset_id,
-                version=version,
             ),
         )
+
         db.commit()
         return dataset_repository.get(db, dataset_id)
