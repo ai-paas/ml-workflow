@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.security import APIKeyHeader
 from schemas.model import ModelBaseSchema, ModelReadSchema, ModelRegistryRequestSchema
 from schemas.user import UserSchema
-from services.model import CustomModelService, HuggingFaceModelService, ModelService
+from services.model import CustomModelService, HuggingFaceModelService, ModelProviderService, ModelService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -74,11 +74,12 @@ def create_model(
         model_type_id=model_type_id,
         model_format_id=model_format_id,
     )
-
+    custom_model_provider = ModelProviderService.get_by_name(db, "custom")
+    huggingface_model_provider = ModelProviderService.get_by_name(db, "huggingface")
     try:
-        if model_provider_id == 1:  # HuggingFace
+        if model_provider_id == huggingface_model_provider.id:  # HuggingFace
             result = HuggingFaceModelService().create(db, model_schema=model)
-        elif model_provider_id == 3:  # Custom
+        elif model_provider_id == custom_model_provider.id:  # Custom
             result = CustomModelService().create(
                 db, model_schema=model, model_registry_schema=model_registry_schema, file=file
             )

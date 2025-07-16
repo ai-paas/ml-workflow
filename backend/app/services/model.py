@@ -3,9 +3,10 @@ from enum import Enum
 from typing import Any
 
 from fastapi import UploadFile
-from repos.model import model_registry_repository, model_repository
+from repos.model import model_provider_repository, model_registry_repository, model_repository
 from schemas.model import (
     ModelBaseSchema,
+    ModelProviderReadSchema,
     ModelReadSchema,
     ModelRegistryBaseSchema,
     ModelRegistryReadSchema,
@@ -164,3 +165,9 @@ class CustomModelService:
         )
         db.commit()
         return model_repository.get(db, model_id)
+
+
+class ModelProviderService:
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> ModelProviderReadSchema:
+        return model_provider_repository.get_by_name(db, name)

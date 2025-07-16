@@ -26,6 +26,12 @@ class ModelReadSchema(BaseModel):
         from_attributes = True
 
 
+class ModelProviderCreateUpdateSchema(BaseModel):
+    name: str
+    description: str
+    link: str
+
+
 class ModelProviderReadSchema(BaseModel):
     id: int
     name: str
