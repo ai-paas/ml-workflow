@@ -24,6 +24,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema
+    registry: ModelRegistryReadSchema
 
     class Config:
         from_attributes = True

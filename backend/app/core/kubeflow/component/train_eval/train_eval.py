@@ -11,6 +11,7 @@ from kfp import dsl, local
 def container_train_eval_component(
     train_name: str,
     model_name: str,
+    model_artifact_path: str,
     model_uri: str,
     mlflow_tracking_uri: str,
     mlflow_s3_endpoint_url: str,
@@ -30,6 +31,7 @@ def container_train_eval_component(
         args=[
             f"--train_name={train_name}",
             f"--model_name={model_name}",
+            f"--model_artifact_path={model_artifact_path}",
             f"--model_uri={model_uri}",
             f"--mlflow_tracking_uri={mlflow_tracking_uri}",
             f"--mlflow_experiment_name={mlflow_experiment_name}",

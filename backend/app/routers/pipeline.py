@@ -56,6 +56,7 @@ def container_train(
         mlflow_s3_endpoint_url: str,
         aws_access_key_id: str,
         aws_secret_access_key: str,
+        model_artifact_path: str,
         model_name: str,
         dataset_artifact_uri: str,
         mlflow_experiment_name: str,
@@ -69,6 +70,7 @@ def container_train(
             mlflow_s3_endpoint_url=mlflow_s3_endpoint_url,
             aws_access_key_id=aws_access_key_id,
             aws_secret_access_key=aws_secret_access_key,
+            model_artifact_path=model_artifact_path,
             model_uri=model_uri,
             train_name=train_name,
             model_name=model_name,
@@ -83,7 +85,7 @@ def container_train(
     try:
         db_model = ModelService().get(db, model_id)
         model_uri = db_model.model_registry.model_uri
-
+        model_artifact_path = db_model.model_registry.artifact_path
         model_name = db_model.name
         dataset_model = DatasetService().get(db, dataset_id)
         dataset_artifact_uri = os.path.join(
@@ -103,6 +105,7 @@ def container_train(
             enable_caching=False,  # overrides the above disabling of caching
             experiment_id=experiment.experiment_id,
             arguments={
+                "model_artifact_path": model_artifact_path,
                 "model_uri": model_uri,
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
                 "model_name": model_name,

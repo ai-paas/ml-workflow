@@ -1,8 +1,10 @@
 import os
 import tempfile
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
+import mlflow.data
 import pandas as pd
 from core.kubeflow.s3.s3_manager import S3Manager
 from fastapi import UploadFile
@@ -13,18 +15,23 @@ from utils.dataset_registry import DatasetRegistry
 
 
 class DatasetService:
-    def get(self, db: Session, pk: int) -> DatasetReadSchema:
+    @staticmethod
+    def get(db: Session, pk: int) -> DatasetReadSchema:
         return dataset_repository.get(db, pk)
 
-    def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[DatasetReadSchema]:
+    @staticmethod
+    def get_multi(db: Session, skip: int = 0, limit: int = 100) -> list[DatasetReadSchema]:
         return dataset_repository.get_multi(db, skip=skip, limit=limit)
 
-    def get_all(self, db: Session) -> list[DatasetReadSchema]:
+    @staticmethod
+    def get_all(db: Session) -> list[DatasetReadSchema]:
         return dataset_repository.get_all(db)
 
-    def update(self, db: Session, db_obj, obj_in):
+    @staticmethod
+    def update(db: Session, db_obj, obj_in):
         return dataset_repository.update(db, db_obj=db_obj, obj_in=obj_in)
 
+    @staticmethod
     def validate(self, data_format_id: int, dataset_uri: str) -> str:
         # TODO : validate pipeline 추가 필요
         # if data_format_id == 1:
@@ -38,12 +45,15 @@ class DatasetService:
         #     result = ""
         return ""
 
-    def create(self, db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile):
-        # S3 매니저 인스턴스 가져오기
-        s3_manager = S3Manager.get_instance()
+    @staticmethod
+    def create(db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile):
+        # UploadFile의 file 속성은 SpooledTemporaryFile 객체이므로
+        # 직접 임시 파일 경로를 사용할 수 있습니다
 
-        # 파일을 객체 스토리지에 업로드
-        s3_file_url = s3_manager.upload_file(file)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_file_path = Path(temp_dir) / file.filename
+            temp_file_path.write_bytes(file.file.read())
+            run_id, dataset_version, artifact_uri, dataset_uri = DatasetRegistry().log_dataset(temp_dir, obj_in.name)
 
         # 데이터셋 객체 생성
         dataset_obj = dataset_repository.create(db, obj_in=obj_in)
@@ -53,11 +63,25 @@ class DatasetService:
         dataset_registry_repository.create(
             db,
             obj_in=DatasetRegistryBaseSchema(
-                artifact_path=s3_file_url,
-                uri=s3_file_url,
+                artifact_path=artifact_uri,
+                uri=dataset_uri,
                 dataset_id=dataset_id,
             ),
         )
 
         db.commit()
         return dataset_repository.get(db, dataset_id)
+
+
+class DatasetRegistryService:
+    @staticmethod
+    def create(db: Session, *, obj_in: DatasetRegistryBaseSchema):
+        return dataset_registry_repository.create(db, obj_in=obj_in)
+
+    @staticmethod
+    def get(db: Session, pk: int) -> DatasetRegistryReadSchema:
+        return dataset_registry_repository.get(db, pk)
+
+    @staticmethod
+    def get_multi(db: Session, skip: int = 0, limit: int = 100) -> list[DatasetRegistryReadSchema]:
+        return dataset_registry_repository.get_multi(db, skip=skip, limit=limit)

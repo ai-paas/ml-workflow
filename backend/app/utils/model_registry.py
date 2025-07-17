@@ -1,8 +1,12 @@
 import os
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import mlflow
+import torch
 from config.settings import get_settings
+from fastapi import UploadFile
 from mlflow import MlflowClient
 from mlflow.pyfunc import PythonModel
 
@@ -102,13 +106,13 @@ class ModelRegistry:
             model_uri = f"models:/{model_name}/{model_version}"
         return run_id, artifact_uri, model_version, model_uri
 
-    def log_yolox(self, model_data: dict[str, Any], model_name: str):
+    def log_pytorch(self, model: torch.nn.Module, model_name: str):
         """
         YOLOX 모델을 Model Repository에 저장하는 method
         실제 torch.nn.Module이 없으므로 pyfunc로 YoloxWrapper 사용
 
         * Params
-            * model_data: YOLOX 모델 데이터 (repo_id, local_path, model_files, device, model_state_dict 등)
+            * model: YOLOX 모델 데이터 (repo_id, local_path, model_files, device, model_state_dict 등)
             * model_name: 저장할 모델 이름
         """
         mlflow.set_experiment(self._experiment_name)
@@ -116,19 +120,12 @@ class ModelRegistry:
             model_name = model_name.replace("/", "-")
 
             # YOLOX 모델을 pyfunc로 저장 (YoloxWrapper 사용)
-            mlflow.pyfunc.log_model(
-                artifact_path=model_name, python_model=YoloxWrapper(model_data), registered_model_name=model_name
-            )
+            mlflow.pytorch.log_model(artifact_path=model_name, pytorch_model=model, registered_model_name=model_name)
 
             # 메타데이터 저장
             mlflow.log_params(
                 {
-                    "repo_id": model_data["repo_id"],
-                    "device": model_data["device"],
                     "framework": "pytorch",
-                    "architecture": "yolox",
-                    "local_path": model_data.get("local_path", ""),
-                    "model_files": str(model_data.get("model_files", [])),
                 }
             )
 
@@ -155,6 +152,18 @@ class ModelRegistry:
             model_version = self._client.get_latest_versions(name=model_name, stages=["None"])[0].version
             model_uri = f"models:/{model_name}/{model_version}"
         return run_id, artifact_uri, model_version, model_uri
+
+    def log_artifact(self, file: UploadFile, model_name: str):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_file_path = Path(temp_dir) / file.filename
+            with open(temp_file_path, "wb") as temp_file:
+                temp_file.write(file.file.read())
+
+            with mlflow.start_run(run_name=model_name) as run:
+                mlflow.log_artifacts(local_dir=temp_dir, artifact_path=model_name)
+                artifact_uri = mlflow.get_artifact_uri(model_name)
+                run_id = run.info.run_id
+                return run_id, artifact_uri
 
 
 class ModelLoader:

@@ -40,7 +40,7 @@ class MODEL_NAME(Enum):
         return self.value
 
 
-def is_yolox_model(repo_id: str) -> bool:
+def is_yolox_remote_model(repo_id: str) -> bool:
     """
     repository ID가 YOLOX 모델인지 확인하는 함수
 
@@ -60,6 +60,10 @@ def is_yolox_model(repo_id: str) -> bool:
     ]
 
     return repo_id in yolox_patterns or repo_id.startswith("kadirnar/yolox_")
+
+
+def is_yolox_local_model(model_name: str) -> bool:
+    return "yolox" in model_name.lower()
 
 
 class ModelService:
@@ -100,11 +104,7 @@ class HuggingFaceModelService:
         repo_id = model_schema.name
         transformers_db_obj = model_repository.get_by_name(db, "transformers")
         # YOLOX 모델인지 먼저 확인 (transformers가 아닌 별도 처리)
-        if is_yolox_model(repo_id):
-            model = self.load_yolox(repo_id)
-            run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_yolox(model, repo_id)
-        # TODO: model_format_id로부터 get 하도록 변경
-        elif model_format_id == transformers_db_obj.id:  # transformers
+        if model_format_id == transformers_db_obj.id:  # transformers
             model = self.load_transformers(repo_id)
             run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_transformers(model, repo_id)
         else:
@@ -245,27 +245,30 @@ class CustomModelService:
     ):
         # 이미 pipeline에서 등록한 mlflow model_registry가 있다면 mlflow에 등록하지 말것
         if not model_registry_schema:
-            # TODO: gguf나 transformers 등의 여러 타입을 지원해야할것
             contents = file.file.read()
             model_name = model_schema.name
             with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as temp_file:
                 temp_file.write(contents)
                 temp_file_path = temp_file.name
-                model = Llama(model_path=temp_file_path)
-                run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_llamacpp(model, model_name)
+                if is_yolox_local_model(model_name):
+                    # model = torch.load(temp_file_path, map_location="cpu")
+                    run_id, artifact_uri = ModelRegistry().log_artifact(file, model_name)
+                    model_uri = ""
+                else:
+                    # TODO: gguf나 transformers 등의 여러 타입을 지원해야할것
+                    model = Llama(model_path=temp_file_path)
+                    run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_llamacpp(model, model_name)
         else:
-            run_id = model_registry_schema.run_id
+            # run_id = model_registry_schema.run_id
             artifact_uri = model_registry_schema.artifact_path
-            model_version = model_registry_schema.versions
+            # model_version = model_registry_schema.versions
             model_uri = model_registry_schema.model_uri
 
         model_obj = model_repository.create(db, obj_in=model_schema)
         model_id = model_obj.id
         model_registry_repository.create(
             db,
-            obj_in=ModelRegistryBaseSchema(
-                run_id=run_id, version=model_version, artifact_path=artifact_uri, model_uri=model_uri, model_id=model_id
-            ),
+            obj_in=ModelRegistryBaseSchema(artifact_path=artifact_uri, uri=model_uri, reference_model_id=model_id),
         )
         db.commit()
         return model_repository.get(db, model_id)

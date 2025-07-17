@@ -52,7 +52,7 @@ class DatasetRegistry:
             #     python_model=PyfuncDatasetWrapper(dataset), registered_model_name=dataset_name)
 
             run_id = run.info.run_id
-            artifact_uri = mlflow.get_artifact_uri()
+            artifact_uri = mlflow.get_artifact_uri(dataset_name)
 
             # TODO: 이후 버전관리 기능을 적용할시 변경 필요
             dataset_version = 1
