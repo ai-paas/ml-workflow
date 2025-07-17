@@ -11,8 +11,8 @@ services:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
-    shm_size: '4g'  # shared memory 크기 설정 (YOLOX 학습 시 필요)
+              capabilities: [ gpu ]
+    shm_size: '4g' # shared memory 크기 설정 (YOLOX 학습 시 필요)
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -20,6 +20,8 @@ services:
     environment:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - PYTHONPATH=/app
+    env_file:
+      - .env
     runtime: nvidia
     networks:
       - mlworkflow
@@ -28,4 +30,4 @@ services:
 
 networks:
   mlworkflow:
-    driver: bridge 
+    driver: bridge

@@ -273,24 +273,9 @@ class CustomTrainModel:
             with mlflow.start_run(run_name=train_model_name) as run:
                 # 모델 아티팩트 로깅
                 # 여기에 모델 저장 로직 구현
-                mlflow.log_artifact(str(self.output_dir), "model")
 
-                # 모델 등록
-                model_uri = f"runs:/{run.info.run_id}/model"
-                mlflow.register_model(model_uri, train_model_name)
 
-                # TODO: metadata 저장 로직 주석 해제되면 같이 해제
-                # run_id = run.info.run_id
-                # artifact_uri = mlflow.get_artifact_uri()
-
-                # 최신 모델 버전 가져오기
-                model_version = self.client.get_latest_versions(name=train_model_name, stages=["None"])[0].version
-                logger.info(f"모델 버전: {model_version}")
-
-                # TODO: metadata 저장 로직 주석 해제되면 같이 해제
-                # train_model_uri = f"models:/{train_model_name}/{model_version}"
-
-                logger.info(f"모델 등록 완료: {train_model_name} (버전: {model_version})")
+                logger.info(f"모델 등록 완료: {train_model_name}")
 
                 # TODO : model_학습 제대로 완료되면 같이 테스트
                 # 메타데이터 저장
