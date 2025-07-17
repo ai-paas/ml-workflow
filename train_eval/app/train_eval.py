@@ -99,31 +99,67 @@ class CustomTrainModel:
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
 
             # 모델 아티팩트 다운로드
-            self.model_artifacts = mlflow.artifacts.download_artifacts(artifact_uri=self.model_artifact_path)
-            logger.info(f"모델 아티팩트: {self.model_artifacts}")
+            self.model_artifacts_dir = mlflow.artifacts.download_artifacts(artifact_uri=self.model_artifact_path)
+            logger.info(f"모델 아티팩트: {self.model_artifacts_dir}")
 
             # 데이터셋 아티팩트 다운로드 및 압축 해제
-            self.dataset_artifacts = mlflow.artifacts.download_artifacts(artifact_uri=self.dataset_artifact_uri)
-            logger.info(f"데이터셋 아티팩트 다운로드: {self.dataset_artifacts}")
+            self.dataset_artifacts_dir = mlflow.artifacts.download_artifacts(artifact_uri=self.dataset_artifact_uri)
+            logger.info(f"데이터셋 아티팩트 다운로드: {self.dataset_artifacts_dir}")
 
             # 데이터셋 zip 파일 찾기
-            dataset_zip = list(Path(self.dataset_artifacts).glob("*.zip"))[0]
+            dataset_zip = list(Path(self.dataset_artifacts_dir).glob("*.zip"))[0]
 
             # 압축 해제할 디렉토리 생성 (dataset_artifacts 경로에 _extracted 추가)
-            extract_dir = Path(self.dataset_artifacts + "_extracted")
+            extract_dir = Path(self.dataset_artifacts_dir) /  "COCO"
             extract_dir.mkdir(parents=True, exist_ok=True)
 
             # zip 파일 압축 해제
             import zipfile
 
             with zipfile.ZipFile(dataset_zip, "r") as zip_ref:
-                logger.info(f"데이터셋 압축 해제 시작: {dataset_zip} -> {extract_dir}")
-                zip_ref.extractall(extract_dir)
-                logger.info("데이터셋 압축 해제 완료")
+                # zip 파일 내의 모든 파일 경로 가져오기
+                all_files = zip_ref.namelist()
+                
+                # 최상위 폴더 찾기
+                top_level_dirs = set()
+                for file_path in all_files:
+                    parts = file_path.split('/')
+                    if len(parts) > 1:  # 폴더가 있는 경우
+                        top_level_dirs.add(parts[0])
+                
+                # 최상위 폴더가 하나인지 확인
+                if len(top_level_dirs) == 1:
+                    top_dir = top_level_dirs.pop()
+                    # 최상위 폴더가 annotations, train, val로 시작하는지 확인
+                    if not (top_dir.startswith('annotations') or 
+                        top_dir.startswith('train') or 
+                        top_dir.startswith('val')):
+                        logger.info(f"최상위 폴더 '{top_dir}' 제거 후 압축 해제")
+                        # 파일 압축 해제
+                        for file_info in zip_ref.filelist:
+                            file_path = file_info.filename
+                            if file_path.startswith(f"{top_dir}/"):  # 최상위 폴더로 시작하는 경우
+                                # 최상위 폴더명 제거
+                                extracted_path = file_path.split('/', 1)[1]
+                                if extracted_path and not file_info.filename.endswith('/'):  # 폴더가 아닌 파일만 처리
+                                    # 파일 추출
+                                    source = zip_ref.read(file_info)
+                                    target = extract_dir / extracted_path
+                                    # 필요한 경우 부모 디렉토리 생성
+                                    target.parent.mkdir(parents=True, exist_ok=True)
+                                    # 파일 저장
+                                    target.write_bytes(source)
+                    else:
+                        logger.info(f"최상위 폴더 '{top_dir}'가 예약된 이름으로 시작하므로 그대로 압축 해제")
+                        zip_ref.extractall(extract_dir)
+                else:
+                    logger.info("최상위 폴더가 여러 개이거나 없으므로 그대로 압축 해제")
+                    zip_ref.extractall(extract_dir)
+
+            logger.info("데이터셋 압축 해제 완료")
 
             # 압축 해제된 경로를 dataset_artifacts로 업데이트
-            self.dataset_artifacts = str(extract_dir)
-            logger.info(f"최종 데이터셋 경로: {self.dataset_artifacts}")
+            logger.info(f"최종 데이터셋 경로: {self.dataset_artifacts_dir}")
 
         except Exception as e:
             logger.error(f"전처리 중 오류 발생: {e}")
@@ -133,7 +169,7 @@ class CustomTrainModel:
         """모델 학습"""
         try:
             # model_artifacts에서 파일명 추출
-            model_path = Path(self.model_artifacts)
+            model_path = Path(self.model_artifacts_dir)
             model_file = list(model_path.glob("*.pth"))[0]  # .pth 파일 찾기
             model_file = model_file.absolute()  # 전체 경로로 변환
             model_name = Path(model_file).stem  # 확장자를 제외한 파일명
@@ -192,7 +228,7 @@ class CustomTrainModel:
                 # 환경 변수 설정
                 env = os.environ.copy()
                 env["CUDA_VISIBLE_DEVICES"] = "0"  # 단일 GPU 사용
-                env["YOLOX_DATADIR"] = str(self.dataset_artifacts)  # 데이터셋 경로 설정
+                env["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)  # 데이터셋 경로 설정
 
                 # YOLOX 학습 실행
                 process = subprocess.Popen(
