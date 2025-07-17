@@ -93,6 +93,7 @@ class CustomTrainModel:
         self.client = MlflowClient(tracking_uri=self.mlflow_tracking_uri)
 
     def preprocess(self):
+        """모델 학습을 위한 전처리"""
         try:
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
@@ -134,7 +135,8 @@ class CustomTrainModel:
             # model_artifacts에서 파일명 추출
             model_path = Path(self.model_artifacts)
             model_file = list(model_path.glob("*.pth"))[0]  # .pth 파일 찾기
-            model_name = model_file.stem  # 확장자를 제외한 파일명
+            model_file = model_file.absolute()  # 전체 경로로 변환
+            model_name = Path(model_file).stem  # 확장자를 제외한 파일명
 
             # YOLOX exp 매핑 딕셔너리
             exp_mapping = {
@@ -153,10 +155,12 @@ class CustomTrainModel:
                 if exp_name in model_name.lower():
                     matched_exp = exp_module.Exp()
                     # exp 모듈의 파일 경로 찾기
-                    matched_exp_path = Path(exp_module.__file__)
-                    logger.info(f"매칭된 YOLOX exp: {exp_name}")
-                    logger.info(f"exp 파일 경로: {matched_exp_path}")
-                    break
+                    file_path = exp_module.__file__
+                    if file_path is not None:
+                        matched_exp_path = Path(file_path)
+                        logger.info(f"매칭된 YOLOX exp: {exp_name}")
+                        logger.info(f"exp 파일 경로: {matched_exp_path}")
+                        break
 
             if matched_exp is None:
                 raise ValueError(f"모델 파일명 '{model_name}'과 일치하는 YOLOX exp를 찾을 수 없습니다.")
@@ -169,7 +173,7 @@ class CustomTrainModel:
             cmd = [
                 sys.executable,
                 "-m",
-                "YOLOX.tools.train",
+                "yolox.tools.train",
                 "-f",
                 str(matched_exp_path),  # exp 파일 경로
                 "-c",
@@ -201,10 +205,13 @@ class CustomTrainModel:
                 )
 
                 # 실시간 로그 출력
-                for line in iter(process.stdout.readline, ""):
-                    if line:
-                        line = line.rstrip()
-                        logger.info(line)
+                if process.stdout is not None:
+                    for line in iter(process.stdout.readline, ""):
+                        if line:
+                            line = line.rstrip()
+                            logger.info(line)
+                else:
+                    logger.warning("프로세스의 stdout이 None입니다.")
 
                 process.wait()
 

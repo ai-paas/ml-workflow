@@ -156,8 +156,7 @@ class ModelRegistry:
     def log_artifact(self, file: UploadFile, model_name: str):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file_path = Path(temp_dir) / file.filename
-            with open(temp_file_path, "wb") as temp_file:
-                temp_file.write(file.file.read())
+            temp_file_path.write_bytes(file.file.read())
 
             with mlflow.start_run(run_name=model_name) as run:
                 mlflow.log_artifacts(local_dir=temp_dir, artifact_path=model_name)
