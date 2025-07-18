@@ -5,8 +5,10 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import traceback
 import uuid
 from pathlib import Path
@@ -165,6 +167,70 @@ class CustomTrainModel:
             logger.error(f"전처리 중 오류 발생: {e}")
             raise
 
+    def get_num_classes_from_json(self, json_file_path):
+        """COCO format JSON 파일에서 클래스 수를 읽어옵니다."""
+        try:
+            with open(json_file_path, "r") as f:
+                data = json.load(f)
+                num_classes = len(data["categories"])
+                logger.info(f"데이터셋의 클래스 수: {num_classes}")
+                return num_classes
+        except Exception as e:
+            logger.error(f"JSON 파일 읽기 실패: {e}")
+            raise
+
+    def create_modified_exp_file(self, matched_exp_path, matched_exp_name, modifications=None):
+        """임시 파일을 생성하여 수정된 exp 내용을 저장합니다.
+
+        Args:
+            matched_exp_path (Path): 원본 exp 파일 경로
+            matched_exp_name (str): exp 이름
+            modifications (dict): 수정할 속성과 값의 딕셔너리 (예: {'num_classes': 71, 'max_epoch': 3})
+
+        Returns:
+            str: 수정된 exp 파일의 경로
+        """
+        try:
+            # 원본 exp 파일 읽기
+            with open(matched_exp_path, "r") as f:
+                exp_content = f.read()
+
+            # 기본 수정사항이 없으면 빈 딕셔너리 사용
+            if modifications is None:
+                modifications = {}
+
+            # __init__ 함수 찾기
+            init_pattern = r"(def __init__\(self\):.*?super\([^)]+\)\.__init__\(\))"
+
+            # 모든 수정사항을 하나의 문자열로 만들기
+            modifications_str = "\n        ".join([f"self.{attr} = {value}" for attr, value in modifications.items()])
+
+            # __init__ 함수와 super().__init__() 호출을 찾아서 그 뒤에 수정사항 추가
+            replacement = f"\\1\n        {modifications_str}"
+
+            exp_content = re.sub(init_pattern, replacement, exp_content, flags=re.DOTALL)
+
+            # 임시 파일 생성
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".py", prefix=f"{matched_exp_name}_", delete=False
+            ) as temp_file:
+                temp_file.write(exp_content)
+                logger.info(f"수정된 exp 파일 생성: {temp_file.name}")
+                logger.info(f"적용된 수정사항: {modifications}")
+                return temp_file.name
+
+        except Exception as e:
+            logger.error(f"exp 파일 수정 중 오류 발생: {e}")
+            raise
+
+    # 체크포인트 파일명에서 에포크 번호를 추출하는 함수 추가
+    def _extract_epoch_num(self, checkpoint_path: Path) -> str:
+        """체크포인트 파일명에서 에포크 번호를 추출합니다."""
+        match = re.search(r"epoch_(\d+)_ckpt\.pth", checkpoint_path.name)
+        if match:
+            return match.group(1)
+        return "unknown"
+
     def train(self):
         """모델 학습"""
         try:
@@ -204,6 +270,27 @@ class CustomTrainModel:
             if matched_exp is None:
                 raise ValueError(f"모델 파일명 '{model_name}'과 일치하는 YOLOX exp를 찾을 수 없습니다.")
 
+            # COCO 데이터셋 경로에서 annotation 파일 찾기
+            coco_path = Path(self.dataset_artifacts_dir) / "COCO"
+            annotation_file = coco_path / "annotations" / "instances_val2017.json"
+
+            if not annotation_file.exists():
+                raise FileNotFoundError(f"Annotation 파일을 찾을 수 없습니다: {annotation_file}")
+
+            # 클래스 수 가져오기
+            num_classes = self.get_num_classes_from_json(annotation_file)
+            # exp 파일 수정사항 정의
+            modifications = {
+                "num_classes": num_classes,
+                # TODO : 추후 파라미터로 추출
+                "max_epoch": 50,
+                "warmup_epochs": 5,
+            }
+            # 임시 파일 생성 및 경로 저장
+            temp_exp_path = self.create_modified_exp_file(
+                matched_exp_path=matched_exp_path, matched_exp_name=matched_exp_name, modifications=modifications
+            )
+
             # 매칭된 exp로 모델 초기화
             # self.exp = matched_exp
             # logger.info(f"YOLOX exp 초기화 완료: {type(self.exp).__name__}")
@@ -212,9 +299,9 @@ class CustomTrainModel:
             cmd = [
                 sys.executable,
                 "-m",
-                "yolox.tools.train",
+                "YOLOX.tools.train",
                 "-f",
-                str(matched_exp_path),  # exp 파일 경로
+                temp_exp_path,  # exp 파일 경로
                 "-c",
                 str(model_file),  # 체크포인트 경로
                 "-b",
@@ -235,7 +322,7 @@ class CustomTrainModel:
                     env["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
 
                     # YOLOX_outputs 디렉토리 모니터링
-                    output_dir = current_path / "YOLOX_outputs" / matched_exp_name
+                    output_dir = current_path / "YOLOX_outputs" / Path(temp_exp_path).stem
                     last_logged_files = set()
                     # YOLOX 학습 실행
                     process = subprocess.Popen(
@@ -259,20 +346,38 @@ class CustomTrainModel:
                                     # 새로운 체크포인트 파일 찾기
                                     current_files = set()
                                     if output_dir.exists():
-                                        for f in output_dir.glob("epoch_*_ckpt.pth"):
+                                        for f in output_dir.glob("*.pth"):
                                             current_files.add(f)
 
-                                    # 새로 생성된 파일 찾기
+                                    # 새로 생성된 파일이 있을 때
                                     new_files = current_files - last_logged_files
+                                    if new_files:
+                                        # 중요 체크포인트 정의
 
-                                    # 새 파일들을 MLflow에 로깅
-                                    for f in new_files:
-                                        logger.info(f"새로운 체크포인트 발견: {f}")
-                                        mlflow.log_artifact(str(f), f"checkpoints_{matched_exp_name}_{uuid.uuid4()}")
-                                        logger.info(f"체크포인트를 MLflow에 로깅했습니다: {f.name}")
+                                        important_checkpoints = {
+                                            "best_ckpt.pth": "best",
+                                            "last_epoch_ckpt.pth": "last_eval",
+                                            "last_mosaic_epoch_ckpt.pth": "last_mosaic",
+                                            "latest_ckpt.pth": "latest",
+                                        }
+
+                                        # 현재 디렉토리의 모든 중요 체크포인트 확인 및 저장
+                                        for ckpt_name, ckpt_type in important_checkpoints.items():
+                                            ckpt_path = output_dir / ckpt_name
+
+                                            if ckpt_path.exists():  # 파일이 존재하면 저장
+                                                try:
+                                                    artifact_path = f"checkpoints_{ckpt_type}"
+                                                    mlflow.log_artifact(str(ckpt_path), artifact_path)
+                                                    logger.info(f"체크포인트를 MLflow에 로깅했습니다: {ckpt_name}")
+                                                except TimeoutError:
+                                                    logger.warning(f"{ckpt_name} 체크포인트 저장을 위한 잠금 획득 실패")
+                                                except Exception as e:
+                                                    logger.error(f"{ckpt_name} 체크포인트 저장 중 오류 발생: {e}")
 
                                     # 로깅된 파일 목록 업데이트
                                     last_logged_files = current_files
+
                     else:
                         logger.warning("프로세스의 stdout이 None입니다.")
 
