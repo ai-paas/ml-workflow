@@ -72,7 +72,8 @@ def create_model(
         provider_id=provider_id,
         type_id=type_id,
         format_id=format_id,
-        learning_enable_yn=True if "yolo" in name.lower() else False,
+        # TODO : 추후 학습 가능 모델에 대한 구분 기준을 모델 이름에서 고정기준으로 변경 필요. ex) provider 또는 type에 yolo 추가.
+        learning_enable_yn="yolo" in name.lower(),
         version=1,
         subversion=1,
     )
