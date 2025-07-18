@@ -19,6 +19,13 @@ import torch
 from loguru import logger
 from mlflow import MlflowClient
 from YOLOX.exps.default import yolox_l, yolox_m, yolox_nano, yolox_s, yolox_tiny, yolox_x
+from YOLOX.tools import train
+from YOLOX.tools.train import make_parser
+from YOLOX.yolox.core.launch import launch
+from YOLOX.yolox.exp.build import get_exp
+from YOLOX.yolox.exp.yolox_base import check_exp_value
+from YOLOX.yolox.utils.dist import get_num_devices
+from YOLOX.yolox.utils.setup_env import configure_module
 
 # 현재 파일의 절대 경로 얻기
 current_path = Path(__file__).absolute().parent
@@ -291,106 +298,53 @@ class CustomTrainModel:
                 matched_exp_path=matched_exp_path, matched_exp_name=matched_exp_name, modifications=modifications
             )
 
-            # 매칭된 exp로 모델 초기화
-            # self.exp = matched_exp
-            # logger.info(f"YOLOX exp 초기화 완료: {type(self.exp).__name__}")
+            # YOLOX 환경변수 설정
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            os.environ["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
 
-            # YOLOX train.py 실행을 위한 명령어 구성
-            cmd = [
-                sys.executable,
-                "-m",
-                "YOLOX.tools.train",
-                "-f",
-                temp_exp_path,  # exp 파일 경로
-                "-c",
-                str(model_file),  # 체크포인트 경로
-                "-b",
-                "64",  # 배치 사이즈 증가
-                "-d",
-                "1",  # 기본 device 수
-                "--fp16",  # fp16 사용
-                # "-o",        # GPU 점유
-            ]
+            # with mlflow.start_run(run_name=self.train_name) as run:
+            os.environ["YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS"] = "TRUE"
+            os.environ["YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS"] = "TRUE"
+            os.environ["YOLOX_MLFLOW_RUN_NAME"] = self.train_name
+            os.environ["MLFLOW_EXPERIMENT_NAME"] = self.mlflow_experiment_name
+            os.environ["YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS"] = "20"
 
-            logger.info(f"실행 명령: {' '.join(cmd)}")
+            # train.py의 실행 코드를 직접 구현
+            configure_module()
 
-            try:
-                with mlflow.start_run(run_name=self.train_name):
-                    # YOLOX 데이터셋 경로 환경변수 설정
-                    env = os.environ.copy()
-                    env["CUDA_VISIBLE_DEVICES"] = "0"  # 단일 GPU 사용
-                    env["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
+            # 인자 파싱
+            parser = make_parser()
+            args = parser.parse_args(
+                ["-f", str(temp_exp_path), "-c", str(model_file), "-b", "64", "-d", "1", "--fp16", "--logger", "mlflow"]
+            )
 
-                    # YOLOX_outputs 디렉토리 모니터링
-                    output_dir = current_path / "YOLOX_outputs" / Path(temp_exp_path).stem
-                    last_logged_files = set()
-                    # YOLOX 학습 실행
-                    process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        universal_newlines=True,
-                        env=env,
-                        cwd=str(current_path),
-                    )
+            exp = get_exp(args.exp_file, args.name)
+            exp.merge(args.opts)
+            check_exp_value(exp)
 
-                    # 실시간 로그 출력
-                    if process.stdout is not None:
-                        for line in iter(process.stdout.readline, ""):
-                            if line:
-                                line = line.rstrip()
-                                logger.info(line)
+            if not args.experiment_name:
+                args.experiment_name = exp.exp_name
 
-                                # 체크포인트 저장 확인
-                                if "Save weights to" in line:
-                                    # 새로운 체크포인트 파일 찾기
-                                    current_files = set()
-                                    if output_dir.exists():
-                                        for f in output_dir.glob("*.pth"):
-                                            current_files.add(f)
+            num_gpu = get_num_devices() if args.devices is None else args.devices
+            assert num_gpu <= get_num_devices()
 
-                                    # 새로 생성된 파일이 있을 때
-                                    new_files = current_files - last_logged_files
-                                    if new_files:
-                                        # 중요 체크포인트 정의
+            if args.cache is not None:
+                exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
 
-                                        important_checkpoints = {
-                                            "best_ckpt.pth": "best",
-                                            "last_epoch_ckpt.pth": "last_eval",
-                                            "last_mosaic_epoch_ckpt.pth": "last_mosaic",
-                                            "latest_ckpt.pth": "latest",
-                                        }
-
-                                        # 현재 디렉토리의 모든 중요 체크포인트 확인 및 저장
-                                        for ckpt_name, ckpt_type in important_checkpoints.items():
-                                            ckpt_path = output_dir / ckpt_name
-
-                                            if ckpt_path.exists():  # 파일이 존재하면 저장
-                                                try:
-                                                    artifact_path = f"checkpoints_{ckpt_type}"
-                                                    mlflow.log_artifact(str(ckpt_path), artifact_path)
-                                                    logger.info(f"체크포인트를 MLflow에 로깅했습니다: {ckpt_name}")
-                                                except TimeoutError:
-                                                    logger.warning(f"{ckpt_name} 체크포인트 저장을 위한 잠금 획득 실패")
-                                                except Exception as e:
-                                                    logger.error(f"{ckpt_name} 체크포인트 저장 중 오류 발생: {e}")
-
-                                    # 로깅된 파일 목록 업데이트
-                                    last_logged_files = current_files
-
-                    else:
-                        logger.warning("프로세스의 stdout이 None입니다.")
-
-                    process.wait()
-
-                    if process.returncode == 0:
-                        logger.info("YOLOX 학습이 성공적으로 완료되었습니다!")
-                    else:
-                        raise RuntimeError(f"YOLOX 학습이 실패했습니다. 종료 코드: {process.returncode}")
-
-            except Exception as e:
-                logger.error(f"YOLOX 학습 실행 중 오류: {e}")
-                raise
+            dist_url = "auto" if args.dist_url is None else args.dist_url
+            with mlflow.start_run(run_name=self.train_name) as run:
+                # train.py의 launch 실행
+                os.environ["MLFLOW_NESTED_RUN"] = "TRUE"
+                os.environ["MLFLOW_RUN_ID"] = run.info.run_id
+                launch(
+                    train.main,
+                    num_gpu,
+                    args.num_machines,
+                    args.machine_rank,
+                    backend=args.dist_backend,
+                    dist_url=dist_url,
+                    args=(exp, args),
+                )
 
         except Exception as e:
             logger.error(f"학습 중 오류: {e}")

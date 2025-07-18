@@ -391,6 +391,10 @@ class MlflowLogger:
                     mlflow_out_dir = f"{args.experiment_name}/hist_epochs/{model_file_name}"
                     artifact_path = os.path.join(file_name, f"{model_file_name}.pth")
                     self.mlflow_save_pyfunc_model(metadata, artifact_path, mlflow_out_dir)
+                model_file_name = "latest_ckpt"
+                mlflow_out_dir = f"{args.experiment_name}/hist_epochs/{model_file_name}"
+                artifact_path = os.path.join(file_name, f"{model_file_name}.pth")
+                self.mlflow_save_pyfunc_model(metadata, artifact_path, mlflow_out_dir)
 
     def mlflow_save_pyfunc_model(self, metadata, artifact_path, mlflow_out_dir):
         """
