@@ -9,6 +9,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
+import uuid
 
 import mlflow
 import requests
@@ -187,9 +188,12 @@ class CustomTrainModel:
             # 파일명과 일치하는 exp 찾기
             matched_exp = None
             matched_exp_path = None
+            matched_exp_name = None  # exp 이름 저장 추가
+
             for exp_name, exp_module in exp_mapping.items():
                 if exp_name in model_name.lower():
                     matched_exp = exp_module.Exp()
+                    matched_exp_name = exp_name
                     # exp 모듈의 파일 경로 찾기
                     file_path = exp_module.__file__
                     if file_path is not None:
@@ -215,7 +219,7 @@ class CustomTrainModel:
                 "-c",
                 str(model_file),  # 체크포인트 경로
                 "-b",
-                "64",  # 기본 batch size
+                "64",  # 배치 사이즈 증가
                 "-d",
                 "1",  # 기본 device 수
                 "--fp16",  # fp16 사용
@@ -225,36 +229,61 @@ class CustomTrainModel:
             logger.info(f"실행 명령: {' '.join(cmd)}")
 
             try:
-                # 환경 변수 설정
-                env = os.environ.copy()
-                env["CUDA_VISIBLE_DEVICES"] = "0"  # 단일 GPU 사용
-                env["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)  # 데이터셋 경로 설정
+                with mlflow.start_run(run_name=self.train_name) as run:
 
-                # YOLOX 학습 실행
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=True,
-                    env=env,
-                    cwd=str(current_path),
-                )
+                    # YOLOX 데이터셋 경로 환경변수 설정
+                    env = os.environ.copy()
+                    env["CUDA_VISIBLE_DEVICES"] = "0"  # 단일 GPU 사용
+                    env["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
 
-                # 실시간 로그 출력
-                if process.stdout is not None:
-                    for line in iter(process.stdout.readline, ""):
-                        if line:
-                            line = line.rstrip()
-                            logger.info(line)
-                else:
-                    logger.warning("프로세스의 stdout이 None입니다.")
+                    # YOLOX_outputs 디렉토리 모니터링
+                    output_dir = current_path / "YOLOX_outputs" / matched_exp_name
+                    last_logged_files = set()
+                    # YOLOX 학습 실행
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        universal_newlines=True,
+                        env=env,
+                        cwd=str(current_path),
+                    )
 
-                process.wait()
+                    # 실시간 로그 출력
+                    if process.stdout is not None:
+                        for line in iter(process.stdout.readline, ""):
+                            if line:
+                                line = line.rstrip()
+                                logger.info(line)
+                                
+                                # 체크포인트 저장 확인
+                                if "Save weights to" in line:
+                                    # 새로운 체크포인트 파일 찾기
+                                    current_files = set()
+                                    if output_dir.exists():
+                                        for f in output_dir.glob("epoch_*_ckpt.pth"):
+                                            current_files.add(f)
+                                    
+                                    # 새로 생성된 파일 찾기
+                                    new_files = current_files - last_logged_files
+                                    
+                                    # 새 파일들을 MLflow에 로깅
+                                    for f in new_files:
+                                        logger.info(f"새로운 체크포인트 발견: {f}")
+                                        mlflow.log_artifact(str(f), f"checkpoints_{matched_exp_name}_{uuid.uuid4()}")
+                                        logger.info(f"체크포인트를 MLflow에 로깅했습니다: {f.name}")
+                                    
+                                    # 로깅된 파일 목록 업데이트
+                                    last_logged_files = current_files
+                    else:
+                        logger.warning("프로세스의 stdout이 None입니다.")
 
-                if process.returncode == 0:
-                    logger.info("YOLOX 학습이 성공적으로 완료되었습니다!")
-                else:
-                    raise RuntimeError(f"YOLOX 학습이 실패했습니다. 종료 코드: {process.returncode}")
+                    process.wait()
+
+                    if process.returncode == 0:
+                        logger.info("YOLOX 학습이 성공적으로 완료되었습니다!")
+                    else:
+                        raise RuntimeError(f"YOLOX 학습이 실패했습니다. 종료 코드: {process.returncode}")
 
             except Exception as e:
                 logger.error(f"YOLOX 학습 실행 중 오류: {e}")
@@ -270,12 +299,12 @@ class CustomTrainModel:
             # 모델 저장 및 등록
             train_model_name = f"{self.model_name}-custom-fine-tuned"
 
-            with mlflow.start_run(run_name=train_model_name) as run:
+            # with mlflow.start_run(run_name=train_model_name) as run:
                 # 모델 아티팩트 로깅
                 # 여기에 모델 저장 로직 구현
 
 
-                logger.info(f"모델 등록 완료: {train_model_name}")
+            logger.info(f"모델 등록 완료: {train_model_name}")
 
                 # TODO : model_학습 제대로 완료되면 같이 테스트
                 # 메타데이터 저장

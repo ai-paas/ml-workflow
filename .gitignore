@@ -3,6 +3,7 @@ backend/models/*
 .vscode
 local_outputs/
 VOCdevkit
+YOLOX_outputs
 # Created by https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,pycharm
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,visualstudiocode,pycharm
 

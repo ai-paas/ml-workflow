@@ -6,6 +6,7 @@ import contextlib
 import io
 import itertools
 import json
+import os
 import tempfile
 import time
 from collections import ChainMap, defaultdict
@@ -273,6 +274,14 @@ class COCOEvaluator:
         if len(data_dict) > 0:
             cocoGt = self.dataloader.dataset.coco
             # TODO: since pycocotools can't process dict in py36, write data to json file.
+            cocoGt.dataset["info"] = {
+                "name": "yolox_testdev_2017",
+                "description": "COCO 2017 test-dev",
+                "url": "https://cocodataset.org",
+                "version": "1.0",
+                "year": 2017,
+                "contributor": "COCO Consortium",
+            }
             if self.testdev:
                 json.dump(data_dict, open("./yolox_testdev_2017.json", "w"))
                 cocoDt = cocoGt.loadRes("./yolox_testdev_2017.json")
