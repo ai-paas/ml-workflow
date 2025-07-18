@@ -109,8 +109,6 @@ class ModelRegistry:
     def log_pytorch(self, model: torch.nn.Module, model_name: str):
         """
         YOLOX 모델을 Model Repository에 저장하는 method
-        실제 torch.nn.Module이 없으므로 pyfunc로 YoloxWrapper 사용
-
         * Params
             * model: YOLOX 모델 데이터 (repo_id, local_path, model_files, device, model_state_dict 등)
             * model_name: 저장할 모델 이름
@@ -119,7 +117,6 @@ class ModelRegistry:
         with mlflow.start_run(run_name=model_name) as run:
             model_name = model_name.replace("/", "-")
 
-            # YOLOX 모델을 pyfunc로 저장 (YoloxWrapper 사용)
             mlflow.pytorch.log_model(artifact_path=model_name, pytorch_model=model, registered_model_name=model_name)
 
             # 메타데이터 저장
@@ -201,73 +198,3 @@ class LlamaCppWrapper(PythonModel):
         if self.model is None:
             raise ValueError("The model has not been loaded.")
         return self.model
-
-
-class YoloxWrapper(PythonModel):
-    def __init__(self, model_data):
-        self.model_data = model_data
-        self.repo_id = model_data["repo_id"]
-        self.local_path = model_data["local_path"]
-        self.model_files = model_data["model_files"]
-        self.device = model_data["device"]
-        self.config = model_data.get("config", {})
-        self.model_state_dict = model_data.get("model_state_dict", None)
-        self.model_file = model_data.get("model_file", None)
-        self.model = None
-
-    def predict(self, model_input):
-        """
-        YOLOX 모델 추론 수행
-
-        Args:
-            model_input: 이미지 경로 또는 이미지 데이터
-
-        Returns:
-            Detection 결과
-        """
-        if self.model is None:
-            raise ValueError("모델이 로드되지 않았습니다. load_context를 먼저 호출하세요.")
-
-        # 실제 추론 로직 구현 필요
-        # 현재는 모델 정보만 반환
-        return {
-            "repo_id": self.repo_id,
-            "local_path": self.local_path,
-            "model_files": self.model_files,
-            "prediction": "YOLOX prediction result",  # 실제 추론 결과로 대체 필요
-        }
-
-    def load_context(self, context):
-        """
-        모델 컨텍스트 로드 (MLflow에서 모델 로드 시 호출)
-        """
-        try:
-            import torch
-
-            # 이미 model_state_dict가 있다면 사용
-            if self.model_state_dict:
-                print("기존 model_state_dict 사용")
-                self.model = self.model_state_dict
-                return
-
-            # PyTorch 모델 파일이 있다면 로드
-            if self.model_file and os.path.exists(self.model_file):
-                print(f"모델 파일 로드 중: {self.model_file}")
-                self.model_state_dict = torch.load(self.model_file, map_location=self.device)
-                print("모델 로드 완료")
-
-                # 실제 YOLOX 모델 클래스가 필요하면 여기서 초기화
-                # 예: self.model = YOLOXModel()
-                # self.model.load_state_dict(self.model_state_dict)
-
-                # 현재는 state_dict를 모델로 사용
-                self.model = self.model_state_dict
-            else:
-                print(f"경고: 모델 파일을 찾을 수 없습니다: {self.model_file}")
-                # 모델 데이터가 이미 있으면 그것을 사용
-                self.model = self.model_data
-
-        except Exception as e:
-            print(f"모델 로드 중 오류 발생: {e}")
-            # 오류가 발생해도 기본 데이터는 사용할 수 있도록
-            self.model = self.model_data

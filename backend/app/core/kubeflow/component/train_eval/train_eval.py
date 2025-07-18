@@ -43,8 +43,6 @@ def container_train_eval_component(
             f"--restapi_username={restapi_username}",
             f"--restapi_password={restapi_password}",
         ],
-        # args=[train_name, model_name, model_uri, mlflow_tracking_uri,
-        #       mlflow_experiment_name, dataset_artifact_uri]
     )
 
 

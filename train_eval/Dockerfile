@@ -65,17 +65,4 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy the FastAPI app code into the container
 COPY . .
 
-ENTRYPOINT python -m app.train_eval \
-    --train_name "${TRAIN_NAME}" \
-    --model_name "${MODEL_NAME}" \
-    --model_artifact_path "${MODEL_ARTIFACT_PATH}" \
-    --model_uri "${MODEL_URI}" \
-    --mlflow_tracking_uri "${MLFLOW_TRACKING_URI}" \
-    --mlflow_experiment_name "${MLFLOW_EXPERIMENT_NAME}" \
-    --mlflow_s3_endpoint_url "${MLFLOW_S3_ENDPOINT_URL}" \
-    --aws_access_key_id "${AWS_ACCESS_KEY_ID}" \
-    --aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}" \
-    --dataset_artifact_uri "${DATASET_ARTIFACT_URI}" \
-    --restapi_url "${RESTAPI_URL}" \
-    --restapi_username "${RESTAPI_USERNAME}" \
-    --restapi_password "${RESTAPI_PASSWORD}"
+ENTRYPOINT python -m app.train_eval
