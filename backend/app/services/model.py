@@ -9,7 +9,7 @@ import torch
 import torchvision
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
-from repos.model import model_provider_repository, model_registry_repository, model_repository
+from repos.model import model_format_repository, model_provider_repository, model_registry_repository, model_repository
 from schemas.model import (
     ModelBaseSchema,
     ModelProviderReadSchema,
@@ -102,7 +102,7 @@ class HuggingFaceModelService:
     def create(self, db: Session, *, model_schema: ModelBaseSchema):
         model_format_id = model_schema.format_id
         repo_id = model_schema.name
-        transformers_db_obj = model_repository.get_by_name(db, "transformers")
+        transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # YOLOX 모델인지 먼저 확인 (transformers가 아닌 별도 처리)
         if model_format_id == transformers_db_obj.id:  # transformers
             model = self.load_transformers(repo_id)

@@ -63,6 +63,11 @@ class ModelFormatReadSchema(BaseModel):
         from_attributes = True
 
 
+class ModelFormatCreateUpdateSchema(BaseModel):
+    name: str
+    description: str
+
+
 class ModelRegistryRequestSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str

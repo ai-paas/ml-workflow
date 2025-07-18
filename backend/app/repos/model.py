@@ -1,13 +1,17 @@
 from db.models import Model, ModelRegistry
-from db.models.model import ModelProvider
+from db.models.model import ModelFormat, ModelProvider
 from repos.base import CRUDBase
-from schemas.model import ModelBaseSchema, ModelProviderCreateUpdateSchema, ModelRegistryBaseSchema
+from schemas.model import (
+    ModelBaseSchema,
+    ModelFormatCreateUpdateSchema,
+    ModelProviderCreateUpdateSchema,
+    ModelRegistryBaseSchema,
+)
 from sqlalchemy.orm import Session
 
 
 class ModelRepository(CRUDBase[Model, ModelBaseSchema, ModelBaseSchema]):
-    def get_by_name(self, db: Session, name: str) -> Model:
-        return db.query(self.model).filter(self.model.name == name).first()
+    pass
 
 
 class ModelRegistryRepository(CRUDBase[ModelRegistry, ModelRegistryBaseSchema, ModelRegistryBaseSchema]):
@@ -21,6 +25,12 @@ class ModelProviderRepository(
         return db.query(self.model).filter(self.model.name == name).first()
 
 
+class ModelFormatRepository(CRUDBase[ModelFormat, ModelFormatCreateUpdateSchema, ModelFormatCreateUpdateSchema]):
+    def get_by_name(self, db: Session, name: str) -> ModelFormat:
+        return db.query(self.model).filter(self.model.name == name).first()
+
+
 model_repository = ModelRepository(Model)
 model_registry_repository = ModelRegistryRepository(ModelRegistry)
 model_provider_repository = ModelProviderRepository(ModelProvider)
+model_format_repository = ModelFormatRepository(ModelFormat)
