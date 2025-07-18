@@ -8,8 +8,8 @@ import os
 import subprocess
 import sys
 import traceback
-from pathlib import Path
 import uuid
+from pathlib import Path
 
 import mlflow
 import requests
@@ -111,7 +111,7 @@ class CustomTrainModel:
             dataset_zip = list(Path(self.dataset_artifacts_dir).glob("*.zip"))[0]
 
             # 압축 해제할 디렉토리 생성 (dataset_artifacts 경로에 _extracted 추가)
-            extract_dir = Path(self.dataset_artifacts_dir) /  "COCO"
+            extract_dir = Path(self.dataset_artifacts_dir) / "COCO"
             extract_dir.mkdir(parents=True, exist_ok=True)
 
             # zip 파일 압축 해제
@@ -120,29 +120,28 @@ class CustomTrainModel:
             with zipfile.ZipFile(dataset_zip, "r") as zip_ref:
                 # zip 파일 내의 모든 파일 경로 가져오기
                 all_files = zip_ref.namelist()
-                
                 # 최상위 폴더 찾기
                 top_level_dirs = set()
                 for file_path in all_files:
-                    parts = file_path.split('/')
+                    parts = file_path.split("/")
                     if len(parts) > 1:  # 폴더가 있는 경우
                         top_level_dirs.add(parts[0])
-                
+
                 # 최상위 폴더가 하나인지 확인
                 if len(top_level_dirs) == 1:
                     top_dir = top_level_dirs.pop()
                     # 최상위 폴더가 annotations, train, val로 시작하는지 확인
-                    if not (top_dir.startswith('annotations') or 
-                        top_dir.startswith('train') or 
-                        top_dir.startswith('val')):
+                    if not (
+                        top_dir.startswith("annotations") or top_dir.startswith("train") or top_dir.startswith("val")
+                    ):
                         logger.info(f"최상위 폴더 '{top_dir}' 제거 후 압축 해제")
                         # 파일 압축 해제
                         for file_info in zip_ref.filelist:
                             file_path = file_info.filename
                             if file_path.startswith(f"{top_dir}/"):  # 최상위 폴더로 시작하는 경우
                                 # 최상위 폴더명 제거
-                                extracted_path = file_path.split('/', 1)[1]
-                                if extracted_path and not file_info.filename.endswith('/'):  # 폴더가 아닌 파일만 처리
+                                extracted_path = file_path.split("/", 1)[1]
+                                if extracted_path and not file_info.filename.endswith("/"):  # 폴더가 아닌 파일만 처리
                                     # 파일 추출
                                     source = zip_ref.read(file_info)
                                     target = extract_dir / extracted_path
@@ -229,8 +228,7 @@ class CustomTrainModel:
             logger.info(f"실행 명령: {' '.join(cmd)}")
 
             try:
-                with mlflow.start_run(run_name=self.train_name) as run:
-
+                with mlflow.start_run(run_name=self.train_name):
                     # YOLOX 데이터셋 경로 환경변수 설정
                     env = os.environ.copy()
                     env["CUDA_VISIBLE_DEVICES"] = "0"  # 단일 GPU 사용
@@ -255,7 +253,7 @@ class CustomTrainModel:
                             if line:
                                 line = line.rstrip()
                                 logger.info(line)
-                                
+
                                 # 체크포인트 저장 확인
                                 if "Save weights to" in line:
                                     # 새로운 체크포인트 파일 찾기
@@ -263,16 +261,16 @@ class CustomTrainModel:
                                     if output_dir.exists():
                                         for f in output_dir.glob("epoch_*_ckpt.pth"):
                                             current_files.add(f)
-                                    
+
                                     # 새로 생성된 파일 찾기
                                     new_files = current_files - last_logged_files
-                                    
+
                                     # 새 파일들을 MLflow에 로깅
                                     for f in new_files:
                                         logger.info(f"새로운 체크포인트 발견: {f}")
                                         mlflow.log_artifact(str(f), f"checkpoints_{matched_exp_name}_{uuid.uuid4()}")
                                         logger.info(f"체크포인트를 MLflow에 로깅했습니다: {f.name}")
-                                    
+
                                     # 로깅된 파일 목록 업데이트
                                     last_logged_files = current_files
                     else:
@@ -300,25 +298,24 @@ class CustomTrainModel:
             train_model_name = f"{self.model_name}-custom-fine-tuned"
 
             # with mlflow.start_run(run_name=train_model_name) as run:
-                # 모델 아티팩트 로깅
-                # 여기에 모델 저장 로직 구현
-
+            # 모델 아티팩트 로깅
+            # 여기에 모델 저장 로직 구현
 
             logger.info(f"모델 등록 완료: {train_model_name}")
 
-                # TODO : model_학습 제대로 완료되면 같이 테스트
-                # 메타데이터 저장
-                # self.insert_metadata(
-                #     run_id=run_id,
-                #     artifact_uri=artifact_uri,
-                #     model_version=model_version,
-                #     model_uri=train_model_uri,
-                #     train_model_name=train_model_name,
-                #     restapi_url=self.restapi_url,
-                #     restapi_token=self.get_token_from_restapi(
-                #         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                #     ),
-                # )
+            # TODO : model_학습 제대로 완료되면 같이 테스트
+            # 메타데이터 저장
+            # self.insert_metadata(
+            #     run_id=run_id,
+            #     artifact_uri=artifact_uri,
+            #     model_version=model_version,
+            #     model_uri=train_model_uri,
+            #     train_model_name=train_model_name,
+            #     restapi_url=self.restapi_url,
+            #     restapi_token=self.get_token_from_restapi(
+            #         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+            #     ),
+            # )
 
         except Exception as e:
             logger.error(f"후처리 중 오류 발생: {e}")
