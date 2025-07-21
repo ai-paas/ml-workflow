@@ -3,20 +3,28 @@ import os
 import pickle
 import tempfile
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torchvision
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
-from repos.model import model_format_repository, model_provider_repository, model_registry_repository, model_repository
+from repos.model import (
+    model_format_repository,
+    model_provider_repository,
+    model_registry_repository,
+    model_repository,
+    model_type_repository,
+)
 from schemas.model import (
     ModelBaseSchema,
+    ModelFormatReadSchema,
     ModelProviderReadSchema,
     ModelReadSchema,
     ModelRegistryBaseSchema,
     ModelRegistryReadSchema,
     ModelRegistryRequestSchema,
+    ModelTypeReadSchema,
 )
 from sqlalchemy.orm import Session
 from transformers import (
@@ -262,7 +270,7 @@ class CustomModelService:
             # run_id = model_registry_schema.run_id
             artifact_uri = model_registry_schema.artifact_path
             # model_version = model_registry_schema.versions
-            model_uri = model_registry_schema.model_uri
+            model_uri = model_registry_schema.uri
 
         model_obj = model_repository.create(db, obj_in=model_schema)
         model_id = model_obj.id
@@ -276,5 +284,17 @@ class CustomModelService:
 
 class ModelProviderService:
     @staticmethod
-    def get_by_name(db: Session, name: str) -> ModelProviderReadSchema:
+    def get_by_name(db: Session, name: str) -> Optional[ModelProviderReadSchema]:
         return model_provider_repository.get_by_name(db, name)
+
+
+class ModelTypeService:
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[ModelTypeReadSchema]:
+        return model_type_repository.get_by_name(db, name)
+
+
+class ModelFormatService:
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[ModelFormatReadSchema]:
+        return model_format_repository.get_by_name(db, name)

@@ -22,6 +22,13 @@ def container_train_eval_component(
     restapi_url: str,
     restapi_username: str,
     restapi_password: str,
+    gpu_limit: str,
+    batch_size: str,
+    epochs: str,
+    save_period: str,
+    weight_decay: str,
+    lr0: str,
+    lrf: str,
 ):
     return dsl.ContainerSpec(
         # TODO: harbor URL 변수로 관리 필요
@@ -42,6 +49,13 @@ def container_train_eval_component(
             f"--restapi_url={restapi_url}",
             f"--restapi_username={restapi_username}",
             f"--restapi_password={restapi_password}",
+            f"--gpu_limit={gpu_limit}",
+            f"--batch_size={batch_size}",
+            f"--epochs={epochs}",
+            f"--save_period={save_period}",
+            f"--weight_decay={weight_decay}",
+            f"--lr0={lr0}",
+            f"--lrf={lrf}",
         ],
     )
 

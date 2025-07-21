@@ -7,9 +7,23 @@ from config.db.connect import SessionDepends
 from config.settings import get_settings
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.security import APIKeyHeader
-from schemas.model import ModelBaseSchema, ModelReadSchema, ModelRegistryRequestSchema
+from schemas.model import (
+    ModelBaseSchema,
+    ModelFormatReadSchema,
+    ModelProviderReadSchema,
+    ModelReadSchema,
+    ModelRegistryRequestSchema,
+    ModelTypeReadSchema,
+)
 from schemas.user import UserSchema
-from services.model import CustomModelService, HuggingFaceModelService, ModelProviderService, ModelService
+from services.model import (
+    CustomModelService,
+    HuggingFaceModelService,
+    ModelFormatService,
+    ModelProviderService,
+    ModelService,
+    ModelTypeService,
+)
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -92,6 +106,36 @@ def create_model(
     except Exception as e:
         db.rollback()
         raise e
+
+
+@router.get("/types", response_model=Optional[ModelTypeReadSchema])
+def get_model_type(
+    db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user), type_name: str = None
+):
+    if type_name:
+        return ModelTypeService.get_by_name(db, type_name)
+    else:
+        raise HTTPException(status_code=400, detail="type_name is required")
+
+
+@router.get("/formats", response_model=Optional[ModelFormatReadSchema])
+def get_model_format(
+    db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user), format_name: str = None
+):
+    if format_name:
+        return ModelFormatService.get_by_name(db, format_name)
+    else:
+        raise HTTPException(status_code=400, detail="format_name is required")
+
+
+@router.get("/providers", response_model=Optional[ModelProviderReadSchema])
+def get_model_provider(
+    db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user), provider_name: str = None
+):
+    if provider_name:
+        return ModelProviderService.get_by_name(db, provider_name)
+    else:
+        raise HTTPException(status_code=400, detail="provider_name is required")
 
 
 @router.get("/{model_id}", response_model=ModelReadSchema)

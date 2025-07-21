@@ -21,6 +21,13 @@ MODEL_FORMAT_DATA = [
     }
 ]
 
+MODEL_FORMAT_DATA_2 = [
+    {
+        "name": "pytorch",
+        "description": "Pytorch",
+    }
+]
+
 MODEL_PROVIDER_DATA = [
     {
         "name": "Huggingface",

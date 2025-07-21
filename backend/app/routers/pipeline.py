@@ -48,6 +48,13 @@ def container_train(
     dataset_id: int,
     train_name: str,
     current_user: UserSchema = Depends(get_current_user),
+    gpus: str = Body("1"),
+    batch_size: str = Body("64"),
+    epochs: str = Body("5"),
+    save_period: str = Body("1"),
+    weight_decay: str = Body("5e-4"),
+    lr0: str = Body("0.01"),
+    lrf: str = Body("0.05"),
 ):
     @dsl.pipeline
     def train_pipeline(
@@ -64,8 +71,15 @@ def container_train(
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        gpu_limit: str,
+        batch_size: str,
+        epochs: str,
+        save_period: str,
+        weight_decay: str,
+        lr0: str,
+        lrf: str,
     ):
-        container_train_eval_component(
+        pipeline = container_train_eval_component(
             mlflow_tracking_uri=mlflow_tracking_uri,
             mlflow_s3_endpoint_url=mlflow_s3_endpoint_url,
             aws_access_key_id=aws_access_key_id,
@@ -79,8 +93,16 @@ def container_train(
             restapi_url=restapi_url,
             restapi_username=restapi_username,
             restapi_password=restapi_password,
+            gpu_limit=gpu_limit,
+            batch_size=batch_size,
+            epochs=epochs,
+            save_period=save_period,
+            weight_decay=weight_decay,
+            lr0=lr0,
+            lrf=lrf,
         )
         # TODO: singleton instance로 변경필요.
+        pipeline.set_gpu_limit(gpu_limit)
 
     try:
         db_model = ModelService().get(db, model_id)
@@ -119,6 +141,13 @@ def container_train(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
+                "gpu_limit": gpus,
+                "batch_size": batch_size,
+                "epochs": epochs,
+                "save_period": save_period,
+                "weight_decay": weight_decay,
+                "lr0": lr0,
+                "lrf": lrf,
             },
         )
         return True

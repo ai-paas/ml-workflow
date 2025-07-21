@@ -24,6 +24,12 @@ alembic.ini 파일이 존재하는 경로에서 아래 명령어 실행
 alembic upgrade head
 ```
 
+# DB Data Initialization
+root directorty에서 migration할 버전을 확인하고 마이그레이션
+`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v1`
+`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v2`
+`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v all`
+
 ## 🚀 개발환경 설정 (backend server)
 - 대상 디렉토리 : backend
 
@@ -48,10 +54,3 @@ pipenv shell
 - predictor
 - train_eval
 에 대해서는 별도로 pipenv 가상환경을 구축하여 기동테스트 진행요망.
-
-## 데이터 초기화
-
-RDB 데이터를 초기화 합니다.
-root directory로 이동하여 아래 예시 명령어 처럼 실행
-ex)
-`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v1`

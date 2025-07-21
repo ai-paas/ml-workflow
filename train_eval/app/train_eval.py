@@ -49,6 +49,13 @@ class CustomTrainModel:
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        gpu_limit: str,
+        batch_size: str,
+        epochs: str,
+        save_period: str,
+        weight_decay: str,
+        lr0: str,
+        lrf: str,
         **kwargs,
     ):
         """
@@ -81,7 +88,13 @@ class CustomTrainModel:
         self.restapi_url = restapi_url
         self.restapi_username = restapi_username
         self.restapi_password = restapi_password
-
+        self.batch_size = batch_size
+        self.gpu_limit = gpu_limit
+        self.epochs = epochs
+        self.save_period = save_period
+        self.weight_decay = weight_decay
+        self.lr0 = lr0
+        self.lrf = lrf
         # 기본 설정
         self.output_dir = current_path / "outputs"
         self.mlflow_run_id = None
@@ -289,9 +302,11 @@ class CustomTrainModel:
             # exp 파일 수정사항 정의
             modifications = {
                 "num_classes": num_classes,
-                # TODO : 추후 파라미터로 추출
-                "max_epoch": 50,
-                "warmup_epochs": 5,
+                "max_epoch": self.epochs,
+                "save_history_ckpt": False if self.save_period == "-1" else True,
+                "weight_decay": self.weight_decay,
+                "min_lr_ratio": self.lrf,
+                "basic_lr_per_img": float(self.lr0) / float(self.batch_size),
             }
             # 임시 파일 생성 및 경로 저장
             temp_exp_path = self.create_modified_exp_file(
@@ -299,15 +314,18 @@ class CustomTrainModel:
             )
 
             # YOLOX 환경변수 설정
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
             os.environ["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
 
             # with mlflow.start_run(run_name=self.train_name) as run:
             os.environ["YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS"] = "TRUE"
-            os.environ["YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS"] = "TRUE"
+            os.environ["YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS"] = "FALSE" if self.save_period == "-1" else "TRUE"
             os.environ["YOLOX_MLFLOW_RUN_NAME"] = self.train_name
             os.environ["MLFLOW_EXPERIMENT_NAME"] = self.mlflow_experiment_name
-            os.environ["YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS"] = "20"
+
+            os.environ["YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS"] = (
+                "10000" if self.save_period == "-1" else self.save_period
+            )
 
             # train.py의 실행 코드를 직접 구현
             configure_module()
@@ -315,7 +333,19 @@ class CustomTrainModel:
             # 인자 파싱
             parser = make_parser()
             args = parser.parse_args(
-                ["-f", str(temp_exp_path), "-c", str(model_file), "-b", "64", "-d", "1", "--fp16", "--logger", "mlflow"]
+                [
+                    "-f",
+                    str(temp_exp_path),
+                    "-c",
+                    str(model_file),
+                    "-b",
+                    self.batch_size,
+                    "-d",
+                    self.gpu_limit,
+                    "--fp16",
+                    "--logger",
+                    "mlflow",
+                ]
             )
 
             exp = get_exp(args.exp_file, args.name)
@@ -326,7 +356,7 @@ class CustomTrainModel:
                 args.experiment_name = exp.exp_name
 
             num_gpu = get_num_devices() if args.devices is None else args.devices
-            assert num_gpu <= get_num_devices()
+            num_gpu = min(num_gpu, get_num_devices())
 
             if args.cache is not None:
                 exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
@@ -345,6 +375,17 @@ class CustomTrainModel:
                     dist_url=dist_url,
                     args=(exp, args),
                 )
+                self.insert_metadata(
+                    run_id=run.info.run_id,
+                    artifact_uri=run.info.artifact_uri,
+                    model_version="1",
+                    model_uri="",
+                    train_model_name=f"{self.model_name}-fine-tuned",
+                    restapi_url=self.restapi_url,
+                    restapi_token=self.get_token_from_restapi(
+                        url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+                    ),
+                )
 
         except Exception as e:
             logger.error(f"학습 중 오류: {e}")
@@ -353,29 +394,7 @@ class CustomTrainModel:
     def postprocess(self):
         """학습 후 처리"""
         try:
-            # 모델 저장 및 등록
-            train_model_name = f"{self.model_name}-custom-fine-tuned"
-
-            # with mlflow.start_run(run_name=train_model_name) as run:
-            # 모델 아티팩트 로깅
-            # 여기에 모델 저장 로직 구현
-
-            logger.info(f"모델 등록 완료: {train_model_name}")
-
-            # TODO : model_학습 제대로 완료되면 같이 테스트
-            # 메타데이터 저장
-            # self.insert_metadata(
-            #     run_id=run_id,
-            #     artifact_uri=artifact_uri,
-            #     model_version=model_version,
-            #     model_uri=train_model_uri,
-            #     train_model_name=train_model_name,
-            #     restapi_url=self.restapi_url,
-            #     restapi_token=self.get_token_from_restapi(
-            #         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-            #     ),
-            # )
-
+            pass
         except Exception as e:
             logger.error(f"후처리 중 오류 발생: {e}")
             traceback.print_exc()
@@ -393,26 +412,46 @@ class CustomTrainModel:
     ):
         """메타데이터 삽입"""
         try:
+            # API 토큰 헤더 설정
+            headers = {"Authorization": f"Bearer {restapi_token}"}
+
+            # provider, type, format ID 조회
+            provider_response = requests.get(
+                f"{restapi_url}/api/v1/models/providers", headers=headers, params={"provider_name": "custom"}
+            )
+            if provider_response.status_code != 200:
+                raise Exception(f"Provider 조회 실패: {provider_response.text}")
+            provider_id = provider_response.json().get("id")
+
+            type_response = requests.get(
+                f"{restapi_url}/api/v1/models/types", headers=headers, params={"type_name": "Fine-Tuned"}
+            )
+            if type_response.status_code != 200:
+                raise Exception(f"Type 조회 실패: {type_response.text}")
+            type_id = type_response.json().get("id")
+
+            format_response = requests.get(
+                f"{restapi_url}/api/v1/models/formats", headers=headers, params={"format_name": "pytorch"}
+            )
+            if format_response.status_code != 200:
+                raise Exception(f"Format 조회 실패: {format_response.text}")
+            format_id = format_response.json().get("id")
+
             data = {
                 "name": train_model_name,
                 "description": f"커스텀 파인튜닝 모델: {train_model_name}",
-                "model_provider_id": 3,
-                "model_type_id": 4,
-                "model_format_id": 1,
+                "provider_id": provider_id,
+                "type_id": type_id,
+                "format_id": format_id,
                 "model_registry_schema": json.dumps(
                     {
-                        "run_id": run_id,
                         "artifact_path": artifact_uri,
-                        "versions": model_version,
-                        "model_uri": model_uri,
-                        "framework": "custom",
-                        "model_type": "custom",
+                        "uri": model_uri,
                     }
                 ),
             }
 
             api_endpoint = f"{restapi_url}/api/v1/models"
-            headers = {"Authorization": f"Bearer {restapi_token}"}
             response = requests.post(api_endpoint, headers=headers, data=data)
 
             if response.status_code == 200:
@@ -420,6 +459,7 @@ class CustomTrainModel:
                 return response.json()
             else:
                 logger.error(f"메타데이터 삽입 실패: {response.status_code}")
+                logger.error(f"메타데이터 삽입 실패: {response.text}")
                 return None
 
         except Exception as e:
@@ -462,6 +502,13 @@ def main():
     parser.add_argument("--restapi_url", type=str, required=True, help="REST API URL")
     parser.add_argument("--restapi_username", type=str, required=True, help="REST API 사용자명")
     parser.add_argument("--restapi_password", type=str, required=True, help="REST API 비밀번호")
+    parser.add_argument("--gpu_limit", type=str, required=True, help="GPU 제한")
+    parser.add_argument("--batch_size", type=str, required=True, help="배치 크기")
+    parser.add_argument("--epochs", type=str, required=True, help="에포크 수")
+    parser.add_argument("--save_period", type=str, required=True, help="저장 주기")
+    parser.add_argument("--weight_decay", type=str, required=True, help="가중치 감소")
+    parser.add_argument("--lr0", type=str, required=True, help="초기 학습률")
+    parser.add_argument("--lrf", type=str, required=True, help="학습률 감소 비율")
 
     # 인자 파싱
     args = parser.parse_args()
@@ -481,6 +528,13 @@ def main():
         restapi_url=args.restapi_url,
         restapi_username=args.restapi_username,
         restapi_password=args.restapi_password,
+        gpu_limit=args.gpu_limit,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        save_period=args.save_period,
+        weight_decay=args.weight_decay,
+        lr0=args.lr0,
+        lrf=args.lrf,
     )
 
     try:
@@ -491,7 +545,7 @@ def main():
         model.train()
 
         # 후처리
-        model.postprocess()
+        # model.postprocess()
 
         logger.info("학습 완료!")
 

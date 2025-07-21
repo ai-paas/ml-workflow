@@ -54,6 +54,11 @@ class ModelTypeReadSchema(BaseModel):
         from_attributes = True
 
 
+class ModelTypeCreateUpdateSchema(BaseModel):
+    name: str
+    description: str
+
+
 class ModelFormatReadSchema(BaseModel):
     id: int
     name: str
