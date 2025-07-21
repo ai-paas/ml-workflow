@@ -79,7 +79,7 @@ def container_train(
         lr0: str,
         lrf: str,
     ):
-        pipeline = container_train_eval_component(
+        container_train_eval_component(
             mlflow_tracking_uri=mlflow_tracking_uri,
             mlflow_s3_endpoint_url=mlflow_s3_endpoint_url,
             aws_access_key_id=aws_access_key_id,
@@ -101,17 +101,15 @@ def container_train(
             lr0=lr0,
             lrf=lrf,
         )
-        # TODO: singleton instance로 변경필요.
-        pipeline.set_gpu_limit(gpu_limit)
 
     try:
         db_model = ModelService().get(db, model_id)
-        model_uri = db_model.model_registry.model_uri
-        model_artifact_path = db_model.model_registry.artifact_path
+        model_uri = db_model.registry.uri
+        model_artifact_path = db_model.registry.artifact_path
         model_name = db_model.name
         dataset_model = DatasetService().get(db, dataset_id)
         dataset_artifact_uri = os.path.join(
-            dataset_model.dataset_registry.artifact_path, dataset_model.dataset_registry.dataset_uri
+            dataset_model.dataset_registry.artifact_path, dataset_model.dataset_registry.uri
         )
         kf = KubeflowManager()
         client = kf.get_kfp_client()

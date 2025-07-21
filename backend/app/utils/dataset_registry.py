@@ -56,7 +56,7 @@ class DatasetRegistry:
 
             # TODO: 이후 버전관리 기능을 적용할시 변경 필요
             dataset_version = 1
-            dataset_uri = dataset_name
+            dataset_uri = ""
         return run_id, dataset_version, artifact_uri, dataset_uri
 
 
