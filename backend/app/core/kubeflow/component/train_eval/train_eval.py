@@ -9,6 +9,7 @@ from kfp import dsl, local
 
 @dsl.container_component
 def container_train_eval_component(
+    model_id: int,
     train_name: str,
     model_name: str,
     model_artifact_path: str,
@@ -36,6 +37,7 @@ def container_train_eval_component(
         # TODO: Kubernetes는 보안과 유연성을 위해 기본적으로 컨테이너의 ENTRYPOINT를 무시하고 override함.
         command=["python", "-m", "app.train_eval"],
         args=[
+            f"--model_id={model_id}",
             f"--train_name={train_name}",
             f"--model_name={model_name}",
             f"--model_artifact_path={model_artifact_path}",

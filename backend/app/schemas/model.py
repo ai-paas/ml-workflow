@@ -12,6 +12,7 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     provider_id: int
     type_id: int
     format_id: int
+    parent_model_id: int | None = None
     learning_enable_yn: bool
     version: int
     subversion: int
@@ -24,6 +25,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema
+    parent_model_id: int | None = None
     registry: ModelRegistryReadSchema
 
     class Config:

@@ -45,6 +45,7 @@ def create_model(
     provider_id: Annotated[int, Form()],
     type_id: Annotated[int, Form()],
     format_id: Annotated[int, Form()],
+    parent_model_id: Annotated[int, Form()] = None,
     model_registry_schema: Annotated[str, Form()] = None,
     file: Annotated[UploadFile, File()] = None,
     current_user: UserSchema = Depends(get_current_user),
@@ -86,6 +87,7 @@ def create_model(
         provider_id=provider_id,
         type_id=type_id,
         format_id=format_id,
+        parent_model_id=parent_model_id,
         # TODO : 추후 학습 가능 모델에 대한 구분 기준을 모델 이름에서 고정기준으로 변경 필요. ex) provider 또는 type에 yolo 추가.
         learning_enable_yn="yolo" in name.lower(),
         version=1,

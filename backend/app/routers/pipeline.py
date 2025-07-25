@@ -58,6 +58,7 @@ def container_train(
 ):
     @dsl.pipeline
     def train_pipeline(
+        model_id: int,
         model_uri: str,
         mlflow_tracking_uri: str,
         mlflow_s3_endpoint_url: str,
@@ -80,6 +81,7 @@ def container_train(
         lrf: str,
     ):
         container_train_eval_component(
+            model_id=model_id,
             mlflow_tracking_uri=mlflow_tracking_uri,
             mlflow_s3_endpoint_url=mlflow_s3_endpoint_url,
             aws_access_key_id=aws_access_key_id,
@@ -125,6 +127,7 @@ def container_train(
             enable_caching=False,  # overrides the above disabling of caching
             experiment_id=experiment.experiment_id,
             arguments={
+                "model_id": model_id,
                 "model_artifact_path": model_artifact_path,
                 "model_uri": model_uri,
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
