@@ -260,7 +260,7 @@ class CustomTrainModel:
             model_path = Path(self.model_artifacts_dir)
             model_file = list(model_path.glob("*.pth"))[0]  # .pth 파일 찾기
             model_file = model_file.absolute()  # 전체 경로로 변환
-            model_name = Path(model_file).stem  # 확장자를 제외한 파일명
+            model_filename = Path(model_file).stem  # 확장자를 제외한 파일명
 
             # YOLOX exp 매핑 딕셔너리
             exp_mapping = {
@@ -278,7 +278,7 @@ class CustomTrainModel:
             matched_exp_name = None  # exp 이름 저장 추가
 
             for exp_name, exp_module in exp_mapping.items():
-                if exp_name in model_name.lower():
+                if exp_name in model_filename.lower():
                     matched_exp = exp_module.Exp()
                     matched_exp_name = exp_name
                     # exp 모듈의 파일 경로 찾기
@@ -290,7 +290,7 @@ class CustomTrainModel:
                         break
 
             if matched_exp is None:
-                raise ValueError(f"모델 파일명 '{model_name}'과 일치하는 YOLOX exp를 찾을 수 없습니다.")
+                raise ValueError(f"모델 파일명 '{model_filename}'과 일치하는 YOLOX exp를 찾을 수 없습니다.")
 
             # COCO 데이터셋 경로에서 annotation 파일 찾기
             coco_path = Path(self.dataset_artifacts_dir) / "COCO"
