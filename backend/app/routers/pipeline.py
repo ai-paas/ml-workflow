@@ -46,8 +46,9 @@ def container_train(
     db: Session = SessionDepends,
     model_id: int,
     dataset_id: int,
-    train_name: str,
     current_user: UserSchema = Depends(get_current_user),
+    train_name: str = Body(""),
+    result_model_name: str = Body(""),
     gpus: str = Body("1"),
     batch_size: str = Body("64"),
     epochs: str = Body("5"),
@@ -89,7 +90,7 @@ def container_train(
             model_artifact_path=model_artifact_path,
             model_uri=model_uri,
             train_name=train_name,
-            model_name=model_name,
+            result_model_name=result_model_name,
             dataset_artifact_uri=dataset_artifact_uri,
             mlflow_experiment_name=mlflow_experiment_name,
             restapi_url=restapi_url,
@@ -108,7 +109,6 @@ def container_train(
         db_model = ModelService().get(db, model_id)
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
-        model_name = db_model.name
         dataset_model = DatasetService().get(db, dataset_id)
         dataset_artifact_uri = os.path.join(
             dataset_model.dataset_registry.artifact_path, dataset_model.dataset_registry.uri
@@ -131,7 +131,7 @@ def container_train(
                 "model_artifact_path": model_artifact_path,
                 "model_uri": model_uri,
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
-                "model_name": model_name,
+                "result_model_name": result_model_name,
                 "mlflow_experiment_name": mlflow_experiment_name,
                 "mlflow_s3_endpoint_url": settings.MLFLOW_S3_ENDPOINT_URL,
                 "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,

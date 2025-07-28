@@ -38,7 +38,7 @@ class CustomTrainModel:
         self,
         train_name: str,
         model_id: int,
-        model_name: str,
+        result_model_name: str,
         model_artifact_path: str,
         model_uri: str,
         mlflow_tracking_uri: str,
@@ -78,7 +78,7 @@ class CustomTrainModel:
         """
         self.train_name = train_name
         self.model_id = model_id
-        self.model_name = model_name
+        self.result_model_name = result_model_name
         self.model_artifact_path = model_artifact_path
         self.model_uri = model_uri
         self.mlflow_tracking_uri = mlflow_tracking_uri
@@ -383,7 +383,7 @@ class CustomTrainModel:
                     model_id=self.model_id,
                     model_version="1",
                     model_uri="",
-                    train_model_name=f"{self.model_name}-fine-tuned",
+                    train_model_name=self.result_model_name,
                     restapi_url=self.restapi_url,
                     restapi_token=self.get_token_from_restapi(
                         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
@@ -443,7 +443,7 @@ class CustomTrainModel:
 
             data = {
                 "name": train_model_name,
-                "description": f"커스텀 파인튜닝 모델: {train_model_name}",
+                "description": f"custom fine-tuned model: {train_model_name}",
                 "provider_id": provider_id,
                 "type_id": type_id,
                 "format_id": format_id,
