@@ -443,7 +443,7 @@ class CustomTrainModel:
 
             data = {
                 "name": train_model_name,
-                "description": f"custom fine-tuned model: {train_model_name}",
+                "description": f"fine-tuned model: {train_model_name}",
                 "provider_id": provider_id,
                 "type_id": type_id,
                 "format_id": format_id,
@@ -496,7 +496,7 @@ def main():
     # 기본 설정
     parser.add_argument("--train_name", type=str, required=True, help="학습 실행명")
     parser.add_argument("--model_id", type=int, required=True, help="모델 ID")
-    parser.add_argument("--model_name", type=str, required=True, help="모델명")
+    parser.add_argument("--result_model_name", type=str, required=True, help="모델명")
     parser.add_argument("--model_artifact_path", type=str, required=True, help="모델 아티팩트 경로")
     parser.add_argument("--model_uri", type=str, required=True, help="모델 URI")
     parser.add_argument("--mlflow_tracking_uri", type=str, required=True, help="MLflow 추적 URI")
@@ -523,7 +523,7 @@ def main():
     model = CustomTrainModel(
         train_name=args.train_name,
         model_id=args.model_id,
-        model_name=args.model_name,
+        result_model_name=args.result_model_name,
         model_artifact_path=args.model_artifact_path,
         model_uri=args.model_uri,
         mlflow_tracking_uri=args.mlflow_tracking_uri,
