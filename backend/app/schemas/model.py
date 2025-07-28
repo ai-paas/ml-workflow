@@ -18,20 +18,6 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     subversion: int
 
 
-class ModelReadSchema(TimeStampSchemaMixin):
-    id: int
-    name: str
-    description: str
-    provider_info: ModelProviderReadSchema
-    type_info: ModelTypeReadSchema
-    format_info: ModelFormatReadSchema
-    parent_model_id: int | None = None
-    registry: ModelRegistryReadSchema
-
-    class Config:
-        from_attributes = True
-
-
 class ModelProviderCreateUpdateSchema(BaseModel):
     name: str
     description: str
@@ -91,6 +77,45 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
     reference_model_id: int
+
+    class Config:
+        from_attributes = True
+
+
+class ModelReadSchema(TimeStampSchemaMixin):
+    id: int
+    name: str
+    description: str
+    provider_info: ModelProviderReadSchema
+    type_info: ModelTypeReadSchema
+    format_info: ModelFormatReadSchema
+    parent_model_id: int | None = None
+    registry: ModelRegistryReadSchema
+
+    parent_model: Optional[ModelReadParentSchema]
+    child_models: Optional[list[ModelReadChildSchema]]
+
+    class Config:
+        from_attributes = True
+
+
+class ModelReadParentSchema(BaseModel):
+    id: int
+    name: str
+    description: str
+
+    parent_model: Optional[ModelReadParentSchema]
+
+    class Config:
+        from_attributes = True
+
+
+class ModelReadChildSchema(BaseModel):
+    id: int
+    name: str
+    description: str
+
+    child_models: Optional[list[ModelReadChildSchema]]
 
     class Config:
         from_attributes = True

@@ -26,6 +26,10 @@ class Model(BaseModel, TimestampMixin):
     format_info: Mapped["ModelFormat"] = relationship("ModelFormat")
     registry: Mapped["ModelRegistry"] = relationship("ModelRegistry", back_populates="reference_model")
 
+    # Parent-Child relationships
+    parent_model: Mapped[Optional["Model"]] = relationship("Model", remote_side=[id], back_populates="child_models")
+    child_models: Mapped[list["Model"]] = relationship("Model", back_populates="parent_model")
+
 
 class TrainImageRegistry(BaseModel):
     __tablename__ = "train_image_registry"
