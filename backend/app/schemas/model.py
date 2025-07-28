@@ -82,6 +82,20 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
         from_attributes = True
 
 
+class ModelBriefReadSchema(TimeStampSchemaMixin):
+    id: int
+    name: str
+    description: str
+    provider_info: ModelProviderReadSchema
+    type_info: ModelTypeReadSchema
+    format_info: ModelFormatReadSchema
+    parent_model_id: int | None = None
+    registry: ModelRegistryReadSchema
+
+    class Config:
+        from_attributes = True
+
+
 class ModelReadSchema(TimeStampSchemaMixin):
     id: int
     name: str

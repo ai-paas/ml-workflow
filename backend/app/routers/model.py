@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from fastapi.security import APIKeyHeader
 from schemas.model import (
     ModelBaseSchema,
+    ModelBriefReadSchema,
     ModelFormatReadSchema,
     ModelProviderReadSchema,
     ModelReadSchema,
@@ -36,7 +37,7 @@ settings = get_settings()
 
 
 # TODO: 책임 분리 필요.
-@router.post("", response_model=ModelReadSchema)
+@router.post("", response_model=ModelBriefReadSchema)
 def create_model(
     *,
     db: Session = SessionDepends,
@@ -148,7 +149,7 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     return db_model
 
 
-@router.get("", response_model=list[ModelReadSchema])
+@router.get("", response_model=list[ModelBriefReadSchema])
 def read_models(
     skip: int = 0, limit: int = 10, db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user)
 ):
