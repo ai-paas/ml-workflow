@@ -1,25 +1,27 @@
 import io
-import os
+import logging
+import shutil
 import tempfile
-from datetime import datetime
-from typing import Annotated, Optional
+import traceback
+import zipfile
+from pathlib import Path
+from typing import Annotated
 
+import yaml
 from config.db.connect import SessionDepends
 from config.settings import get_settings
-from datasets import load_dataset
-from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
-from fastapi.security import APIKeyHeader
-from schemas.dataset import DatasetBaseSchema, DatasetReadSchema
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from schemas.dataset import DatasetBaseSchema, DatasetReadSchema, DatasetRegistryBaseSchema
 from schemas.user import UserSchema
-from services.dataset import DatasetService
+from services.dataset import DatasetRegistryService, DatasetService
 from sqlalchemy.orm import Session
-from starlette.datastructures import UploadFile as StarletteUploadFile
 from utils.authentication import get_current_user
 
 router = APIRouter(prefix="/datasets", tags=["Datasets"])
 
 settings = get_settings()
-# API_KEY_HEADER = APIKeyHeader(name="X-API-Key")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 # TODO: 책임 분리 필요.
@@ -29,58 +31,73 @@ def create_dataset(
     db: Session = SessionDepends,
     name: Annotated[str, Form()],
     description: Annotated[str, Form()],
-    dataset_format_id: Annotated[int, Form()],
-    train_file: UploadFile | None = None,
-    test_file: UploadFile | None = None,
-    current_user: UserSchema = Depends(get_current_user)
+    file: UploadFile = File(...),
+    current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    Dataset Registry에 Model을 등록하는 API
-
-    * params
-        - model_format
-            1. csv
+    Dataset Registry에 데이터셋을 검증 및 등록하는 API
     """
-
-    # TODO: mocking data. 이후 외부에서 파일 받아와서 mlflow 등록가능하도록 호환 작업 필요.
-    dataset = load_dataset("anindya64/hardhat")
-
-    csv_train_buffer = io.BytesIO()
-    csv_test_buffer = io.BytesIO()
-    dataset["train"].to_csv(csv_train_buffer)
-    dataset["test"].to_csv(csv_test_buffer)
-    csv_train_buffer.seek(0)
-    csv_test_buffer.seek(0)
-    train_file = UploadFile(file=csv_train_buffer, filename="train.csv")
-    test_file = UploadFile(file=csv_test_buffer, filename="test.csv")
-
-    # with tempfile.TemporaryDirectory() as temp_dir:
-    #     # 1. 임시 디렉토리 생성 및 데이터프레임을 CSV로 저장
-    #     temp_train_path = os.path.join(temp_dir, "train.csv")
-    #     temp_test_path = os.path.join(temp_dir, "test.csv")
-    #     dataset['train'].to_csv(temp_train_path)
-    #     dataset['test'].to_csv(temp_test_path)
-
-    #     # 2. 저장한 CSV 파일을 UploadFile 객체로 로드
-    #     with open(temp_train_path, "rb") as f:
-    #         file_data = io.BytesIO(f.read())
-    #         train_file = StarletteUploadFile(file=file_data, filename="train.csv")
-    #     with open(temp_test_path, "rb") as f:
-    #         file_data = io.BytesIO(f.read())
-    #         test_file = StarletteUploadFile(file=file_data, filename="test.csv")
-
-    dataset_schema = DatasetBaseSchema(
-        name=name,
-        description=description,
-        dataset_format_id=dataset_format_id,
-    )
+    # TODO: COCO 2017 dataset 형식으로 검증 로직 구현 필요
+    # - annotations/*.json 파일 검증
+    # - train2017/ 디렉토리의 이미지 파일 검증
+    # - val2017/ 디렉토리의 이미지 파일 검증
+    # - test2017/ 디렉토리의 이미지 파일 검증
 
     try:
-        result = DatasetService().create(db, dataset_schema=dataset_schema, file=[train_file, test_file])
-        return result
+        # 업로드된 파일 내용 읽기
+        file_content = file.file.read()
+
+        # ZIP 파일 형식 검증 및 압축 해제
+        temp_dir = Path(tempfile.mkdtemp())
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content)) as zip_ref:
+                zip_ref.extractall(temp_dir)
+        except zipfile.BadZipFile:
+            raise ValueError("파일이 유효한 ZIP 형식이 아닙니다.")
+
+        # 업로드된 파일명 추출
+        file_name = Path(file.filename).name
+        dataset_name = Path(file_name).stem
+
+        # 압축 해제 후 ZIP 파일명과 동일한 루트 디렉토리 찾기
+        root_dir = temp_dir / dataset_name
+        if not root_dir.is_dir():
+            root_dir = temp_dir  # 동일 이름의 디렉토리가 없으면 temp_dir 자체를 루트로 사용
+
+        logger.info(f"데이터셋 루트 디렉토리: {root_dir}")
+
+        # TODO : 데이터셋 구조 검증 로직 추가 필요
+
+        # 파일 포인터 초기화 (업로드를 위해)
+        file.file.seek(0)
+
+        # 데이터셋 정보 저장
+        dataset_data = DatasetBaseSchema(
+            name=name,
+            version=1,
+            subversion=1,
+            train_ratio=0.8,
+            validation_ratio=0.1,
+            test_ratio=0.1,
+        )
+
+        # DatasetService를 통해 DB에 저장
+        db_dataset = DatasetService.create(db, obj_in=dataset_data, file=file)
+
+        return db_dataset
+
+    except ValueError as e:
+        # 검증 오류 발생 시
+        logger.error(f"데이터셋 검증 오류: {str(e)}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        db.rollback()
-        raise e
+        # 기타 오류 발생 시
+        traceback.print_exc()
+        logger.error(f"데이터셋 등록 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"데이터셋 등록 중 오류가 발생했습니다: {str(e)}")
+    finally:
+        # 임시 디렉토리 정리
+        shutil.rmtree(temp_dir)
 
 
 @router.get("/{dataset_id}", response_model=DatasetReadSchema)
