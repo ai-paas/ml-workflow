@@ -49,7 +49,7 @@ class ModelManagerFactory:
         """
         if framework not in cls._managers:
             supported_frameworks = ", ".join(cls._managers.keys())
-            raise ValueError(f"지원하지 않는 프레임워크입니다: {framework}. " f"지원되는 프레임워크: {supported_frameworks}")
+            raise ValueError(f"지원하지 않는 프레임워크입니다: {framework}. 지원되는 프레임워크: {supported_frameworks}")
 
         manager_class = cls._managers[framework]
         return manager_class()
