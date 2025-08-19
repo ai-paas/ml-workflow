@@ -25,7 +25,15 @@ MODEL_FORMAT_DATA_2 = [
     {
         "name": "pytorch",
         "description": "Pytorch",
-    }
+    },
+    {
+        "name": "keras",
+        "description": "Keras",
+    },
+    {
+        "name": "onnx",
+        "description": "ONNX",
+    },
 ]
 
 MODEL_PROVIDER_DATA = [

@@ -25,6 +25,8 @@ def serving_component(
     model_name: str,
     model_uri: str = None,
     s3_storage_uri: str = None,
+    framework: str = "pytorch",  # 프레임워크 타입 추가
+    run_id: str = None,  # MLflow run ID 추가
     kserve_gpu_yn: bool = False,
     request_gpu: str = "1",
     request_cpu: str = "200m",
@@ -73,6 +75,25 @@ def serving_component(
     #     storage_uri=model_storage_uri,
     # )
     logger.info(f"Use GPU = {kserve_gpu_yn}")
+    logger.info(f"Framework = {framework}")
+    logger.info(f"Run ID = {run_id}")
+
+    # 컨테이너 args 구성
+    container_args = [
+        f"--model_name={model_name}",
+        f"--model_uri={model_uri}",
+        f"--mlflow_tracking_uri={mlflow_tracking_uri}",
+        f"--mlflow_experiment_name={mlflow_experiment_name}",
+        f"--mlflow_s3_endpoint_url={mlflow_s3_endpoint_url}",
+        f"--aws_access_key_id={aws_access_key_id}",
+        f"--aws_secret_access_key={aws_secret_access_key}",
+        f"--framework={framework}",
+    ]
+
+    # run_id가 제공된 경우에만 추가
+    if run_id:
+        container_args.append(f"--run_id={run_id}")
+
     predictor_spec = V1beta1PredictorSpec(
         # TODO: s3_storage 지원시 활용 필요
         # model=model_spec,
@@ -82,15 +103,7 @@ def serving_component(
                 name="kserve-container",
                 image="aipaas-harbor.surromind.ai/ml-workflow/inference:latest",  # TensorFlow 모델 서빙을 위한 이미지
                 # env=env_vars
-                args=[
-                    f"--model_name={model_name}",
-                    f"--model_uri={model_uri}",
-                    f"--mlflow_tracking_uri={mlflow_tracking_uri}",
-                    f"--mlflow_experiment_name={mlflow_experiment_name}",
-                    f"--mlflow_s3_endpoint_url={mlflow_s3_endpoint_url}",
-                    f"--aws_access_key_id={aws_access_key_id}",
-                    f"--aws_secret_access_key={aws_secret_access_key}",
-                ],
+                args=container_args,
                 resources=client.V1ResourceRequirements(
                     requests=(
                         {"memory": request_memory, "cpu": request_cpu, "nvidia.com/gpu": request_gpu}
@@ -137,4 +150,6 @@ def serving_component(
 #     mlflow_experiment_name="ml_workflow_dev",
 #     model_storage_uri="s3://mlflow/3/be03517338db4d38ad5157b9ff7c152b/artifacts/google-owlv2-base-patch16-ensemble",
 #     inference_service_name=f"mlworkflow-{uuid.uuid4()}",
+#     framework="pytorch",  # 프레임워크 지정
+#     run_id="123",  # run ID 지정
 # )

@@ -150,16 +150,29 @@ class ModelRegistry:
             model_uri = f"models:/{model_name}/{model_version}"
         return run_id, artifact_uri, model_version, model_uri
 
-    def log_artifact(self, file: UploadFile, model_name: str):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_file_path = Path(temp_dir) / file.filename
-            temp_file_path.write_bytes(file.file.read())
+    def log_artifact(self, model_name: str, file: UploadFile = None, save_dir: str = None):
+        model_name = model_name.replace("/", "-")
+        if file is not None:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file_path = Path(temp_dir) / file.filename
+                temp_file_path.write_bytes(file.file.read())
 
+                with mlflow.start_run(run_name=model_name) as run:
+                    mlflow.log_artifacts(local_dir=temp_dir, artifact_path=model_name)
+                    artifact_uri = mlflow.get_artifact_uri(model_name)
+                    run_id = run.info.run_id
+                    return run_id, artifact_uri
+        elif save_dir is not None:
             with mlflow.start_run(run_name=model_name) as run:
-                mlflow.log_artifacts(local_dir=temp_dir, artifact_path=model_name)
+                mlflow.log_param("model_name", model_name)
+                mlflow.log_param("framework", "transformers")
+                mlflow.log_param("format", "huggingface-bin")
+                mlflow.log_artifacts(local_dir=save_dir, artifact_path=model_name)
                 artifact_uri = mlflow.get_artifact_uri(model_name)
                 run_id = run.info.run_id
                 return run_id, artifact_uri
+        else:
+            raise ValueError("file or save_dir must be provided")
 
 
 class ModelLoader:

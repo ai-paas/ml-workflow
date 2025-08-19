@@ -182,6 +182,8 @@ def serve(
         model_uri: str,
         model_name: str,
         s3_storage_uri: str,
+        framework: str,  # 프레임워크 파라미터 추가
+        run_id: str,  # run_id 파라미터 추가
         kserve_gpu_yn: bool,
         request_gpu: str,
         request_cpu: str,
@@ -200,6 +202,8 @@ def serve(
             model_name=model_name,
             model_uri=model_uri,
             s3_storage_uri=s3_storage_uri,
+            framework=framework,  # 프레임워크 전달
+            run_id=run_id,  # run_id 전달
             kserve_gpu_yn=kserve_gpu_yn,
             request_gpu=request_gpu,
             request_cpu=request_cpu,
@@ -213,11 +217,24 @@ def serve(
     try:
         logger.info(f"KServe Use GPU = {settings.KSERVE_GPU}")
         db_model = ModelService().get(db, model_id)
-        model_uri = db_model.model_registry.model_uri
+        model_uri = db_model.registry.uri
         model_name = db_model.name
 
         # TODO : display_name 이나 serving_name 관리 필요.
         model_name = model_name.replace("/", "-")
+
+        # 프레임워크 결정: model_format에서 가져오기
+        framework = "pytorch"  # 기본값
+        if db_model.format_info:
+            format_name = db_model.format_info.name.lower()
+            if format_name in ["pytorch", "keras", "onnx"]:
+                framework = format_name
+            elif format_name == "transformers":
+                framework = "pytorch"  # transformers는 기본적으로 pytorch 기반
+
+        run_id = db_model.registry.run_id if db_model.registry.run_id else None
+
+        logger.info(f"Model framework: {framework}, run_id: {run_id}")
 
         # TODO: singleton instance로 변경필요.
         kf = KubeflowManager()
@@ -247,7 +264,9 @@ def serve(
                 "model_name": model_name,
                 "model_uri": model_uri,
                 "s3_storage_uri": s3_storage_uri,
-                "kserve_gpu": settings.KSERVE_GPU,
+                "framework": framework,  # 프레임워크 전달
+                "run_id": run_id,  # run_id 전달
+                "kserve_gpu_yn": settings.KSERVE_GPU,  # kserve_gpu -> kserve_gpu_yn으로 수정
                 # TODO: 추후 외부에서 인자로 받아야함.
                 "request_gpu": request_gpu,
                 "request_cpu": request_cpu,

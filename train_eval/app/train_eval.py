@@ -452,6 +452,7 @@ class CustomTrainModel:
                     {
                         "artifact_path": artifact_uri,
                         "uri": model_uri,
+                        "run_id": run_id,
                     }
                 ),
             }

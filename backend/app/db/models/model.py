@@ -50,6 +50,7 @@ class ModelRegistry(BaseModel, TimestampCreateMixin, TimestampUpdateMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     artifact_path: Mapped[str] = mapped_column(String(4000), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(100), nullable=True)
     uri: Mapped[str] = mapped_column(String(4000), nullable=False)
     reference_model_id: Mapped[int] = mapped_column(ForeignKey("model.id", ondelete="CASCADE"))
 

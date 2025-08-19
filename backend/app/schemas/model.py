@@ -64,11 +64,13 @@ class ModelFormatCreateUpdateSchema(BaseModel):
 class ModelRegistryRequestSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
+    run_id: str
 
 
 class ModelRegistryBaseSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
+    run_id: str
     reference_model_id: int
 
 
@@ -76,6 +78,7 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
     id: int
     artifact_path: str
     uri: str
+    run_id: str
     reference_model_id: int
 
     class Config:

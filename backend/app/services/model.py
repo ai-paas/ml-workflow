@@ -1,6 +1,7 @@
 import json
 import os
 import pickle
+import shutil
 import tempfile
 from enum import Enum
 from typing import Any, Optional
@@ -28,6 +29,7 @@ from schemas.model import (
 )
 from sqlalchemy.orm import Session
 from transformers import (
+    AutoConfig,
     AutoModelForObjectDetection,
     AutoProcessor,
     AutoTokenizer,
@@ -99,8 +101,7 @@ class ModelService:
             result = ""
         return result
 
-    staticmethod
-
+    @staticmethod
     def load_transformers(model_uri: str):
         loaded_pipe = ModelLoader.load_transformers(model_uri)
         return loaded_pipe
@@ -108,15 +109,15 @@ class ModelService:
 
 class HuggingFaceModelService:
     def create(self, db: Session, *, model_schema: ModelBaseSchema):
-        model_format_id = model_schema.format_id
+        # model_format_id = model_schema.format_id
         repo_id = model_schema.name
-        transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
-        # YOLOX 모델인지 먼저 확인 (transformers가 아닌 별도 처리)
-        if model_format_id == transformers_db_obj.id:  # transformers
-            model = self.load_transformers(repo_id)
-            run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_transformers(model, repo_id)
-        else:
-            print("Error!!!")
+        # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
+        # if model_format_id == transformers_db_obj.id:  # transformers
+        save_dir = self.load_and_save_transformers(repo_id)
+        run_id, artifact_uri = ModelRegistry().log_artifact(model_name=repo_id, save_dir=save_dir)
+        model_uri = ""
+        # else:
+        #     print("Error!!!")
 
         model_obj = model_repository.create(db, obj_in=model_schema)
         model_id = model_obj.id
@@ -125,6 +126,7 @@ class HuggingFaceModelService:
             obj_in=ModelRegistryBaseSchema(
                 artifact_path=artifact_uri,
                 uri=model_uri,
+                run_id=run_id,
                 reference_model_id=model_id,
             ),
         )
@@ -132,75 +134,7 @@ class HuggingFaceModelService:
         return model_repository.get(db, model_id)
 
     @staticmethod
-    def load_yolox(repo_id: str, device: str = "cpu") -> dict[str, Any]:
-        """
-        YOLOX 모델을 로드하는 메서드 (huggingface-hub 사용)
-
-        * params
-            * repo_id: str
-                - HuggingFace repository ID (e.g., "kadirnar/yolox_s-v0.1.1")
-            * device: str
-                - 사용할 디바이스 ("cpu", "cuda:0" 등)
-
-        * return
-            - YOLOX 모델 딕셔너리
-        """
-        try:
-            # 임시 디렉토리에 모델 다운로드
-            import tempfile
-
-            temp_dir = tempfile.mkdtemp()
-            local_dir = os.path.join(temp_dir, "yolox_model")
-
-            print(f"HuggingFace에서 YOLOX 모델 다운로드 중: {repo_id}")
-
-            # 전체 모델 다운로드
-            downloaded_path = snapshot_download(repo_id=repo_id, local_dir=local_dir, local_dir_use_symlinks=False)
-
-            print(f"모델이 다운로드되었습니다: {downloaded_path}")
-
-            # 다운로드된 파일 확인
-            model_files = os.listdir(downloaded_path)
-            print(f"다운로드된 파일들: {model_files}")
-
-            # 모델 관련 정보
-            model_info = {
-                "repo_id": repo_id,
-                "local_path": downloaded_path,
-                "model_files": model_files,
-                "device": device,
-            }
-
-            # config.json 파일이 있다면 로드
-            config_path = os.path.join(downloaded_path, "config.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-                    model_info["config"] = config
-                    print(f"Config 로드됨: {config}")
-
-            # PyTorch 모델 파일 찾기 (.pth, .pt, .bin 등)
-            model_file = None
-            for file in model_files:
-                if file.endswith((".pth", ".pt", ".bin")):
-                    model_file = os.path.join(downloaded_path, file)
-                    break
-
-            if model_file and os.path.exists(model_file):
-                print(f"모델 파일 발견: {model_file}")
-                # PyTorch 모델 로드
-                model_state_dict = torch.load(model_file, map_location=device)
-                model_info["model_state_dict"] = model_state_dict
-                model_info["model_file"] = model_file
-
-            return model_info
-
-        except Exception as e:
-            print(f"YOLOX 모델 로드 중 오류 발생: {e}")
-            raise Exception(f"YOLOX 모델 로드 중 오류 발생: {e}")
-
-    @staticmethod
-    def load_transformers(repo_id: str) -> dict[str, Any]:
+    def load_and_save_transformers(repo_id: str) -> str:
         """
         transformers 계열 Model을 Load하는 method
 
@@ -227,12 +161,30 @@ class HuggingFaceModelService:
         else:
             processor = AutoProcessor.from_pretrained(repo_id)
             model = AutoModelForObjectDetection.from_pretrained(repo_id)
-            tokenizer = AutoTokenizer.from_pretrained(repo_id)
-        return {
+
+            # 모델 설정을 확인하여 토크나이저 필요 여부 판단
+            config = AutoConfig.from_pretrained(repo_id)
+            if hasattr(config, "model_type") and config.model_type == "detr":
+                tokenizer = None
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(repo_id)
+
+        components = {
             "model": model,
             "image_processor": processor,
-            "tokenizer": tokenizer,
         }
+
+        if tokenizer is not None:
+            components["tokenizer"] = tokenizer
+
+        # 임시 디렉토리를 수동으로 생성하여 자동 삭제되지 않도록 함
+        temp_dir = tempfile.mkdtemp()
+        model.save_pretrained(temp_dir)
+        processor.save_pretrained(temp_dir)
+        if tokenizer is not None:
+            tokenizer.save_pretrained(temp_dir)
+
+        return temp_dir
 
 
 class CustomModelService:
@@ -257,26 +209,27 @@ class CustomModelService:
             model_name = model_schema.name
             with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as temp_file:
                 temp_file.write(contents)
-                temp_file_path = temp_file.name
-                if is_yolox_local_model(model_name):
-                    # model = torch.load(temp_file_path, map_location="cpu")
-                    run_id, artifact_uri = ModelRegistry().log_artifact(file, model_name)
-                    model_uri = ""
-                else:
-                    # TODO: gguf나 transformers 등의 여러 타입을 지원해야할것
-                    model = Llama(model_path=temp_file_path)
-                    run_id, artifact_uri, model_version, model_uri = ModelRegistry().log_llamacpp(model, model_name)
+                # temp_file_path = temp_file.name
+                # model = torch.load(temp_file_path, map_location="cpu")
+                run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
+                model_uri = ""
         else:
             # run_id = model_registry_schema.run_id
             artifact_uri = model_registry_schema.artifact_path
             # model_version = model_registry_schema.versions
             model_uri = model_registry_schema.uri
+            run_id = model_registry_schema.run_id
 
         model_obj = model_repository.create(db, obj_in=model_schema)
         model_id = model_obj.id
         model_registry_repository.create(
             db,
-            obj_in=ModelRegistryBaseSchema(artifact_path=artifact_uri, uri=model_uri, reference_model_id=model_id),
+            obj_in=ModelRegistryBaseSchema(
+                artifact_path=artifact_uri,
+                uri=model_uri,
+                reference_model_id=model_id,
+                run_id=run_id,
+            ),
         )
         db.commit()
         return model_repository.get(db, model_id)
