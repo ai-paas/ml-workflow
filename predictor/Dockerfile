@@ -51,4 +51,4 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy the FastAPI app code into the container
 COPY . .
 
-ENTRYPOINT ["python", "-m", "app.predictor", "--predictor_protocol", "v2"]
+ENTRYPOINT ["cd", "app", "&&", "python", "-m", "predictor", "--predictor_protocol", "v2"]
