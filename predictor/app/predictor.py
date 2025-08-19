@@ -9,15 +9,15 @@ import kserve
 import mlflow
 import numpy as np
 import torch
+
+# Model Manager Factory 및 관련 import
+from app.model_manager.base import BaseModelManager
+from app.model_manager.keras.custom_model import KerasModelManager
+from app.model_manager.onnx.custom_model import OnnxModelManager
+from app.model_manager.pytorch.custom_model import PytorchModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
 from kserve.utils.utils import generate_uuid
-
-# Model Manager Factory 및 관련 import
-from model_manager.base import BaseModelManager
-from model_manager.keras.custom_model import KerasModelManager
-from model_manager.onnx.custom_model import OnnxModelManager
-from model_manager.pytorch.custom_model import PytorchModelManager
 from PIL import Image, ImageDraw
 from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
