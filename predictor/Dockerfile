@@ -51,4 +51,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy the FastAPI app code into the container
 COPY . .
 
-ENTRYPOINT ["cd", "app", "&&", "python", "-m", "predictor", "--predictor_protocol", "v2"]
+# 작업 디렉토리를 app으로 변경하고 python 모듈 실행
+WORKDIR /app/app
+ENTRYPOINT ["python", "-m", "predictor", "--predictor_protocol", "v2"]
