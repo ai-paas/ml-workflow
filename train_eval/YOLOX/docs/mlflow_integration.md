@@ -3,7 +3,7 @@ YOLOX now supports MLFlow integration. MLFlow is an open-source platform for man
 For more information, please refer to: [MLFlow Documentation](https://www.mlflow.org/docs/latest/index.html)
 
 ## Follow these steps to start logging your experiments to MLFlow:
-### Step-1: Install MLFlow via pip 
+### Step-1: Install MLFlow via pip
 ```bash
 pip install mlflow python-dotenv
 ```
@@ -22,7 +22,7 @@ MLFLOW_TRACKING_URI="127.0.0.1:5000"  # set to your mlflow server URI
 MLFLOW_EXPERIMENT_NAME="/path/to/experiment"  # set to your experiment name
 MLFLOW_TAGS={"release.candidate": "DEV1", "release.version": "0.0.0"}
 # config related to logging model to mlflow as pyfunc
-YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS="True" # whether to log model (best or historical) or not 
+YOLOX_MLFLOW_LOG_MODEL_ARTIFACTS="True" # whether to log model (best or historical) or not
 YOLOX_MLFLOW_LOG_MODEL_PER_n_EPOCHS=30 # try logging model only after every n epochs
 YOLOX_MLFLOW_LOG_Nth_EPOCH_MODELS="False" # whether to log step model along with best_model or not
 YOLOX_MLFLOW_RUN_NAME="" # give a custom name to your run, otherwise a random name is assign by mlflow
@@ -35,7 +35,7 @@ MLFLOW_RUN_ID="" # continue training from a given run_id
 ```
 ### Step-5: Provide --logger "mlflow" to the training script
 ```bash
-python tools/train.py -l mlflow -f exps/path/to/exp.py -d 1 -b 8 --fp16 -o -c 
+python tools/train.py -l mlflow -f exps/path/to/exp.py -d 1 -b 8 --fp16 -o -c
 pre_trained_model/<model>.pth
 # note the -l mlflow flag
 # one working example is this

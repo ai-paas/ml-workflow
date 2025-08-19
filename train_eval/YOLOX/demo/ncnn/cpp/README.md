@@ -1,6 +1,6 @@
 # YOLOX-CPP-ncnn
 
-Cpp file compile of YOLOX object detection base on [ncnn](https://github.com/Tencent/ncnn).  
+Cpp file compile of YOLOX object detection base on [ncnn](https://github.com/Tencent/ncnn).
 
 ## Tutorial
 
@@ -49,7 +49,7 @@ Crop             Slice_39                 1 1 677 682 -23309=1,1 -23310=1,214748
 Concat           Concat_40                4 1 652 672 662 682 683 0=0
 ...
 ```
-* Change first number for 295 to 295 - 9 = 286 (since we will remove 10 layers and add 1 layers, total layers number should minus 9). 
+* Change first number for 295 to 295 - 9 = 286 (since we will remove 10 layers and add 1 layers, total layers number should minus 9).
 * Then remove 10 lines of code from Split to Concat, but remember the last but 2nd number: 683.
 * Add YoloV5Focus layer After Input (using previous number 683):
 ```
@@ -95,7 +95,7 @@ Then a `yolox.torchscript.pt` will be generated. Copy this file to your pnnx bui
 ```
 Still, as ncnn does not support `slice` op as we mentioned in [Step3](https://github.com/Megvii-BaseDetection/YOLOX/tree/main/demo/ncnn/cpp#step3). You will still see the warnings during this process.
 
-Then multiple pnnx related files will be genreated in your yolox folder. Use `yolox.torchscript.ncnn.param` and `yolox.torchscript.ncnn.bin` as your converted model. 
+Then multiple pnnx related files will be genreated in your yolox folder. Use `yolox.torchscript.ncnn.param` and `yolox.torchscript.ncnn.bin` as your converted model.
 
 Then we can follow back to our [Step4](https://github.com/Megvii-BaseDetection/YOLOX/tree/main/demo/ncnn/cpp#step4) for the rest of our implementation.
 

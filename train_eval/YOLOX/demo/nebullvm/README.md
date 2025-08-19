@@ -62,7 +62,7 @@ In this example, we optimized YOLOX without any loss in accuracy. To further spe
 For more information about nebullvm API, see [nebullvm documentation](https://github.com/nebuly-ai/nebullvm).
 
 
-Let's now compare the latency of the optimized model with that of the original model. 
+Let's now compare the latency of the optimized model with that of the original model.
 Note that before testing latency of the optimized model, it is necessary to perform some warmup runs, as some optimizers fine-tune certain internal parameters during the first few inferences after optimization.
 
 ```python
