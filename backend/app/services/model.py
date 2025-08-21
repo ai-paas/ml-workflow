@@ -164,7 +164,7 @@ class HuggingFaceModelService:
 
             # 모델 설정을 확인하여 토크나이저 필요 여부 판단
             config = AutoConfig.from_pretrained(repo_id)
-            if hasattr(config, "model_type") and config.model_type == "detr":
+            if hasattr(config, "model_type") and (config.model_type == "detr" or config.model_type == "yolos"):
                 tokenizer = None
             else:
                 tokenizer = AutoTokenizer.from_pretrained(repo_id)

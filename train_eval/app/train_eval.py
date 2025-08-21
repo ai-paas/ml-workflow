@@ -5,25 +5,32 @@ import argparse
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
 import tempfile
 import traceback
 import uuid
+import warnings
 from pathlib import Path
 
 import mlflow
 import requests
 import torch
+import torch.backends.cudnn as cudnn
 from loguru import logger
 from mlflow import MlflowClient
+from torch.nn.parallel import DistributedDataParallel as DDP
 from YOLOX.exps.default import yolox_l, yolox_m, yolox_nano, yolox_s, yolox_tiny, yolox_x
 from YOLOX.tools import train
 from YOLOX.tools.train import make_parser
 from YOLOX.yolox.core.launch import launch
 from YOLOX.yolox.exp.build import get_exp
 from YOLOX.yolox.exp.yolox_base import check_exp_value
+
+# eval 관련 import 추가
+from YOLOX.yolox.utils import configure_nccl, fuse_model, get_local_rank, get_model_info, setup_logger
 from YOLOX.yolox.utils.dist import get_num_devices
 from YOLOX.yolox.utils.setup_env import configure_module
 
@@ -377,6 +384,11 @@ class CustomTrainModel:
                     dist_url=dist_url,
                     args=(exp, args),
                 )
+
+                # 학습 완료 후 평가 실행
+                logger.info("학습 완료! 평가를 시작합니다.")
+                self.evaluate_after_training(run, temp_exp_path, matched_exp_name, modifications)
+
                 self.insert_metadata(
                     run_id=run.info.run_id,
                     artifact_uri=run.info.artifact_uri,
@@ -393,6 +405,246 @@ class CustomTrainModel:
         except Exception as e:
             logger.error(f"학습 중 오류: {e}")
             raise
+
+    def evaluate_after_training(self, run, temp_exp_path, matched_exp_name, modifications):
+        """학습 후 평가 실행"""
+        try:
+            logger.info("학습된 모델로 평가를 시작합니다.")
+
+            # 학습된 모델의 체크포인트 경로 찾기
+            output_dir = Path(run.info.artifact_uri)
+            ckpt_files = list(output_dir.glob("**/*.pth"))
+
+            if not ckpt_files:
+                logger.warning("평가할 체크포인트 파일을 찾을 수 없습니다.")
+                return
+
+            # 가장 최근 체크포인트 또는 best_ckpt.pth 찾기
+            best_ckpt = None
+            for ckpt_file in ckpt_files:
+                if "best_ckpt.pth" in ckpt_file.name:
+                    best_ckpt = ckpt_file
+                    break
+
+            if not best_ckpt:
+                # best_ckpt가 없으면 가장 최근 파일 사용
+                best_ckpt = max(ckpt_files, key=lambda x: x.stat().st_mtime)
+
+            logger.info(f"평가에 사용할 체크포인트: {best_ckpt}")
+
+            # 평가 실행
+            self._run_evaluation(temp_exp_path, str(best_ckpt), run)
+
+        except Exception as e:
+            logger.error(f"학습 후 평가 중 오류: {e}")
+            raise
+
+    def _run_evaluation(self, temp_exp_path: str, ckpt_path: str, run):
+        """평가 실행 로직"""
+        try:
+            # YOLOX 환경변수 설정
+            os.environ["YOLOX_DATADIR"] = str(self.dataset_artifacts_dir)
+
+            # eval.py의 실행 코드를 직접 구현
+            configure_module()
+
+            # 인자 파싱 (eval용)
+            parser = argparse.ArgumentParser("YOLOX Eval")
+            parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+            parser.add_argument("-n", "--name", type=str, default=None, help="model name")
+            parser.add_argument("--dist-backend", default="nccl", type=str, help="distributed backend")
+            parser.add_argument("--dist-url", default=None, type=str, help="url used to set up distributed training")
+            parser.add_argument("-b", "--batch-size", type=int, default=64, help="batch size")
+            parser.add_argument("-d", "--devices", default=None, type=int, help="device for training")
+            parser.add_argument("--num_machines", default=1, type=int, help="num of node for training")
+            parser.add_argument("--machine_rank", default=0, type=int, help="node rank for multi-node training")
+            parser.add_argument(
+                "-f", "--exp_file", default=None, type=str, help="please input your experiment description file"
+            )
+            parser.add_argument("-c", "--ckpt", default=None, type=str, help="ckpt for eval")
+            parser.add_argument("--conf", default=None, type=float, help="test conf")
+            parser.add_argument("--nms", default=None, type=float, help="test nms threshold")
+            parser.add_argument("--tsize", default=None, type=int, help="test img size")
+            parser.add_argument("--seed", default=None, type=int, help="eval seed")
+            parser.add_argument(
+                "--fp16", dest="fp16", default=False, action="store_true", help="Adopting mix precision evaluating."
+            )
+            parser.add_argument(
+                "--fuse", dest="fuse", default=False, action="store_true", help="Fuse conv and bn for testing."
+            )
+            parser.add_argument(
+                "--trt", dest="trt", default=False, action="store_true", help="Using TensorRT model for testing."
+            )
+            parser.add_argument(
+                "--legacy",
+                dest="legacy",
+                default=False,
+                action="store_true",
+                help="To be compatible with older versions",
+            )
+            parser.add_argument(
+                "--test", dest="test", default=False, action="store_true", help="Evaluating on test-dev set."
+            )
+            parser.add_argument("--speed", dest="speed", default=False, action="store_true", help="speed test only.")
+            parser.add_argument(
+                "opts", help="Modify config options using the command-line", default=None, nargs=argparse.REMAINDER
+            )
+
+            # 기본 인자 설정
+            eval_args = [
+                "-f",
+                temp_exp_path,
+                "-c",
+                ckpt_path,
+                "-b",
+                self.batch_size,
+                "-d",
+                self.gpu_limit,
+            ]
+
+            args = parser.parse_args(eval_args)
+
+            exp = get_exp(args.exp_file, args.name)
+            exp.merge(args.opts)
+
+            if not args.experiment_name:
+                args.experiment_name = exp.exp_name
+
+            num_gpu = get_num_devices() if args.devices is None else args.devices
+            num_gpu = min(num_gpu, get_num_devices())
+
+            # dist_url = "auto" if args.dist_url is None else args.dist_url
+
+            # 평가 실행
+            os.environ["MLFLOW_NESTED_RUN"] = "TRUE"
+            os.environ["MLFLOW_RUN_ID"] = run.info.run_id
+
+            self._execute_evaluation(exp, args, num_gpu, run)
+
+        except Exception as e:
+            logger.error(f"평가 실행 중 오류: {e}")
+            raise
+
+    def _execute_evaluation(self, exp, args, num_gpu, run):
+        """실제 평가 실행"""
+        if args.seed is not None:
+            random.seed(args.seed)
+            torch.manual_seed(args.seed)
+            cudnn.deterministic = True
+            warnings.warn("You have chosen to seed testing. This will turn on the CUDNN deterministic setting, ")
+
+        is_distributed = num_gpu > 1
+
+        # set environment variables for distributed training
+        configure_nccl()
+        cudnn.benchmark = True
+
+        rank = get_local_rank()
+
+        file_name = os.path.join(exp.output_dir, args.experiment_name)
+
+        if rank == 0:
+            os.makedirs(file_name, exist_ok=True)
+
+        setup_logger(file_name, distributed_rank=rank, filename="val_log.txt", mode="a")
+        logger.info("Args: {}".format(args))
+
+        if args.conf is not None:
+            exp.test_conf = args.conf
+        if args.nms is not None:
+            exp.nmsthre = args.nms
+        if args.tsize is not None:
+            exp.test_size = (args.tsize, args.tsize)
+
+        model = exp.get_model()
+        logger.info("Model Summary: {}".format(get_model_info(model, exp.test_size)))
+        logger.info("Model Structure:\n{}".format(str(model)))
+
+        evaluator = exp.get_evaluator(args.batch_size, is_distributed, args.test, args.legacy)
+        evaluator.per_class_AP = True
+        evaluator.per_class_AR = True
+
+        torch.cuda.set_device(rank)
+        model.cuda(rank)
+        model.eval()
+
+        if not args.speed and not args.trt:
+            if args.ckpt is None:
+                ckpt_file = os.path.join(file_name, "best_ckpt.pth")
+            else:
+                ckpt_file = args.ckpt
+            logger.info("loading checkpoint from {}".format(ckpt_file))
+            loc = "cuda:{}".format(rank)
+            ckpt = torch.load(ckpt_file, map_location=loc)
+            model.load_state_dict(ckpt["model"])
+            logger.info("loaded checkpoint done.")
+
+        if is_distributed:
+            model = DDP(model, device_ids=[rank])
+
+        if args.fuse:
+            logger.info("\tFusing model...")
+            model = fuse_model(model)
+
+        if args.trt:
+            assert (
+                not args.fuse and not is_distributed and args.batch_size == 1
+            ), "TensorRT model is not support model fusing and distributed inferencing!"
+            trt_file = os.path.join(file_name, "model_trt.pth")
+            assert os.path.exists(trt_file), "TensorRT model is not found!\n Run tools/trt.py first!"
+            model.head.decode_in_inference = False
+            decoder = model.head.decode_outputs
+        else:
+            trt_file = None
+            decoder = None
+
+        # start evaluate
+        *_, summary = evaluator.evaluate(model, is_distributed, args.fp16, trt_file, decoder, exp.test_size)
+        logger.info("\n" + summary)
+
+        # 평가 결과를 MLflow에 로깅
+        self._log_evaluation_results(summary, run)
+
+    def _log_evaluation_results(self, summary: str, run):
+        """평가 결과를 MLflow에 로깅"""
+        try:
+            # summary에서 mAP 값 추출 (예: "mAP@0.5:0.95: 0.456")
+            map_pattern = r"mAP@0\.5:0\.95:\s*([\d.]+)"
+            map_match = re.search(map_pattern, summary)
+
+            if map_match:
+                map_value = float(map_match.group(1))
+                mlflow.log_metric("mAP@0.5:0.95", map_value)
+                logger.info(f"mAP@0.5:0.95: {map_value}")
+
+            # AP50 값 추출
+            ap50_pattern = r"AP50:\s*([\d.]+)"
+            ap50_match = re.search(ap50_pattern, summary)
+
+            if ap50_match:
+                ap50_value = float(ap50_match.group(1))
+                mlflow.log_metric("AP50", ap50_value)
+                logger.info(f"AP50: {ap50_value}")
+
+            # AP75 값 추출
+            ap75_pattern = r"AP75:\s*([\d.]+)"
+            ap75_match = re.search(ap75_pattern, summary)
+
+            if ap75_match:
+                ap75_value = float(ap75_match.group(1))
+                mlflow.log_metric("AP75", ap75_value)
+                logger.info(f"AP75: {ap75_value}")
+
+            # 전체 평가 결과를 텍스트 파일로 저장
+            eval_results_path = os.path.join(run.info.artifact_uri, "evaluation_results.txt")
+            with open(eval_results_path, "w") as f:
+                f.write(summary)
+
+            mlflow.log_artifact(eval_results_path, "evaluation_results.txt")
+            logger.info("평가 결과가 MLflow에 로깅되었습니다.")
+
+        except Exception as e:
+            logger.error(f"평가 결과 로깅 중 오류: {e}")
 
     def postprocess(self):
         """학습 후 처리"""
@@ -549,16 +801,13 @@ def main():
         # 데이터 전처리
         model.preprocess()
 
-        # 학습 실행
+        # 학습 실행 (자동으로 평가도 실행됨)
         model.train()
 
-        # 후처리
-        # model.postprocess()
-
-        logger.info("학습 완료!")
+        logger.info("학습 및 평가 완료!")
 
     except Exception as e:
-        logger.error(f"학습 중 오류 발생: {e}")
+        logger.error(f"작업 중 오류 발생: {e}")
         traceback.print_exc()
         raise
 
