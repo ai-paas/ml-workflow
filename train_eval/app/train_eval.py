@@ -411,8 +411,12 @@ class CustomTrainModel:
         try:
             logger.info("학습된 모델로 평가를 시작합니다.")
 
+            # MLflow 아티팩트 다운로드
+            artifacts_dir = mlflow.artifacts.download_artifacts(artifact_uri=run.info.artifact_uri)
+            logger.info(f"아티팩트 다운로드 완료: {artifacts_dir}")
+
             # 학습된 모델의 체크포인트 경로 찾기
-            output_dir = Path(run.info.artifact_uri)
+            output_dir = Path(artifacts_dir)
             ckpt_files = list(output_dir.glob("**/*.pth"))
 
             if not ckpt_files:
@@ -575,7 +579,7 @@ class CustomTrainModel:
                 ckpt_file = args.ckpt
             logger.info("loading checkpoint from {}".format(ckpt_file))
             loc = "cuda:{}".format(rank)
-            ckpt = torch.load(ckpt_file, map_location=loc)
+            ckpt = torch.load(ckpt_file, map_location=loc, weights_only=False)
             model.load_state_dict(ckpt["model"])
             logger.info("loaded checkpoint done.")
 
@@ -608,43 +612,259 @@ class CustomTrainModel:
     def _log_evaluation_results(self, summary: str, run):
         """평가 결과를 MLflow에 로깅"""
         try:
-            # summary에서 mAP 값 추출 (예: "mAP@0.5:0.95: 0.456")
-            map_pattern = r"mAP@0\.5:0\.95:\s*([\d.]+)"
-            map_match = re.search(map_pattern, summary)
+            # 1. 기본 메트릭 추출 및 로깅
+            metrics = self._extract_basic_metrics(summary)
 
-            if map_match:
-                map_value = float(map_match.group(1))
-                mlflow.log_metric("mAP@0.5:0.95", map_value)
-                logger.info(f"mAP@0.5:0.95: {map_value}")
+            # 2. 클래스별 성능 분석
+            class_analysis = self._analyze_per_class_performance(summary)
 
-            # AP50 값 추출
-            ap50_pattern = r"AP50:\s*([\d.]+)"
-            ap50_match = re.search(ap50_pattern, summary)
+            # 3. 성능 진단 및 권장사항 생성
+            diagnosis = self._generate_performance_diagnosis(metrics, class_analysis)
 
-            if ap50_match:
-                ap50_value = float(ap50_match.group(1))
-                mlflow.log_metric("AP50", ap50_value)
-                logger.info(f"AP50: {ap50_value}")
+            # 4. 정제된 평가 결과 생성
+            refined_summary = self._create_refined_summary(summary, metrics, class_analysis, diagnosis)
 
-            # AP75 값 추출
-            ap75_pattern = r"AP75:\s*([\d.]+)"
-            ap75_match = re.search(ap75_pattern, summary)
+            # 5. MLflow에 메트릭 로깅
+            for metric_name, metric_value in metrics.items():
+                if metric_value is not None:
+                    mlflow.log_metric(metric_name, metric_value)
+                    logger.info(f"{metric_name}: {metric_value}")
 
-            if ap75_match:
-                ap75_value = float(ap75_match.group(1))
-                mlflow.log_metric("AP75", ap75_value)
-                logger.info(f"AP75: {ap75_value}")
+            # 6. 정제된 결과를 파일로 저장 후 MLflow에 로깅
+            temp_file_path = os.path.join(tempfile.gettempdir(), "evaluation_results.txt")
+            with open(temp_file_path, "w", encoding="utf-8") as temp_file:
+                temp_file.write(refined_summary)
 
-            # 전체 평가 결과를 텍스트 파일로 저장
-            eval_results_path = os.path.join(run.info.artifact_uri, "evaluation_results.txt")
-            with open(eval_results_path, "w") as f:
-                f.write(summary)
+            mlflow.log_artifact(temp_file_path, "evaluation")
 
-            mlflow.log_artifact(eval_results_path, "evaluation_results.txt")
+            # 임시 파일 삭제
+            os.unlink(temp_file_path)
+
             logger.info("평가 결과가 MLflow에 로깅되었습니다.")
 
         except Exception as e:
             logger.error(f"평가 결과 로깅 중 오류: {e}")
+            raise
+
+    def _extract_basic_metrics(self, summary: str) -> dict:
+        """기본 메트릭 추출"""
+        metrics = {}
+
+        # mAP@0.5:0.95 추출
+        map_pattern = r"Average Precision.*IoU=0\.50:0\.95.*area=\s*all.*maxDets=100.*=\s*([\d.-]+)"
+        map_match = re.search(map_pattern, summary)
+        if map_match:
+            metrics["mAP_0.5_0.95"] = float(map_match.group(1))  # 콜론을 언더스코어로 변경
+
+        # AP50 추출
+        ap50_pattern = r"Average Precision.*IoU=0\.50.*area=\s*all.*maxDets=100.*=\s*([\d.-]+)"
+        ap50_match = re.search(ap50_pattern, summary)
+        if ap50_match:
+            metrics["AP50"] = float(ap50_match.group(1))
+
+        # AP75 추출
+        ap75_pattern = r"Average Precision.*IoU=0\.75.*area=\s*all.*maxDets=100.*=\s*([\d.-]+)"
+        ap75_match = re.search(ap75_pattern, summary)
+        if ap75_match:
+            metrics["AP75"] = float(ap75_match.group(1))
+
+        # AR 추출
+        ar_pattern = r"Average Recall.*IoU=0\.50:0\.95.*area=\s*all.*maxDets=100.*=\s*([\d.-]+)"
+        ar_match = re.search(ar_pattern, summary)
+        if ar_match:
+            metrics["AR_0.5_0.95"] = float(ar_match.group(1))  # 콜론을 언더스코어로 변경
+
+        # 객체 크기별 성능
+        size_patterns = {
+            "AP_small": r"Average Precision.*IoU=0\.50:0\.95.*area=\s*small.*maxDets=100.*=\s*([\d.-]+)",
+            "AP_medium": r"Average Precision.*IoU=0\.50:0\.95.*area=\s*medium.*maxDets=100.*=\s*([\d.-]+)",
+            "AP_large": r"Average Precision.*IoU=0\.50:0\.95.*area=\s*large.*maxDets=100.*=\s*([\d.-]+)",
+        }
+
+        for metric_name, pattern in size_patterns.items():
+            match = re.search(pattern, summary)
+            if match:
+                metrics[metric_name] = float(match.group(1))
+
+        return metrics
+
+    def _analyze_per_class_performance(self, summary: str) -> dict:
+        """클래스별 성능 분석"""
+        analysis = {
+            "total_classes": 0,
+            "detected_classes": 0,
+            "nan_classes": 0,
+            "zero_ap_classes": 0,
+            "best_performing_classes": [],
+            "worst_performing_classes": [],
+        }
+
+        # per class AP 테이블에서 클래스별 성능 추출
+        ap_table_pattern = r"per class AP:(.*?)per class AR:"
+        ap_table_match = re.search(ap_table_pattern, summary, re.DOTALL)
+
+        if ap_table_match:
+            ap_table = ap_table_match.group(1)
+
+            # 클래스별 AP 값 추출
+            class_ap_pattern = r"\|\s*(\d+)\s*\|\s*([\d.-]+|nan)\s*\|"
+            class_aps = re.findall(class_ap_pattern, ap_table)
+
+            analysis["total_classes"] = len(class_aps)
+            class_performances = []
+
+            for class_id, ap_value in class_aps:
+                class_id = int(class_id)
+
+                if ap_value.lower() == "nan":
+                    analysis["nan_classes"] += 1
+                    class_performances.append((class_id, None))
+                else:
+                    ap_float = float(ap_value)
+                    if ap_float > 0:
+                        analysis["detected_classes"] += 1
+                        class_performances.append((class_id, ap_float))
+
+                        # 성능이 좋은 클래스 (AP > 10%)
+                        if ap_float > 10.0:
+                            analysis["best_performing_classes"].append((class_id, ap_float))
+                    else:
+                        analysis["zero_ap_classes"] += 1
+                        class_performances.append((class_id, ap_float))
+
+            # 성능 순으로 정렬
+            valid_performances = [(cid, ap) for cid, ap in class_performances if ap is not None]
+            if valid_performances:
+                valid_performances.sort(key=lambda x: x[1], reverse=True)
+                analysis["best_performing_classes"] = valid_performances[:5]  # 상위 5개
+                analysis["worst_performing_classes"] = valid_performances[-5:]  # 하위 5개
+
+        return analysis
+
+    def _generate_performance_diagnosis(self, metrics: dict, class_analysis: dict) -> dict:
+        """성능 진단 및 권장사항 생성"""
+        diagnosis = {"overall_performance": "Unknown", "issues": [], "recommendations": []}
+
+        # 전체 성능 평가
+        map_score = metrics.get("mAP@0.5:0.95", 0)
+        if map_score < 0.05:
+            diagnosis["overall_performance"] = "Very Poor"
+            diagnosis["issues"].append("매우 낮은 mAP 점수 (5% 미만)")
+        elif map_score < 0.2:
+            diagnosis["overall_performance"] = "Poor"
+            diagnosis["issues"].append("낮은 mAP 점수 (20% 미만)")
+        elif map_score < 0.5:
+            diagnosis["overall_performance"] = "Fair"
+        elif map_score < 0.7:
+            diagnosis["overall_performance"] = "Good"
+        else:
+            diagnosis["overall_performance"] = "Excellent"
+
+        # 클래스별 문제 진단
+        total_classes = class_analysis.get("total_classes", 0)
+        nan_classes = class_analysis.get("nan_classes", 0)
+        detected_classes = class_analysis.get("detected_classes", 0)
+
+        if total_classes > 0:
+            nan_ratio = nan_classes / total_classes
+            detection_ratio = detected_classes / total_classes
+
+            if nan_ratio > 0.8:
+                diagnosis["issues"].append(f"대부분의 클래스가 검출되지 않음 (nan 비율: {nan_ratio:.1%})")
+                diagnosis["recommendations"].append("데이터셋에 모든 클래스가 포함되어 있는지 확인")
+                diagnosis["recommendations"].append("학습 데이터의 라벨링 상태 점검")
+
+            if detection_ratio < 0.2:
+                diagnosis["issues"].append(f"검출된 클래스가 매우 적음 (검출 비율: {detection_ratio:.1%})")
+                diagnosis["recommendations"].append("학습 파라미터 조정 (학습률, 배치 크기, 에포크 수)")
+                diagnosis["recommendations"].append("데이터 증강 기법 적용")
+
+        # 성능이 좋은 클래스가 있는지 확인
+        best_classes = class_analysis.get("best_performing_classes", [])
+        if best_classes:
+            diagnosis["recommendations"].append(
+                f"성능이 좋은 클래스: {[f'Class {cid}({ap:.1f}%)' for cid, ap in best_classes[:3]]}"
+            )
+
+        return diagnosis
+
+    def _create_refined_summary(
+        self, original_summary: str, metrics: dict, class_analysis: dict, diagnosis: dict
+    ) -> str:
+        """정제된 평가 결과 생성"""
+        refined_summary = []
+
+        # 헤더
+        refined_summary.append("=" * 80)
+        refined_summary.append("YOLO 모델 평가 결과 분석")
+        refined_summary.append("=" * 80)
+        refined_summary.append("")
+
+        # 성능 요약
+        refined_summary.append("📊 성능 요약")
+        refined_summary.append("-" * 40)
+
+        # 메트릭 이름 매핑 (표시용)
+        metric_display_names = {
+            "mAP_0.5_0.95": "mAP@0.5:0.95",
+            "AP50": "AP50",
+            "AP75": "AP75",
+            "AR_0.5_0.95": "AR@0.5:0.95",
+            "AP_small": "AP_small",
+            "AP_medium": "AP_medium",
+            "AP_large": "AP_large",
+        }
+
+        for metric_name, metric_value in metrics.items():
+            if metric_value is not None:
+                display_name = metric_display_names.get(metric_name, metric_name)
+                if metric_name.startswith("mAP") or metric_name.startswith("AP") or metric_name.startswith("AR"):
+                    refined_summary.append(f"{display_name}: {metric_value:.3f} ({metric_value*100:.1f}%)")
+                else:
+                    refined_summary.append(f"{display_name}: {metric_value:.3f}")
+        refined_summary.append("")
+
+        # 클래스별 분석
+        refined_summary.append("🎯 클래스별 성능 분석")
+        refined_summary.append("-" * 40)
+        refined_summary.append(f"전체 클래스 수: {class_analysis.get('total_classes', 0)}")
+        refined_summary.append(f"검출된 클래스 수: {class_analysis.get('detected_classes', 0)}")
+        refined_summary.append(f"검출되지 않은 클래스 수 (nan): {class_analysis.get('nan_classes', 0)}")
+        refined_summary.append(f"AP=0인 클래스 수: {class_analysis.get('zero_ap_classes', 0)}")
+        refined_summary.append("")
+
+        # 성능이 좋은 클래스
+        best_classes = class_analysis.get("best_performing_classes", [])
+        if best_classes:
+            refined_summary.append("🏆 성능이 좋은 클래스 (상위 5개)")
+            for i, (class_id, ap) in enumerate(best_classes[:5], 1):
+                refined_summary.append(f"  {i}. Class {class_id}: AP = {ap:.3f} ({ap*100:.1f}%)")
+            refined_summary.append("")
+
+        # 성능 진단
+        refined_summary.append("🔍 성능 진단")
+        refined_summary.append("-" * 40)
+        refined_summary.append(f"전체 성능 등급: {diagnosis['overall_performance']}")
+        refined_summary.append("")
+
+        if diagnosis["issues"]:
+            refined_summary.append("⚠️ 발견된 문제점:")
+            for issue in diagnosis["issues"]:
+                refined_summary.append(f"  • {issue}")
+            refined_summary.append("")
+
+        if diagnosis["recommendations"]:
+            refined_summary.append("💡 개선 권장사항:")
+            for rec in diagnosis["recommendations"]:
+                refined_summary.append(f"  • {rec}")
+            refined_summary.append("")
+
+        # 원본 요약 추가
+        refined_summary.append(" 원본 평가 결과")
+        refined_summary.append("-" * 40)
+        refined_summary.append(original_summary)
+
+        return "\n".join(refined_summary)
 
     def postprocess(self):
         """학습 후 처리"""
@@ -668,12 +888,19 @@ class CustomTrainModel:
     ):
         """메타데이터 삽입"""
         try:
+            if not restapi_token:
+                logger.warning("REST API 토큰이 없어 메타데이터 삽입을 건너뜁니다.")
+                return None
+
             # API 토큰 헤더 설정
             headers = {"Authorization": f"Bearer {restapi_token}"}
 
-            # provider, type, format ID 조회
+            # provider, type, format ID 조회 (타임아웃 추가)
             provider_response = requests.get(
-                f"{restapi_url}/api/v1/models/providers", headers=headers, params={"provider_name": "custom"}
+                f"{restapi_url}/api/v1/models/providers",
+                headers=headers,
+                params={"provider_name": "custom"},
+                timeout=10,
             )
             if provider_response.status_code != 200:
                 raise Exception(f"Provider 조회 실패: {provider_response.text}")
@@ -720,6 +947,9 @@ class CustomTrainModel:
                 logger.error(f"메타데이터 삽입 실패: {response.text}")
                 return None
 
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"REST API 서버에 연결할 수 없습니다: {restapi_url}")
+            return None
         except Exception as e:
             logger.error(f"메타데이터 삽입 중 오류 발생: {e}")
             return None
@@ -728,7 +958,9 @@ class CustomTrainModel:
         """REST API 토큰 획득"""
         try:
             response = requests.post(
-                f"{url}/api/v1/authentications/token", data={"username": username, "password": password}
+                f"{url}/api/v1/authentications/token",
+                data={"username": username, "password": password},
+                timeout=10,  # 타임아웃 추가
             )
 
             if response.status_code == 200:
@@ -737,6 +969,9 @@ class CustomTrainModel:
                 logger.error(f"REST API 로그인 실패: {response.status_code}")
                 return ""
 
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"REST API 서버에 연결할 수 없습니다: {url}")
+            return ""
         except Exception as e:
             logger.error(f"REST API 토큰 획득 중 오류 발생: {e}")
             return ""
