@@ -1,3 +1,4 @@
+from db.models.experiment import ExperimentModel
 from repos.experiment import experiment_repository, hyperparameter_repository, hyperparameter_type_repository
 from schemas.experiment import (
     ExperimentBaseSchema,
@@ -25,6 +26,13 @@ class ExperimentService:
     @staticmethod
     def get_multi(db: Session, skip: int = 0, limit: int = 100) -> list[ExperimentReadSchema]:
         return experiment_repository.get_multi(db, skip=skip, limit=limit)
+
+    @staticmethod
+    def update(db: Session, *, experiment_id: int, obj_in: ExperimentUpdateRequest):
+        db_obj = experiment_repository.get(db, experiment_id)
+        db_obj = experiment_repository.update(db, db_obj=db_obj, obj_in=obj_in)
+        db.commit()
+        return db_obj
 
 
 class HyperparameterService:

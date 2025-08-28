@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     KUBEFLOW_USERNAME: str
     KUBEFLOW_PASSWORD: str
     KUBEFLOW_NAMESPACE: str
+    KUBEFLOW_EXPERIMENT_NAME: str
 
     DB_TYPE: str
     DB_NAME: str

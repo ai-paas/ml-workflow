@@ -120,7 +120,7 @@ def container_train(
         kf = KubeflowManager()
         client = kf.get_kfp_client()
         # TODO: mocking data. 이후 수정 필요.
-        kubeflow_experiment_name = "aipaas-ml-workflow"
+        kubeflow_experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
         kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
         # kf.create_pipeline(sample_pipeline, pipeline_name )
@@ -134,70 +134,14 @@ def container_train(
                 status="CREATED",
             ),
         )
-        epochs_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "epochs")
-        batch_size_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "batch_size")
-        weight_decay_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "weight_decay")
-        lr0_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "lr0")
-        lrf_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "lrf")
-        gpus_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "gpus")
-        save_period_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "save_period")
 
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=epochs_hp_type_obj.id,
-                value=epochs,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=batch_size_hp_type_obj.id,
-                value=batch_size,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=weight_decay_hp_type_obj.id,
-                value=weight_decay,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=lr0_hp_type_obj.id,
-                value=lr0,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=lrf_hp_type_obj.id,
-                value=lrf,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=gpus_hp_type_obj.id,
-                value=gpus,
-            ),
-        )
-        HyperparameterService().create(
-            db,
-            obj_in=HyperparameterBaseSchema(
-                experiment_id=experiment_db_obj.id,
-                hyperparameter_type_id=save_period_hp_type_obj.id,
-                value=save_period,
-            ),
-        )
+        create_hyperparameter(db, experiment_db_obj.id, "epochs", epochs)
+        create_hyperparameter(db, experiment_db_obj.id, "batch_size", batch_size)
+        create_hyperparameter(db, experiment_db_obj.id, "weight_decay", weight_decay)
+        create_hyperparameter(db, experiment_db_obj.id, "lr0", lr0)
+        create_hyperparameter(db, experiment_db_obj.id, "lrf", lrf)
+        create_hyperparameter(db, experiment_db_obj.id, "gpus", gpus)
+        create_hyperparameter(db, experiment_db_obj.id, "save_period", save_period)
 
         client.create_run_from_pipeline_func(
             train_pipeline,
@@ -273,7 +217,7 @@ def register_model(
         client = kf.get_kfp_client()
 
         # TODO: mocking data. 이후 외부에서 인자로 받아야함.
-        kubeflow_experiment_name = "aipaas-ml-workflow"
+        kubeflow_experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
 
         kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
@@ -387,7 +331,7 @@ def serve(
         client = kf.get_kfp_client()
 
         # TODO: mocking data. 이후 외부에서 인자로 받아야함.
-        kubeflow_experiment_name = "aipaas-ml-workflow"
+        kubeflow_experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
 
         experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
@@ -541,3 +485,15 @@ class PipelineTrainingMonitor:
         except Exception as e:
             logger.error(f"학습 상태 가져오기 실패: {e}")
             return None
+
+
+def create_hyperparameter(db: Session, experiment_id: int, param_name: str, value: str):
+    hp_type_obj = HyperparameterTypeService().get_by_param_name(db, param_name)
+    return HyperparameterService().create(
+        db,
+        obj_in=HyperparameterBaseSchema(
+            experiment_id=experiment_id,
+            hyperparameter_type_id=hp_type_obj.id,
+            value=value,
+        ),
+    )

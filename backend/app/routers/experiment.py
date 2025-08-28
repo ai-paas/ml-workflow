@@ -23,7 +23,7 @@ async def update_experiment(
     current_user: UserSchema = Depends(get_current_user)
 ):
     try:
-        ExperimentService().update(db, obj_in=experiment_update_request)
+        return ExperimentService().update(db, experiment_id=experiment_id, obj_in=experiment_update_request)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 

@@ -97,9 +97,9 @@ class TrainingStatusResponse(BaseModel):
     end_time: Optional[int] = None  # unix timestamp
     max_epoch: int
     current_epoch: int
-    loss_history: Dict[str, Any]
-    epoch_history: Dict[str, Any]
-    average_precision_50_history: Dict[str, Any]
-    average_precision_75_history: Dict[str, Any]
-    best_average_precision_history: Dict[str, Any]
-    average_precision_50_95_history: Dict[str, Any]
+    loss_history: list[Any]
+    epoch_history: list[Any]
+    average_precision_50_history: list[Any]
+    average_precision_75_history: list[Any]
+    best_average_precision_history: list[Any]
+    average_precision_50_95_history: list[Any]
