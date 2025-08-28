@@ -1,6 +1,6 @@
 from .base import Base
 from .dataset import Dataset, DatasetRegistry
-from .experiment import ExperimentModel, HyperparameterType, Hyperparamter
+from .experiment import ExperimentModel, Hyperparameter, HyperparameterType
 from .model import (
     InferenceImageRegistry,
     Model,

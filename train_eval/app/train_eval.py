@@ -14,6 +14,7 @@ import traceback
 import uuid
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import mlflow
 import requests
@@ -45,7 +46,7 @@ class CustomTrainModel:
         self,
         train_name: str,
         model_id: int,
-        result_model_name: str,
+        experiment_id: int,
         model_artifact_path: str,
         model_uri: str,
         mlflow_tracking_uri: str,
@@ -85,7 +86,7 @@ class CustomTrainModel:
         """
         self.train_name = train_name
         self.model_id = model_id
-        self.result_model_name = result_model_name
+        self.experiment_id = experiment_id
         self.model_artifact_path = model_artifact_path
         self.model_uri = model_uri
         self.mlflow_tracking_uri = mlflow_tracking_uri
@@ -375,6 +376,15 @@ class CustomTrainModel:
                 # train.py의 launch 실행
                 os.environ["MLFLOW_NESTED_RUN"] = "TRUE"
                 os.environ["MLFLOW_RUN_ID"] = run.info.run_id
+                self.update_experiment(
+                    experiment_id=self.experiment_id,
+                    status="RUNNING",
+                    mlflow_run_id=run.info.run_id,
+                    restapi_url=self.restapi_url,
+                    restapi_token=self.get_token_from_restapi(
+                        url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+                    ),
+                )
                 launch(
                     train.main,
                     num_gpu,
@@ -389,21 +399,37 @@ class CustomTrainModel:
                 logger.info("학습 완료! 평가를 시작합니다.")
                 self.evaluate_after_training(run, temp_exp_path, matched_exp_name, modifications)
 
-                self.insert_metadata(
-                    run_id=run.info.run_id,
-                    artifact_uri=run.info.artifact_uri,
-                    model_id=self.model_id,
-                    model_version="1",
-                    model_uri="",
-                    train_model_name=self.result_model_name,
-                    restapi_url=self.restapi_url,
-                    restapi_token=self.get_token_from_restapi(
-                        url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                    ),
-                )
+                # self.insert_metadata(
+                #     run_id=run.info.run_id,
+                #     artifact_uri=run.info.artifact_uri,
+                #     model_id=self.model_id,
+                #     model_version="1",
+                #     model_uri="",
+                #     train_model_name=self.result_model_name,
+                #     restapi_url=self.restapi_url,
+                #     restapi_token=self.get_token_from_restapi(
+                #         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+                #     ),
+                # )
+            self.update_experiment(
+                experiment_id=self.experiment_id,
+                status="COMPLETED",
+                restapi_url=self.restapi_url,
+                restapi_token=self.get_token_from_restapi(
+                    url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+                ),
+            )
 
         except Exception as e:
             logger.error(f"학습 중 오류: {e}")
+            self.update_experiment(
+                experiment_id=self.experiment_id,
+                status="FAILED",
+                restapi_url=self.restapi_url,
+                restapi_token=self.get_token_from_restapi(
+                    url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
+                ),
+            )
             raise
 
     def evaluate_after_training(self, run, temp_exp_path, matched_exp_name, modifications):
@@ -618,22 +644,67 @@ class CustomTrainModel:
             # 2. 클래스별 성능 분석
             class_analysis = self._analyze_per_class_performance(summary)
 
-            # 3. 성능 진단 및 권장사항 생성
-            diagnosis = self._generate_performance_diagnosis(metrics, class_analysis)
-
-            # 4. 정제된 평가 결과 생성
-            refined_summary = self._create_refined_summary(summary, metrics, class_analysis, diagnosis)
-
-            # 5. MLflow에 메트릭 로깅
+            # 3. MLflow에 메트릭 로깅
             for metric_name, metric_value in metrics.items():
                 if metric_value is not None:
                     mlflow.log_metric(metric_name, metric_value)
                     logger.info(f"{metric_name}: {metric_value}")
 
-            # 6. 정제된 결과를 파일로 저장 후 MLflow에 로깅
+            # 4. 분석 결과와 원본 평가 결과를 파일로 저장 후 MLflow에 로깅
             temp_file_path = os.path.join(tempfile.gettempdir(), "evaluation_results.txt")
             with open(temp_file_path, "w", encoding="utf-8") as temp_file:
-                temp_file.write(refined_summary)
+                # 분석 결과 추가
+                temp_file.write("=" * 80 + "\n")
+                temp_file.write("YOLO 모델 평가 결과 분석\n")
+                temp_file.write("=" * 80 + "\n\n")
+
+                # 기본 메트릭 요약
+                temp_file.write("📊 성능 요약\n")
+                temp_file.write("-" * 40 + "\n")
+                metric_display_names = {
+                    "mAP_0.5_0.95": "mAP@0.5:0.95",
+                    "AP50": "AP50",
+                    "AP75": "AP75",
+                    "AR_0.5_0.95": "AR@0.5:0.95",
+                    "AP_small": "AP_small",
+                    "AP_medium": "AP_medium",
+                    "AP_large": "AP_large",
+                }
+
+                for metric_name, metric_value in metrics.items():
+                    if metric_value is not None:
+                        display_name = metric_display_names.get(metric_name, metric_name)
+                        if (
+                            metric_name.startswith("mAP")
+                            or metric_name.startswith("AP")
+                            or metric_name.startswith("AR")
+                        ):
+                            temp_file.write(f"{display_name}: {metric_value:.3f} ({metric_value*100:.1f}%)\n")
+                        else:
+                            temp_file.write(f"{display_name}: {metric_value:.3f}\n")
+                temp_file.write("\n")
+
+                # 클래스별 분석
+                temp_file.write("🎯 클래스별 성능 분석\n")
+                temp_file.write("-" * 40 + "\n")
+                temp_file.write(f"전체 클래스 수: {class_analysis.get('total_classes', 0)}\n")
+                temp_file.write(f"검출된 클래스 수: {class_analysis.get('detected_classes', 0)}\n")
+                temp_file.write(f"검출되지 않은 클래스 수 (nan): {class_analysis.get('nan_classes', 0)}\n")
+                temp_file.write(f"AP=0인 클래스 수: {class_analysis.get('zero_ap_classes', 0)}\n")
+                temp_file.write("\n")
+
+                # 성능이 좋은 클래스
+                best_classes = class_analysis.get("best_performing_classes", [])
+                if best_classes:
+                    temp_file.write("🏆 성능이 좋은 클래스 (상위 5개)\n")
+                    for i, (class_id, ap) in enumerate(best_classes[:5], 1):
+                        temp_file.write(f"  {i}. Class {class_id}: AP = {ap:.3f} ({ap*100:.1f}%)\n")
+                    temp_file.write("\n")
+
+                # 원본 평가 결과
+                temp_file.write("원본 평가 결과\n")
+                temp_file.write("-" * 40 + "\n")
+                temp_file.write(summary)
 
             mlflow.log_artifact(temp_file_path, "evaluation")
 
@@ -741,131 +812,6 @@ class CustomTrainModel:
 
         return analysis
 
-    def _generate_performance_diagnosis(self, metrics: dict, class_analysis: dict) -> dict:
-        """성능 진단 및 권장사항 생성"""
-        diagnosis = {"overall_performance": "Unknown", "issues": [], "recommendations": []}
-
-        # 전체 성능 평가
-        map_score = metrics.get("mAP@0.5:0.95", 0)
-        if map_score < 0.05:
-            diagnosis["overall_performance"] = "Very Poor"
-            diagnosis["issues"].append("매우 낮은 mAP 점수 (5% 미만)")
-        elif map_score < 0.2:
-            diagnosis["overall_performance"] = "Poor"
-            diagnosis["issues"].append("낮은 mAP 점수 (20% 미만)")
-        elif map_score < 0.5:
-            diagnosis["overall_performance"] = "Fair"
-        elif map_score < 0.7:
-            diagnosis["overall_performance"] = "Good"
-        else:
-            diagnosis["overall_performance"] = "Excellent"
-
-        # 클래스별 문제 진단
-        total_classes = class_analysis.get("total_classes", 0)
-        nan_classes = class_analysis.get("nan_classes", 0)
-        detected_classes = class_analysis.get("detected_classes", 0)
-
-        if total_classes > 0:
-            nan_ratio = nan_classes / total_classes
-            detection_ratio = detected_classes / total_classes
-
-            if nan_ratio > 0.8:
-                diagnosis["issues"].append(f"대부분의 클래스가 검출되지 않음 (nan 비율: {nan_ratio:.1%})")
-                diagnosis["recommendations"].append("데이터셋에 모든 클래스가 포함되어 있는지 확인")
-                diagnosis["recommendations"].append("학습 데이터의 라벨링 상태 점검")
-
-            if detection_ratio < 0.2:
-                diagnosis["issues"].append(f"검출된 클래스가 매우 적음 (검출 비율: {detection_ratio:.1%})")
-                diagnosis["recommendations"].append("학습 파라미터 조정 (학습률, 배치 크기, 에포크 수)")
-                diagnosis["recommendations"].append("데이터 증강 기법 적용")
-
-        # 성능이 좋은 클래스가 있는지 확인
-        best_classes = class_analysis.get("best_performing_classes", [])
-        if best_classes:
-            diagnosis["recommendations"].append(
-                f"성능이 좋은 클래스: {[f'Class {cid}({ap:.1f}%)' for cid, ap in best_classes[:3]]}"
-            )
-
-        return diagnosis
-
-    def _create_refined_summary(
-        self, original_summary: str, metrics: dict, class_analysis: dict, diagnosis: dict
-    ) -> str:
-        """정제된 평가 결과 생성"""
-        refined_summary = []
-
-        # 헤더
-        refined_summary.append("=" * 80)
-        refined_summary.append("YOLO 모델 평가 결과 분석")
-        refined_summary.append("=" * 80)
-        refined_summary.append("")
-
-        # 성능 요약
-        refined_summary.append("📊 성능 요약")
-        refined_summary.append("-" * 40)
-
-        # 메트릭 이름 매핑 (표시용)
-        metric_display_names = {
-            "mAP_0.5_0.95": "mAP@0.5:0.95",
-            "AP50": "AP50",
-            "AP75": "AP75",
-            "AR_0.5_0.95": "AR@0.5:0.95",
-            "AP_small": "AP_small",
-            "AP_medium": "AP_medium",
-            "AP_large": "AP_large",
-        }
-
-        for metric_name, metric_value in metrics.items():
-            if metric_value is not None:
-                display_name = metric_display_names.get(metric_name, metric_name)
-                if metric_name.startswith("mAP") or metric_name.startswith("AP") or metric_name.startswith("AR"):
-                    refined_summary.append(f"{display_name}: {metric_value:.3f} ({metric_value*100:.1f}%)")
-                else:
-                    refined_summary.append(f"{display_name}: {metric_value:.3f}")
-        refined_summary.append("")
-
-        # 클래스별 분석
-        refined_summary.append("🎯 클래스별 성능 분석")
-        refined_summary.append("-" * 40)
-        refined_summary.append(f"전체 클래스 수: {class_analysis.get('total_classes', 0)}")
-        refined_summary.append(f"검출된 클래스 수: {class_analysis.get('detected_classes', 0)}")
-        refined_summary.append(f"검출되지 않은 클래스 수 (nan): {class_analysis.get('nan_classes', 0)}")
-        refined_summary.append(f"AP=0인 클래스 수: {class_analysis.get('zero_ap_classes', 0)}")
-        refined_summary.append("")
-
-        # 성능이 좋은 클래스
-        best_classes = class_analysis.get("best_performing_classes", [])
-        if best_classes:
-            refined_summary.append("🏆 성능이 좋은 클래스 (상위 5개)")
-            for i, (class_id, ap) in enumerate(best_classes[:5], 1):
-                refined_summary.append(f"  {i}. Class {class_id}: AP = {ap:.3f} ({ap*100:.1f}%)")
-            refined_summary.append("")
-
-        # 성능 진단
-        refined_summary.append("🔍 성능 진단")
-        refined_summary.append("-" * 40)
-        refined_summary.append(f"전체 성능 등급: {diagnosis['overall_performance']}")
-        refined_summary.append("")
-
-        if diagnosis["issues"]:
-            refined_summary.append("⚠️ 발견된 문제점:")
-            for issue in diagnosis["issues"]:
-                refined_summary.append(f"  • {issue}")
-            refined_summary.append("")
-
-        if diagnosis["recommendations"]:
-            refined_summary.append("💡 개선 권장사항:")
-            for rec in diagnosis["recommendations"]:
-                refined_summary.append(f"  • {rec}")
-            refined_summary.append("")
-
-        # 원본 요약 추가
-        refined_summary.append(" 원본 평가 결과")
-        refined_summary.append("-" * 40)
-        refined_summary.append(original_summary)
-
-        return "\n".join(refined_summary)
-
     def postprocess(self):
         """학습 후 처리"""
         try:
@@ -874,6 +820,39 @@ class CustomTrainModel:
             logger.error(f"후처리 중 오류 발생: {e}")
             traceback.print_exc()
             raise
+
+    def update_experiment(
+        self,
+        restapi_url: str,
+        restapi_token: str,
+        experiment_id: int,
+        status: Optional[str] = None,
+        mlflow_run_id: Optional[str] = None,
+        kubeflow_run_id: Optional[str] = None,
+    ):
+        try:
+            data = {}
+            if status:
+                data["status"] = status
+            if mlflow_run_id:
+                data["mlflow_run_id"] = mlflow_run_id
+            if kubeflow_run_id:
+                data["kubeflow_run_id"] = kubeflow_run_id
+            response = requests.patch(
+                f"{restapi_url}/api/v1/experiments/{experiment_id}",
+                json=data,
+                headers={"Authorization": f"Bearer {restapi_token}"},
+            )
+            if response.status_code == 200:
+                logger.info("실험 업데이트 성공")
+                return response.json()
+            else:
+                logger.error(f"실험 업데이트 실패: {response.status_code}")
+                logger.error(f"실헨 업데이트 실패: {response.text}")
+                return None
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"REST API 서버에 연결할 수 없습니다: {self.restapi_url}")
+            return None
 
     def insert_metadata(
         self,
@@ -984,7 +963,7 @@ def main():
     # 기본 설정
     parser.add_argument("--train_name", type=str, required=True, help="학습 실행명")
     parser.add_argument("--model_id", type=int, required=True, help="모델 ID")
-    parser.add_argument("--result_model_name", type=str, required=True, help="모델명")
+    parser.add_argument("--experiment_id", type=int, required=True, help="실험 ID")
     parser.add_argument("--model_artifact_path", type=str, required=True, help="모델 아티팩트 경로")
     parser.add_argument("--model_uri", type=str, required=True, help="모델 URI")
     parser.add_argument("--mlflow_tracking_uri", type=str, required=True, help="MLflow 추적 URI")
@@ -1011,7 +990,7 @@ def main():
     model = CustomTrainModel(
         train_name=args.train_name,
         model_id=args.model_id,
-        result_model_name=args.result_model_name,
+        experiment_id=args.experiment_id,
         model_artifact_path=args.model_artifact_path,
         model_uri=args.model_uri,
         mlflow_tracking_uri=args.mlflow_tracking_uri,

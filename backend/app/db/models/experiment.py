@@ -11,15 +11,16 @@ class ExperimentModel(BaseModel, TimestampMixin):
     __tablename__ = "experiment"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=True)
     reference_model_id: Mapped[int] = mapped_column(ForeignKey("model.id"))
     dataset_id: Mapped[int] = mapped_column(ForeignKey("dataset.id"))
-    kubeflow_run_id: Mapped[str] = mapped_column(String(500), nullable=False)
-    mlflow_run_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    kubeflow_run_id: Mapped[str] = mapped_column(String(500), nullable=True)
+    mlflow_run_id: Mapped[str] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
-    learning_yn: Mapped[str] = mapped_column(Boolean, nullable=False)
 
     reference_model: Mapped["Model"] = relationship("Model")
     dataset: Mapped["Dataset"] = relationship("Dataset")
+    hyperparameters: Mapped[list["Hyperparameter"]] = relationship("Hyperparameter")
 
 
 class HyperparameterType(BaseModel):
@@ -30,7 +31,7 @@ class HyperparameterType(BaseModel):
     default_value: Mapped[str] = mapped_column(String(500), nullable=False)
 
 
-class Hyperparamter(BaseModel):
+class Hyperparameter(BaseModel):
     __tablename__ = "hyperparameter"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     value: Mapped[str] = mapped_column(String(500), nullable=False)

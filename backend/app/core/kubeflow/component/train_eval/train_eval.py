@@ -10,8 +10,8 @@ from kfp import dsl, local
 @dsl.container_component
 def container_train_eval_component(
     model_id: int,
+    experiment_id: int,
     train_name: str,
-    result_model_name: str,
     model_artifact_path: str,
     model_uri: str,
     mlflow_tracking_uri: str,
@@ -38,8 +38,8 @@ def container_train_eval_component(
         command=["python", "-m", "app.train_eval"],
         args=[
             f"--model_id={model_id}",
+            f"--experiment_id={experiment_id}",
             f"--train_name={train_name}",
-            f"--result_model_name={result_model_name}",
             f"--model_artifact_path={model_artifact_path}",
             f"--model_uri={model_uri}",
             f"--mlflow_tracking_uri={mlflow_tracking_uri}",

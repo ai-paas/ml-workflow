@@ -1,21 +1,21 @@
-import base64
-import io
-import json
 import logging
 import os
-import uuid
+from datetime import datetime
+from typing import Optional
 
-import requests
+import mlflow
 from config.db.connect import SessionDepends
 from config.settings import get_settings
 from core.kubeflow.component.serve.serve import serving_component
+from core.kubeflow.component.train_eval.register_model import register_model_component
 from core.kubeflow.component.train_eval.train_eval import container_train_eval_component
 from core.kubeflow.kubeflow_manager import KubeflowManager
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from kfp import dsl
-from PIL import Image
+from schemas.experiment import ExperimentBaseSchema, HyperparameterBaseSchema, TrainingStatusResponse
 from schemas.user import UserSchema
 from services.dataset import DatasetService
+from services.experiment import ExperimentService, HyperparameterService, HyperparameterTypeService
 from services.model import ModelService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
@@ -27,20 +27,24 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-@router.delete("/experiments/{experiment_name}")
-def delete_experiment(*, experiment_name: str, current_user: UserSchema = Depends(get_current_user)) -> dict:
+@router.delete("/mlflow/experiments/{mlflow_experiment_name}")
+def delete_mlflow_experiment(
+    *, mlflow_experiment_name: str, current_user: UserSchema = Depends(get_current_user)
+) -> dict:
     kf = KubeflowManager()
-    return kf.delete_experiment(experiment_name=experiment_name)
+    return kf.delete_experiment(experiment_name=mlflow_experiment_name)
 
 
-@router.post("/experiments/{experiment_name}")
-def create_experiment(*, experiment_name: str, current_user: UserSchema = Depends(get_current_user)) -> dict:
+@router.post("/mlflow/experiments/{mlflow_experiment_name}")
+def create_mlflow_experiment(
+    *, mlflow_experiment_name: str, current_user: UserSchema = Depends(get_current_user)
+) -> dict:
     kf = KubeflowManager()
-    experiment = kf.create_experiment(experiment_name=experiment_name)
+    experiment = kf.create_experiment(experiment_name=mlflow_experiment_name)
     return experiment.experiment_id if experiment else -1
 
 
-@router.post("/training/container", response_model=bool)
+@router.post("/training", response_model=bool)
 def container_train(
     *,
     db: Session = SessionDepends,
@@ -48,7 +52,7 @@ def container_train(
     dataset_id: int,
     current_user: UserSchema = Depends(get_current_user),
     train_name: str = Body(""),
-    result_model_name: str = Body(""),
+    description: str = Body(""),
     gpus: str = Body("1"),
     batch_size: str = Body("64"),
     epochs: str = Body("5"),
@@ -61,12 +65,12 @@ def container_train(
     def train_pipeline(
         model_id: int,
         model_uri: str,
+        experiment_id: int,
         mlflow_tracking_uri: str,
         mlflow_s3_endpoint_url: str,
         aws_access_key_id: str,
         aws_secret_access_key: str,
         model_artifact_path: str,
-        model_name: str,
         dataset_artifact_uri: str,
         mlflow_experiment_name: str,
         train_name: str,
@@ -83,6 +87,7 @@ def container_train(
     ):
         container_train_eval_component(
             model_id=model_id,
+            experiment_id=experiment_id,
             mlflow_tracking_uri=mlflow_tracking_uri,
             mlflow_s3_endpoint_url=mlflow_s3_endpoint_url,
             aws_access_key_id=aws_access_key_id,
@@ -90,7 +95,6 @@ def container_train(
             model_artifact_path=model_artifact_path,
             model_uri=model_uri,
             train_name=train_name,
-            result_model_name=result_model_name,
             dataset_artifact_uri=dataset_artifact_uri,
             mlflow_experiment_name=mlflow_experiment_name,
             restapi_url=restapi_url,
@@ -118,20 +122,94 @@ def container_train(
         # TODO: mocking data. 이후 수정 필요.
         kubeflow_experiment_name = "aipaas-ml-workflow"
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
-        experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
+        kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
         # kf.create_pipeline(sample_pipeline, pipeline_name )
+        experiment_db_obj = ExperimentService().create(
+            db,
+            obj_in=ExperimentBaseSchema(
+                name=train_name,
+                description=description,
+                reference_model_id=model_id,
+                dataset_id=dataset_id,
+                status="CREATED",
+            ),
+        )
+        epochs_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "epochs")
+        batch_size_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "batch_size")
+        weight_decay_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "weight_decay")
+        lr0_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "lr0")
+        lrf_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "lrf")
+        gpus_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "gpus")
+        save_period_hp_type_obj = HyperparameterTypeService().get_by_param_name(db, "save_period")
+
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=epochs_hp_type_obj.id,
+                value=epochs,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=batch_size_hp_type_obj.id,
+                value=batch_size,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=weight_decay_hp_type_obj.id,
+                value=weight_decay,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=lr0_hp_type_obj.id,
+                value=lr0,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=lrf_hp_type_obj.id,
+                value=lrf,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=gpus_hp_type_obj.id,
+                value=gpus,
+            ),
+        )
+        HyperparameterService().create(
+            db,
+            obj_in=HyperparameterBaseSchema(
+                experiment_id=experiment_db_obj.id,
+                hyperparameter_type_id=save_period_hp_type_obj.id,
+                value=save_period,
+            ),
+        )
 
         client.create_run_from_pipeline_func(
             train_pipeline,
             # lightweight_component,
             enable_caching=False,  # overrides the above disabling of caching
-            experiment_id=experiment.experiment_id,
+            experiment_id=kubeflow_experiment.experiment_id,
             arguments={
                 "model_id": model_id,
+                "experiment_id": experiment_db_obj.id,
                 "model_artifact_path": model_artifact_path,
                 "model_uri": model_uri,
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
-                "result_model_name": result_model_name,
                 "mlflow_experiment_name": mlflow_experiment_name,
                 "mlflow_s3_endpoint_url": settings.MLFLOW_S3_ENDPOINT_URL,
                 "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,
@@ -157,7 +235,75 @@ def container_train(
         return False
 
 
-@router.post("/serving/{pk}", response_model=bool)
+@router.post("/model/registration", response_model=bool)
+def register_model(
+    *,
+    db: Session = SessionDepends,
+    model_name: str,
+    description: str,
+    experiment_id: int,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    @dsl.pipeline
+    def register_model_pipeline(
+        parent_model_id: int,
+        train_model_name: str,
+        description: str,
+        experiment_id: int,
+        mlflow_tracking_uri: str,
+        mlflow_experiment_name: str,
+        restapi_url: str,
+        restapi_username: str,
+        restapi_password: str,
+    ):
+        register_model_component(
+            parent_model_id=parent_model_id,
+            train_model_name=train_model_name,
+            description=description,
+            experiment_id=experiment_id,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+            mlflow_experiment_name=mlflow_experiment_name,
+            restapi_url=restapi_url,
+            restapi_username=restapi_username,
+            restapi_password=restapi_password,
+        )
+
+    try:
+        kf = KubeflowManager()
+        client = kf.get_kfp_client()
+
+        # TODO: mocking data. 이후 외부에서 인자로 받아야함.
+        kubeflow_experiment_name = "aipaas-ml-workflow"
+        mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
+
+        kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
+
+        experiment_db_obj = ExperimentService().get(db, experiment_id)
+        parent_model_id = experiment_db_obj.reference_model_id
+
+        client.create_run_from_pipeline_func(
+            register_model_pipeline,
+            enable_caching=False,
+            experiment_id=kubeflow_experiment.experiment_id,
+            arguments={
+                "parent_model_id": parent_model_id,
+                "train_model_name": model_name,
+                "description": description,
+                "experiment_id": experiment_id,
+                "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
+                "mlflow_experiment_name": mlflow_experiment_name,
+                "restapi_url": settings.REST_API_URL,
+                "restapi_username": "surromind",
+                "restapi_password": settings.DEMO_PASSWORD,
+            },
+        )
+        return True
+    except Exception as e:
+        logger.error(f"error occured when register pipeline : {e}")
+        return False
+
+
+@router.post("/serving", response_model=bool)
 def serve(
     *,
     db: Session = SessionDepends,
@@ -280,3 +426,118 @@ def serve(
     except Exception as e:
         logger.error(f"error occured when register pipeline : {e}")
         return False
+
+
+@router.get("/training/{experiment_id}/status", response_model=TrainingStatusResponse)
+async def get_training_status(
+    db: Session = SessionDepends, *, experiment_id: int, current_user: UserSchema = Depends(get_current_user)
+):
+    """
+    특정 experiment_id로 학습 파이프라인의 현재 상태를 가져옵니다.
+
+    Args:
+        experiment_id: 학습 PK (experiment_id)
+
+    Returns:
+        현재 학습 상태 정보 (epoch, loss, AP 등)
+    """
+    try:
+        # 일회용 인스턴스 생성
+        monitor = PipelineTrainingMonitor(
+            mlflow_tracking_uri=settings.MLFLOW_TRACKING_URI, experiment_name=settings.MLFLOW_EXPERIMENT_NAME
+        )
+
+        experiment_db_model = ExperimentService.get(db, experiment_id)
+        if experiment_db_model is None:
+            raise HTTPException(status_code=404, detail=f"실험 ID '{experiment_id}'을 찾을 수 없습니다.")
+
+        run_id = experiment_db_model.mlflow_run_id
+        max_epoch = (
+            experiment_db_model.hyperparameters[0].value
+            if experiment_db_model.hyperparameters.hyperparameter_type.param_name == "epochs"
+            else 0
+        )
+        # 학습 상태 가져오기
+        status_data = monitor.get_training_status(run_id, int(max_epoch))
+
+        if status_data is None:
+            raise HTTPException(status_code=404, detail="학습 상태가 존재하지 않습니다.")
+
+        return TrainingStatusResponse(**status_data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"학습 상태 조회 중 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Training Monitor 클래스
+class PipelineTrainingMonitor:
+    def __init__(self, mlflow_tracking_uri: str, experiment_name: str):
+        self.mlflow_tracking_uri = mlflow_tracking_uri
+        self.experiment_name = experiment_name
+        self.client = mlflow.tracking.MlflowClient(tracking_uri=mlflow_tracking_uri)
+
+    def get_training_status(self, run_id: Optional[str], max_epoch: int):
+        """학습 상태 정보를 가져옵니다."""
+        try:
+            if run_id is None:
+                return None
+
+            run = self.client.get_run(run_id)
+            # 메트릭 히스토리 가져오기
+            metrics_data = {}
+            metric_names = ["train/total_loss", "train/epoch", "AP50", "AP75", "val/best_ap", "mAP_0.5_0.95"]
+
+            for metric_name in metric_names:
+                try:
+                    history = self.client.get_metric_history(run_id, metric_name)
+                    if history:
+                        metrics_data[metric_name] = {
+                            "steps": [m.step for m in history],
+                            "values": [m.value for m in history],
+                            "timestamps": [m.timestamp for m in history],
+                        }
+                    else:
+                        metrics_data[metric_name] = {"steps": [], "values": [], "timestamps": []}
+                except Exception as e:
+                    logger.warning(f"메트릭 '{metric_name}' 조회 실패: {e}")
+                    metrics_data[metric_name] = {"steps": [], "values": [], "timestamps": []}
+
+            # 현재 epoch과 최대 epoch 계산
+            current_epoch = 0
+            if "train/epoch" in metrics_data and metrics_data["train/epoch"]["values"]:
+                current_epoch = int(metrics_data["train/epoch"]["values"][-1])
+
+            # 상태 결정
+            status = "RUNNING"
+            if run.info.status == "FINISHED":
+                status = "FINISHED"
+            elif run.info.status == "FAILED":
+                status = "FAILED"
+
+            # 종료 시간 계산
+            end_time = None
+            if run.info.end_time:
+                end_time = run.info.end_time
+            elif status == "RUNNING":
+                end_time = int(datetime.now().timestamp() * 1000)  # 현재 시간을 milliseconds로
+
+            return {
+                "status": status,
+                "start_time": run.info.start_time,
+                "end_time": end_time,
+                "max_epoch": max_epoch,
+                "current_epoch": int(current_epoch),
+                "loss_history": metrics_data.get("train/total_loss", []),
+                "epoch_history": metrics_data.get("train/epoch", []),
+                "average_precision_50_history": metrics_data.get("AP50", []),
+                "average_precision_75_history": metrics_data.get("AP75", []),
+                "best_average_precision_history": metrics_data.get("val/best_ap", []),
+                "average_precision_50_95_history": metrics_data.get("mAP_0.5_0.95", []),
+            }
+
+        except Exception as e:
+            logger.error(f"학습 상태 가져오기 실패: {e}")
+            return None
