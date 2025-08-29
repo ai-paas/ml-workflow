@@ -33,6 +33,6 @@ async def get_experiment(
     db: Session = SessionDepends, *, experiment_id: int, current_user: UserSchema = Depends(get_current_user)
 ):
     try:
-        return ExperimentService().get(db, experiment_id=experiment_id)
+        return ExperimentService().get(db, pk=experiment_id)
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

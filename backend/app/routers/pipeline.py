@@ -396,11 +396,11 @@ async def get_training_status(
             raise HTTPException(status_code=404, detail=f"실험 ID '{experiment_id}'을 찾을 수 없습니다.")
 
         run_id = experiment_db_model.mlflow_run_id
-        max_epoch = (
-            experiment_db_model.hyperparameters[0].value
-            if experiment_db_model.hyperparameters.hyperparameter_type.param_name == "epochs"
-            else 0
-        )
+        max_epoch = 0
+        for hp in experiment_db_model.hyperparameters:
+            if hp.hyperparameter_type.param_name == "epochs":
+                max_epoch = int(hp.value)
+                break
         # 학습 상태 가져오기
         status_data = monitor.get_training_status(run_id, int(max_epoch))
 
@@ -430,29 +430,38 @@ class PipelineTrainingMonitor:
                 return None
 
             run = self.client.get_run(run_id)
-            # 메트릭 히스토리 가져오기
+
+            # 모든 메트릭 데이터를 딕셔너리 형태로 변환하여 가져오기
             metrics_data = {}
             metric_names = ["train/total_loss", "train/epoch", "AP50", "AP75", "val/best_ap", "mAP_0.5_0.95"]
 
             for metric_name in metric_names:
                 try:
                     history = self.client.get_metric_history(run_id, metric_name)
+                    # Metric 객체를 딕셔너리로 변환하고 정렬
                     if history:
-                        metrics_data[metric_name] = {
-                            "steps": [m.step for m in history],
-                            "values": [m.value for m in history],
-                            "timestamps": [m.timestamp for m in history],
-                        }
+                        metric_list = [
+                            {
+                                "key": metric.key,
+                                "value": metric.value,
+                                "timestamp": metric.timestamp,
+                                "step": metric.step,
+                            }
+                            for metric in history
+                        ]
+                        # step 우선, timestamp 차선으로 정렬
+                        metric_list.sort(key=lambda x: (x["step"], x["timestamp"]))
+                        metrics_data[metric_name] = metric_list
                     else:
-                        metrics_data[metric_name] = {"steps": [], "values": [], "timestamps": []}
+                        metrics_data[metric_name] = []
                 except Exception as e:
                     logger.warning(f"메트릭 '{metric_name}' 조회 실패: {e}")
-                    metrics_data[metric_name] = {"steps": [], "values": [], "timestamps": []}
+                    metrics_data[metric_name] = []
 
-            # 현재 epoch과 최대 epoch 계산
+            # 현재 epoch 계산
             current_epoch = 0
-            if "train/epoch" in metrics_data and metrics_data["train/epoch"]["values"]:
-                current_epoch = int(metrics_data["train/epoch"]["values"][-1])
+            if "train/epoch" in metrics_data and metrics_data["train/epoch"]:
+                current_epoch = int(metrics_data["train/epoch"][-1]["value"])
 
             # 상태 결정
             status = "RUNNING"
@@ -466,14 +475,14 @@ class PipelineTrainingMonitor:
             if run.info.end_time:
                 end_time = run.info.end_time
             elif status == "RUNNING":
-                end_time = int(datetime.now().timestamp() * 1000)  # 현재 시간을 milliseconds로
+                end_time = int(datetime.now().timestamp() * 1000)
 
             return {
                 "status": status,
                 "start_time": run.info.start_time,
                 "end_time": end_time,
                 "max_epoch": max_epoch,
-                "current_epoch": int(current_epoch),
+                "current_epoch": current_epoch,
                 "loss_history": metrics_data.get("train/total_loss", []),
                 "epoch_history": metrics_data.get("train/epoch", []),
                 "average_precision_50_history": metrics_data.get("AP50", []),

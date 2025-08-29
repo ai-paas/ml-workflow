@@ -10,7 +10,7 @@ from kfp import dsl
     base_image="python:3.10",
     packages_to_install=[
         "mlflow==2.17.0",
-        "requests==*",
+        "requests==2.32.5",
         "loguru==0.7.3",
     ],
 )
