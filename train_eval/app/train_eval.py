@@ -848,7 +848,7 @@ class CustomTrainModel:
                 return response.json()
             else:
                 logger.error(f"실험 업데이트 실패: {response.status_code}")
-                logger.error(f"실헨 업데이트 실패: {response.text}")
+                logger.error(f"실험 업데이트 실패: {response.text}")
                 return None
         except requests.exceptions.ConnectionError:
             logger.warning(f"REST API 서버에 연결할 수 없습니다: {self.restapi_url}")

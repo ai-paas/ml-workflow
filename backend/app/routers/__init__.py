@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from .authentication import router as auth_router
 from .dataset import router as dataset_router
+from .experiment import router as experiment_router
 
 # from .dataset import router as dataset_router
 from .inference import router as inference_router
@@ -16,3 +17,4 @@ api_router.include_router(dataset_router)
 api_router.include_router(inference_router)
 api_router.include_router(auth_router)
 api_router.include_router(monitoring_router)
+api_router.include_router(experiment_router)
