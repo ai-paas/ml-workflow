@@ -1,6 +1,3 @@
-import shutil
-import tempfile
-import uuid
 from typing import Any, Dict, Optional
 
 from kfp import dsl
@@ -30,10 +27,11 @@ def register_model_component(
     import logging
     import os
     import re
+    import shutil
+    import uuid
 
     import mlflow
     import requests
-    from mlflow import MlflowClient
 
     logger = logging.getLogger(__name__)
 
@@ -211,7 +209,7 @@ def register_model_component(
 
         # 아티팩트 다운로드
         download_uuid_path = str(uuid.uuid4())
-        local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=download_uuid_path)
+        local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id)
 
         try:
             # 체크포인트 파일 찾기
@@ -235,8 +233,8 @@ def register_model_component(
                     "model_registry_schema": json.dumps(
                         {
                             "artifact_path": run.info.artifact_uri,
-                            "uri": run.info.artifact_uri,
-                            "run_id": run_id,
+                            "uri": "",
+                            "run_id": run.info.run_id,
                         }
                     ),
                 }
