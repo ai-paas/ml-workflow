@@ -36,8 +36,8 @@ class ExperimentReadSchema(TimeStampSchemaMixin):
     description: str
     reference_model_id: int
     dataset_id: int
-    kubeflow_run_id: str
-    mlflow_run_id: str
+    kubeflow_run_id: Optional[str] = None
+    mlflow_run_id: Optional[str] = None
     status: str
     reference_model: "ModelReadSchema"
     dataset: "DatasetReadSchema"
