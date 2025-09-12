@@ -11,46 +11,71 @@ chmod +x prepare-commit-msg
 
 # .git/hooks/prepare-commit-msg 내용 작성
 cat << 'EOF' > prepare-commit-msg
-#!/bin/bash
+#!/bin/sh
 
-FIRST_LINE=$(head -n 1 $1)
+echo "🔄 커밋 메시지 검사 및 포매팅 중..."
 
-COMMITFORMAT="(feat|fix|docs|style|refactor|design|comment|rename|remove|chore|!HOTFIX|!BREAKING CHANGE|revert): (.*) \\((CSG|LS)-[0-9]{2,4}\\)$"
-
-if ! [[ "$FIRST_LINE" =~ $COMMITFORMAT ]]; then
-  echo ""
-  echo " Commit Message 포맷을 아래 예시와 같이 지켜주세요."
-  echo " Prefix : 사용가능한 commit의 Prefix는 아래와 같습니다."
-  echo " Suffix : 반드시 commit에 해당하는 JIRA Ticket 번호를 괄호(CSG-000 또는 LS-000)로 묶어서 마지막에 기입해주세요."
-  echo ""
-  echo "======================= 반드시 콜론(:) 을 붙여야 합니다. ========================="
-  echo ""
-  echo "  feat:             새로운 기능을 추가"
-  echo "  fix:              버그 수정"
-  echo "  design:           CSS 등 사용자 UI 디자인 변경"
-  echo "  !BREAKING CHANGE: 커다란 API 변경의 경우"
-  echo "  !HOTFIX:          급하게 치명적인 버그를 고쳐야하는 경우"
-  echo "  style:            코드 포맷 변경, 세미 콜론 누락, 코드 수정이 없는 경우"
-  echo "  refactor:         코드 리팩토링"
-  echo "  comment:          필요한 주석 추가 및 변경"
-  echo "  docs:             문서 수정"
-  echo "  chore:            빌드 업무 수정, 패키지 매니저 수정, 패키지 관리자 구성 등 업데이트, Production Code 변경 없음"
-  echo "  rename:           파일 혹은 폴더명을 수정하거나 옮기는 작업만인 경우"
-  echo "  remove:           파일을 삭제하는 작업만 수행한 경우"
-  echo "  test:             테스트 코드 작성 등 테스트 관련 작업"
-  echo "  revert:           커밋 되돌리기 작업"
-  echo ""
-  echo "=================================================================================="
-  echo ""
-  echo -e " 아래 EXAMPLE과 같이 첫째 줄에 Prefix와 함께 요약을 남기고 한 줄 개행 후 상세 내용을 작성해주세요. \n Merge Request 시 Overview에 자동으로 Title, Description 작성이 완료됩니다."
-  echo ""
-  echo "================================== E X A M P L E ================================="
-  echo ""
-  echo -e " git commit -m \"feat: 기능 A 추가 (CSG-123)\n\n  1. 000파일 추가 \n  2. 2222파일추가\n  3. 00 관련 비즈니스 로직 추가\""
-  echo -e " git commit -m \"fix: 버그 수정 (LS-456)\n\n  1. 000버그 수정 \n  2. 2222오류 해결\""
-  echo ""
-  echo "=================================================================================="
-  echo ""
-  exit 1
+# 머지 커밋인지 확인
+if grep -q "^Merge " "$1"; then
+  echo "🔄 머지 커밋 감지: 포매팅 스킵"
+  exit 0
 fi
+
+COMMIT_MESSAGE_FILE=$1
+COMMIT_MESSAGE=$(cat "$COMMIT_MESSAGE_FILE")
+
+# 현재 브랜치 명 가져오기
+CURRENT_BRANCH=$(git branch --show-current)
+
+# 브랜치 명이 이미 포함되어 있는지 확인
+if echo "$COMMIT_MESSAGE" | grep -q "^$CURRENT_BRANCH: "; then
+  echo "✅ 브랜치 명이 이미 포함되어 있습니다."
+  exit 0
+fi
+
+# 커밋 타입 정의
+VALID_TYPES="feat|refactor|fix|chore|style|test"
+
+# 기존 커밋 메시지에서 타입 추출 또는 자동 생성
+FORMATTED_MESSAGE=""
+
+if echo "$COMMIT_MESSAGE" | grep -qE "^($VALID_TYPES): "; then
+  # 이미 올바른 형식이면 브랜치 명만 앞에 추가
+  FORMATTED_MESSAGE="$CURRENT_BRANCH $COMMIT_MESSAGE"
+else
+  # 형식이 맞지 않으면 자동 포매팅
+  echo "⚠️  커밋 메시지 형식을 자동으로 수정합니다..."
+
+  # 첫 번째 줄과 나머지 줄 분리
+  FIRST_LINE=$(echo "$COMMIT_MESSAGE" | head -n1)
+  REST_LINES=$(echo "$COMMIT_MESSAGE" | tail -n +2)
+
+  # 키워드 기반 자동 타입 감지
+  AUTO_TYPE="feat"  # 기본값
+
+  if echo "$FIRST_LINE" | grep -qiE "(fix|bug|error|issue)"; then
+    AUTO_TYPE="fix"
+  elif echo "$FIRST_LINE" | grep -qiE "(refactor|restructure|reorganize)"; then
+    AUTO_TYPE="refactor"
+  elif echo "$FIRST_LINE" | grep -qiE "(test|spec)"; then
+    AUTO_TYPE="test"
+  elif echo "$FIRST_LINE" | grep -qiE "(style|format|indent|prettier|eslint)"; then
+    AUTO_TYPE="style"
+  elif echo "$FIRST_LINE" | grep -qiE "(chore|config|build|deps|dependency)"; then
+    AUTO_TYPE="chore"
+  fi
+
+  # 브랜치 명 + 타입 + 메시지 조합
+  FORMATTED_MESSAGE="$CURRENT_BRANCH $AUTO_TYPE: $FIRST_LINE"
+
+  echo "✅ 커밋 메시지가 '$CURRENT_BRANCH $AUTO_TYPE:' 형식으로 자동 수정되었습니다."
+fi
+
+# 새로운 커밋 메시지 작성
+echo "$FORMATTED_MESSAGE" > "$COMMIT_MESSAGE_FILE"
+if [ -n "$REST_LINES" ]; then
+  echo "$REST_LINES" >> "$COMMIT_MESSAGE_FILE"
+fi
+
+echo "🔆 브랜치 명이 포함된 커밋 메시지가 완성되었습니다! 🔆"
 EOF
