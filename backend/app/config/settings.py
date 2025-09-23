@@ -86,7 +86,7 @@ class Settings(BaseSettings):
 
     @property
     def get_db_uri(self) -> str:
-        """Environment variables로부터 DB 정보를 받아와 URI를 반환"""
+        """Environment variables로부터 DB 정보를 받아와 URI를 반환."""
         return f"{self.DB_TYPE}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
     @property
