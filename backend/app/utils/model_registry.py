@@ -174,6 +174,16 @@ class ModelRegistry:
         else:
             raise ValueError("file or save_dir must be provided")
 
+    def delete_run_artifacts(self, run_id: str):
+        """
+        특정 run의 모든 artifact를 삭제하는 메서드
+
+        Args:
+            run_id: 삭제할 run의 ID
+        """
+        # run을 삭제하면 해당 run의 모든 artifact도 함께 삭제됩니다
+        self._client.delete_run(run_id)
+
 
 class ModelLoader:
     @staticmethod

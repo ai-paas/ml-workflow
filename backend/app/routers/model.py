@@ -173,3 +173,9 @@ def load_model(db: Session = SessionDepends, *, model_id: int, current_user: Use
         "model": f"{db_model.name}",
         "user_id": user_id,
     }
+
+
+@router.delete("/{model_id}")
+def delete_model(model_id: int, db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user)):
+    ModelService().delete(db, model_id)
+    return True
