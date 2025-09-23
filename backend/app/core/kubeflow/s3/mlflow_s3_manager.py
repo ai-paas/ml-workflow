@@ -59,7 +59,7 @@ class MLFlowS3Manager:
 
             return upload_file
         except Exception as e:
-            raise Exception(f"파일 다운로드 중 오류 발생: {str(e)}")
+            raise RuntimeError(f"파일 다운로드 중 오류 발생: {str(e)}")
 
     def upload_file(self, file: UploadFile):
         try:

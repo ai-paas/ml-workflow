@@ -182,7 +182,13 @@ class ModelRegistry:
             run_id: 삭제할 run의 ID
         """
         # run을 삭제하면 해당 run의 모든 artifact도 함께 삭제됩니다
-        self._client.delete_run(run_id)
+        if not run_id:
+            return False
+        try:
+            self._client.delete_run(run_id)
+        except Exception as e:
+            raise RuntimeError(f"런 아티팩트 삭제 실패: {str(e)}")
+        return True
 
 
 class ModelLoader:

@@ -1,13 +1,9 @@
-import json
-import os
-import pickle
-import shutil
+import logging
 import tempfile
+import traceback
 from enum import Enum
 from typing import Any, Optional
 
-import torch
-import torchvision
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
@@ -41,6 +37,8 @@ from transformers import (
     Owlv2TextModel,
 )
 from utils.model_registry import ModelLoader, ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class MODEL_NAME(Enum):
@@ -104,17 +102,22 @@ class ModelService:
 
     @staticmethod
     def delete(db: Session, model_id: int):
-        model_obj = model_repository.get(db, model_id)
-        run_id = model_obj.registry.run_id
-        artifact_path = model_obj.registry.artifact_path
-        s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "")
-        # 새로운 delete_model 메서드 사용 (기존 delete_transformers 대신)
-        ModelRegistry().delete_run_artifacts(run_id)
-        MLFlowS3Manager().delete_folder(s3_artifact_path)
+        try:
+            model_obj = model_repository.get(db, model_id)
+            run_id = model_obj.registry.run_id
+            artifact_path = model_obj.registry.artifact_path
+            s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "")
+            # 새로운 delete_model 메서드 사용 (기존 delete_transformers 대신)
+            ModelRegistry().delete_run_artifacts(run_id)
+            MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
 
-        model_registry_repository.delete(db, pk=model_obj.registry.id)
-        model_repository.delete(db, pk=model_id)
-        db.commit()
+            model_registry_repository.delete(db, pk=model_obj.registry.id)
+            model_repository.delete(db, pk=model_id)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise RuntimeError(f"Model deletion failed: {str(e)}")
+        return True
 
     @staticmethod
     def load_transformers(model_uri: str):
