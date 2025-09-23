@@ -49,7 +49,11 @@ class Settings(BaseSettings):
     MLFLOW_S3_ENDPOINT_URL: str = Field(..., description="MLflow S3 엔드포인트 URL")
     AWS_ACCESS_KEY_ID: str = Field(..., description="AWS 액세스 키 ID")
     AWS_SECRET_ACCESS_KEY: str = Field(..., description="AWS 시크릿 액세스 키")
-    MLFLOW_S3_BUCKET: str = Field(..., description="MLflow 아티팩트 저장용 S3 버킷 이름. 모델 파일과 실험 결과를 저장하는 데 사용됩니다.")
+    MLFLOW_S3_BUCKET: str = Field(
+        ...,
+        description="MLflow 아티팩트 저장용 S3 버킷 이름. \
+        모델 파일과 실험 결과를 저장하는 데 사용됩니다.",
+    )
 
     # Innogrid Object Storage 설정
     INNOGRID_OBJECT_STORAGE_ENDPOINT: str = Field(..., description="Innogrid Object Storage 엔드포인트")
