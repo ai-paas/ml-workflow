@@ -75,7 +75,10 @@ class Settings(BaseSettings):
     def validate_mlflow_s3_bucket(cls, v: str) -> str:
         """MLflow S3 버킷 이름 유효성 검사"""
         if not v or not v.strip():
-            raise ValueError("MLFLOW_S3_BUCKET은 비어있을 수 없습니다. MLflow 아티팩트 저장을 위한 S3 버킷 이름을 설정해주세요.")
+            raise ValueError(
+                "MLFLOW_S3_BUCKET은 비어있을 수 없습니다. \
+                    MLflow 아티팩트 저장을 위한 S3 버킷 이름을 설정해주세요."
+            )
 
         return v.strip()
 
