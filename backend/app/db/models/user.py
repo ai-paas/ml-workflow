@@ -8,3 +8,7 @@ class UserModel(BaseModel, TimestampCreateMixin, TimestampUpdateMixin):
     username: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(50), nullable=False)
     password: Mapped[str] = mapped_column(String(64), nullable=False)  # TODO: sha-256 hash 처리 필요.
+
+    # Relationships for Service and Workflow
+    services = relationship("Service", back_populates="creator")
+    workflows = relationship("Workflow", back_populates="creator")

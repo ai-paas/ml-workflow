@@ -10,5 +10,14 @@ from .model import (
     ModelType,
     TrainImageRegistry,
 )
-from .service import ServiceEndpoint, ServiceParamType
+from .service import (
+    ComponentConnection,
+    ComponentType,
+    Service,
+    ServiceMonitoring,
+    ServiceStatus,
+    Workflow,
+    WorkflowComponent,
+    WorkflowStatus,
+)
 from .user import UserModel
