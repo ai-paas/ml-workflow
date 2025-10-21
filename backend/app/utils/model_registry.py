@@ -151,7 +151,6 @@ class ModelRegistry:
         return run_id, artifact_uri, model_version, model_uri
 
     def log_artifact(self, model_name: str, file: UploadFile = None, save_dir: str = None):
-        model_name = model_name.replace("/", "-")
         if file is not None:
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_file_path = Path(temp_dir) / file.filename

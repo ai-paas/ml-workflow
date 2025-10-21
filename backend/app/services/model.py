@@ -132,8 +132,9 @@ class HuggingFaceModelService:
         # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # if model_format_id == transformers_db_obj.id:  # transformers
         save_dir = self.load_and_save_transformers(repo_id)
-        run_id, artifact_uri = ModelRegistry().log_artifact(model_name=repo_id, save_dir=save_dir)
-        model_uri = ""
+        model_name = repo_id.replace("/", "-")
+        run_id, artifact_uri = ModelRegistry().log_artifact(model_name=model_name, save_dir=save_dir)
+        model_uri = model_name
         # else:
         #     print("Error!!!")
 
@@ -225,12 +226,13 @@ class CustomModelService:
         if not model_registry_schema:
             contents = file.file.read()
             model_name = model_schema.name
+            model_name = model_name.replace("/", "-")
             with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as temp_file:
                 temp_file.write(contents)
                 # temp_file_path = temp_file.name
                 # model = torch.load(temp_file_path, map_location="cpu")
                 run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
-                model_uri = ""
+                model_uri = model_name
         else:
             # run_id = model_registry_schema.run_id
             artifact_uri = model_registry_schema.artifact_path
