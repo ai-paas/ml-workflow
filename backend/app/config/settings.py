@@ -68,7 +68,11 @@ class Settings(BaseSettings):
 
     # KServe 설정
     KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")
-    KSERVE_GATEWAY_URL: str = Field(default="http://10.10.30.154:80", description="KServe Istio Gateway URL (외부 접근용)")
+    KSERVE_GATEWAY_URL: str = Field(
+        default="http://10.10.30.154:80",
+        description="KServe Istio Gateway URL \
+(외부 접근용)",
+    )
 
     # 기타 설정
     USER_MODELS: dict[str, dict] = Field(default_factory=dict, description="사용자 정의 모델 설정")
