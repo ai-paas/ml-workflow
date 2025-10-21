@@ -13,6 +13,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import BaseModel, TimestampMixin
 
 if TYPE_CHECKING:
+    from .kserve_deployment import KServeDeployment
     from .model import Model
     from .user import UserModel
 
@@ -111,7 +112,13 @@ class Workflow(BaseModel, TimestampMixin):
         "WorkflowComponent", back_populates="workflow", cascade="all, delete-orphan"
     )
     component_connections: Mapped[List["ComponentConnection"]] = relationship(
-        "ComponentConnection", foreign_keys="[ComponentConnection.workflow_id]", cascade="all, delete-orphan"
+        "ComponentConnection",
+        foreign_keys="[ComponentConnection.workflow_id]",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
+    kserve_deployments: Mapped[List["KServeDeployment"]] = relationship(
+        "KServeDeployment", back_populates="workflow", cascade="all, delete-orphan"
     )
 
 
@@ -164,7 +171,9 @@ class ComponentConnection(BaseModel, TimestampMixin):
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 추가 연결 설정
 
     # Relationships
-    workflow: Mapped["Workflow"] = relationship("Workflow", foreign_keys=[workflow_id])
+    workflow: Mapped["Workflow"] = relationship(
+        "Workflow", foreign_keys=[workflow_id], back_populates="component_connections"
+    )
     source_component: Mapped["WorkflowComponent"] = relationship(
         "WorkflowComponent", foreign_keys=[source_component_id], back_populates="outgoing_connections"
     )

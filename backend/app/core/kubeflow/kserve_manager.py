@@ -4,7 +4,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
-from db.models.model import Model
+from db.models.model import Model, ModelRegistry
 from db.models.service import ComponentType, WorkflowComponent
 from kserve import KServeClient, V1beta1InferenceService, V1beta1InferenceServiceSpec, V1beta1PredictorSpec, constants
 from kubernetes import client, config
@@ -41,6 +41,7 @@ class KServeManager:
         mlflow_config: Dict[str, str],
         gpu_enabled: bool = False,
         resources: Optional[Dict[str, str]] = None,
+        db: Optional[Session] = None,
     ) -> str:
         """
         모델 컴포넌트를 KServe로 배포
@@ -52,6 +53,7 @@ class KServeManager:
             mlflow_config: MLflow 설정 정보
             gpu_enabled: GPU 사용 여부
             resources: 리소스 설정 (cpu, memory, gpu)
+            db: 데이터베이스 세션 (ModelRegistry 조회용)
 
         Returns:
             배포된 인퍼런스 서비스 이름
@@ -70,21 +72,51 @@ class KServeManager:
                 "limit_gpu": "1",
             }
 
+        # ModelRegistry에서 model_uri와 run_id 가져오기
+        model_uri = ""
+        run_id = ""
+        framework = "pytorch"  # 기본값
+
+        if db and hasattr(model, "registry") and model.registry:
+            # artifact_path를 model_uri로 사용
+            model_uri = model.registry.artifact_path or ""
+            run_id = model.registry.run_id or ""
+
+        # framework 정보는 model의 type_info에서 가져올 수도 있음
+        if hasattr(model, "type_info") and model.type_info:
+            # framework를 type_info.name으로부터 추론 (예: "PyTorch", "TensorFlow" 등)
+            type_name = model.type_info.name.lower()
+            if "pytorch" in type_name or "torch" in type_name:
+                framework = "pytorch"
+            elif "tensorflow" in type_name or "tf" in type_name:
+                framework = "tensorflow"
+            elif "onnx" in type_name:
+                framework = "onnx"
+            else:
+                framework = "pytorch"  # 기본값
+
         # 컨테이너 args 구성
+        from config.settings import get_settings
+
+        settings = get_settings()
+
+        # mlflow_config에 experiment_name이 있어도 무시하고 항상 settings의 값을 사용
+        # 이렇게 하면 일관된 experiment name을 보장할 수 있음
         container_args = [
             f"--model_name={model.name}",
-            f"--model_uri={model.model_uri or ''}",
-            f"--mlflow_tracking_uri={mlflow_config.get('tracking_uri', '')}",
-            f"--mlflow_experiment_name={mlflow_config.get('experiment_name', 'default')}",
-            f"--mlflow_s3_endpoint_url={mlflow_config.get('s3_endpoint_url', '')}",
-            f"--aws_access_key_id={mlflow_config.get('aws_access_key_id', '')}",
-            f"--aws_secret_access_key={mlflow_config.get('aws_secret_access_key', '')}",
-            f"--framework={model.framework or 'pytorch'}",
+            f"--model_uri={model_uri}",
+            f"--mlflow_tracking_uri={mlflow_config.get('tracking_uri', settings.MLFLOW_TRACKING_URI)}",
+            # 환경 변수에서 설정된 실제 MLFLOW_EXPERIMENT_NAME을 항상 사용
+            f"--mlflow_experiment_name={mlflow_config.get('experiment_name', settings.MLFLOW_EXPERIMENT_NAME)}",
+            f"--mlflow_s3_endpoint_url={mlflow_config.get('s3_endpoint_url', settings.MLFLOW_S3_ENDPOINT_URL)}",
+            f"--aws_access_key_id={mlflow_config.get('aws_access_key_id', settings.AWS_ACCESS_KEY_ID)}",
+            f"--aws_secret_access_key={mlflow_config.get('aws_secret_access_key', settings.AWS_SECRET_ACCESS_KEY)}",
+            f"--framework={framework}",
         ]
 
         # run_id가 있으면 추가
-        if model.run_id:
-            container_args.append(f"--run_id={model.run_id}")
+        if run_id:
+            container_args.append(f"--run_id={run_id}")
 
         # 컴포넌트 config에서 추가 설정 가져오기
         if component.config:
@@ -140,8 +172,8 @@ class KServeManager:
         )
 
         try:
-            # KServe에 배포
-            self.kserve_client.create(inference_service)
+            # KServe에 배포 (namespace 명시적 지정)
+            self.kserve_client.create(inference_service, namespace=self.namespace)
             logger.info(f"Successfully deployed model component {component.component_id} as {service_name}")
 
             # 배포된 서비스 정보 저장
@@ -205,6 +237,7 @@ class KServeManager:
                     mlflow_config=mlflow_config,
                     gpu_enabled=gpu_enabled,
                     resources=resources,
+                    db=db,
                 )
 
                 deployed_services[component.component_id] = service_name
@@ -275,20 +308,32 @@ class KServeManager:
         deleted_count = 0
 
         try:
-            # 라벨로 서비스 찾기
-            services = self.kserve_client.get_all(namespace=self.namespace)
+            # KServe API를 통해 모든 인퍼런스 서비스 가져오기
+            # get 메서드를 사용하여 namespace의 모든 서비스 조회
+            services = self.kserve_client.get(namespace=self.namespace)
 
             for service in services:
-                metadata = service.get("metadata", {})
-                labels = metadata.get("labels", {})
+                # service는 V1beta1InferenceService 객체
+                if hasattr(service, "metadata") and service.metadata:
+                    metadata = service.metadata
 
-                # 해당 워크플로우의 서비스인지 확인
-                if labels.get("workflow-id") == workflow_id:
-                    service_name = metadata.get("name")
-                    if self.delete_inference_service(service_name):
-                        deleted_count += 1
+                    # 해당 워크플로우의 서비스인지 확인
+                    # 워크플로우 ID가 서비스 이름에 포함되어 있는지 확인
+                    service_name = metadata.name
+                    if service_name and f"workflow-{workflow_id}" in service_name:
+                        if self.delete_inference_service(service_name):
+                            deleted_count += 1
+                            logger.info(f"Deleted service {service_name} for workflow {workflow_id}")
 
         except Exception as e:
             logger.error(f"Failed to cleanup workflow services for {workflow_id}: {str(e)}")
+            # 대체 방법: deployed_services 딕셔너리를 사용하여 정리
+            try:
+                for comp_id, service_name in list(self.deployed_services.items()):
+                    if f"workflow-{workflow_id}" in service_name:
+                        if self.delete_inference_service(service_name):
+                            deleted_count += 1
+            except Exception as inner_e:
+                logger.error(f"Alternative cleanup also failed: {str(inner_e)}")
 
         return deleted_count
