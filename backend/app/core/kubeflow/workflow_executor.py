@@ -546,9 +546,11 @@ class WorkflowExecutor:
                             )
 
                             update_payload = {
-                                "service_name": service_name
-                                if "service_name" in locals()
-                                else f"failed-{workflow_id[:8]}-{component_id[:8]}",
+                                "service_name": (
+                                    service_name
+                                    if "service_name" in locals()
+                                    else f"failed-{workflow_id[:8]}-{component_id[:8]}"
+                                ),
                                 "service_hostname": "failed",
                                 "model_name": model_name,
                                 "status": "failed",

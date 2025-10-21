@@ -91,9 +91,11 @@ class ServiceMonitoringRepository(CRUDBase[ServiceMonitoring, Any, Any]):
             func.avg(ServiceMonitoring.success_rate).label("success_rate"),
         ).filter(
             and_(
-                ServiceMonitoring.service_id == service_id
-                if not workflow_id
-                else ServiceMonitoring.workflow_id == workflow_id,
+                (
+                    ServiceMonitoring.service_id == service_id
+                    if not workflow_id
+                    else ServiceMonitoring.workflow_id == workflow_id
+                ),
                 ServiceMonitoring.timestamp >= start_time,
                 ServiceMonitoring.timestamp <= end_time,
             )

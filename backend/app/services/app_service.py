@@ -143,9 +143,11 @@ class AppServiceService:
                             active_users=wf_metrics_query.active_users or 0,
                             token_usage=wf_metrics_query.token_usage or 0,
                             avg_interaction_count=float(wf_metrics_query.avg_interaction_count or 0),
-                            response_time_ms=float(wf_metrics_query.response_time_ms or 0)
-                            if wf_metrics_query.response_time_ms
-                            else None,
+                            response_time_ms=(
+                                float(wf_metrics_query.response_time_ms or 0)
+                                if wf_metrics_query.response_time_ms
+                                else None
+                            ),
                             error_count=wf_metrics_query.error_count or 0,
                             success_rate=float(wf_metrics_query.success_rate or 100.0),
                         ),
@@ -159,9 +161,9 @@ class AppServiceService:
             active_users=total_metrics_query.active_users or 0,
             token_usage=total_metrics_query.token_usage or 0,
             avg_interaction_count=float(total_metrics_query.avg_interaction_count or 0),
-            response_time_ms=float(total_metrics_query.response_time_ms or 0)
-            if total_metrics_query.response_time_ms
-            else None,
+            response_time_ms=(
+                float(total_metrics_query.response_time_ms or 0) if total_metrics_query.response_time_ms else None
+            ),
             error_count=total_metrics_query.error_count or 0,
             success_rate=float(total_metrics_query.success_rate or 100.0),
         )

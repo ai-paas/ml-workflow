@@ -5,6 +5,7 @@ Revises: 0007_add_service_workflow_tables
 Create Date: 2025-10-20 05:30:00.000000
 
 """
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import mysql

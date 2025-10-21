@@ -38,9 +38,11 @@ class WorkflowService:
                 # 템플릿의 정의를 복사
                 if not workflow_data.workflow_definition and template.workflow_definition:
                     workflow_data.workflow_definition = WorkflowDefinition(
-                        **json.loads(template.workflow_definition)
-                        if isinstance(template.workflow_definition, str)
-                        else template.workflow_definition
+                        **(
+                            json.loads(template.workflow_definition)
+                            if isinstance(template.workflow_definition, str)
+                            else template.workflow_definition
+                        )
                     )
 
             # WorkflowCreateInternal 사용 (status와 creator_id 포함)
@@ -223,13 +225,17 @@ class WorkflowService:
             service_id=service_id,
             is_template=False,
             template_id=template_id,
-            workflow_definition=WorkflowDefinition(
-                **json.loads(template.workflow_definition)
-                if isinstance(template.workflow_definition, str)
-                else template.workflow_definition
-            )
-            if template.workflow_definition
-            else None,
+            workflow_definition=(
+                WorkflowDefinition(
+                    **(
+                        json.loads(template.workflow_definition)
+                        if isinstance(template.workflow_definition, str)
+                        else template.workflow_definition
+                    )
+                )
+                if template.workflow_definition
+                else None
+            ),
         )
 
         return WorkflowService.create_workflow(db, workflow_data, creator_id)
