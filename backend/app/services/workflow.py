@@ -25,7 +25,12 @@ class WorkflowService:
     """워크플로우 관련 비즈니스 로직"""
 
     @staticmethod
-    def create_workflow(db: Session, workflow_data: WorkflowCreateRequest, creator_id: int) -> Workflow:
+    def create_workflow(
+        db: Session,
+        workflow_data: WorkflowCreateRequest,
+        creator_id: int,
+        initial_status: WorkflowStatus = WorkflowStatus.DRAFT,
+    ) -> Workflow:
         """새로운 워크플로우 생성"""
         try:
             # 템플릿으로부터 생성하는 경우
@@ -47,7 +52,7 @@ class WorkflowService:
 
             # WorkflowCreateInternal 사용 (status와 creator_id 포함)
             workflow_internal = WorkflowCreateInternal(
-                **workflow_data.model_dump(), status=WorkflowStatus.DRAFT, creator_id=creator_id
+                **workflow_data.model_dump(), status=initial_status, creator_id=creator_id
             )
 
             # workflow_definition을 dict로 변환 (필요시)
@@ -209,7 +214,7 @@ class WorkflowService:
 
     @staticmethod
     def clone_from_template(
-        db: Session, template_id: int, workflow_name: str, service_id: Optional[int], creator_id: int
+        db: Session, template_id: str, workflow_name: str, service_id: Optional[int], creator_id: int
     ) -> Workflow:
         """템플릿으로부터 워크플로우 생성"""
         template = workflow_repository.get_with_relations(db, template_id)
@@ -238,4 +243,5 @@ class WorkflowService:
             ),
         )
 
-        return WorkflowService.create_workflow(db, workflow_data, creator_id)
+        # 템플릿으로부터 생성된 워크플로우는 바로 ACTIVE 상태로 생성
+        return WorkflowService.create_workflow(db, workflow_data, creator_id, initial_status=WorkflowStatus.ACTIVE)

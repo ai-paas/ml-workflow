@@ -97,70 +97,10 @@ def list_workflows(
     return WorkflowListSchema(total=len(items), items=items)
 
 
-@router.get("/{workflow_id}", response_model=WorkflowReadSchema)
-def get_workflow(
-    *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
-):
-    """워크플로우 상세정보 조회"""
-    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
-
-    if not workflow:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
-
-    result = WorkflowReadSchema.from_orm(workflow)
-
-    # 추가 정보 설정
-    if workflow.service:
-        result.service_name = workflow.service.name
-    if workflow.template:
-        result.template_name = workflow.template.name
-
-    return result
-
-
-@router.put("/{workflow_id}", response_model=WorkflowReadSchema)
-def update_workflow(
-    *,
-    db: Session = SessionDepends,
-    workflow_id: str,
-    workflow_data: WorkflowUpdateRequest,
-    current_user: UserSchema = Depends(get_current_user),
-):
-    """
-    워크플로우 수정
-
-    workflow_definition이 제공되면 컴포넌트와 연결도 업데이트됨
-    """
-    workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
-
-    if not workflow:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
-
-    return WorkflowReadSchema.from_orm(workflow)
-
-
-@router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_workflow(
-    *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
-):
-    """
-    워크플로우 삭제
-
-    템플릿의 경우 파생된 워크플로우가 있으면 삭제 불가
-    """
-    try:
-        success = WorkflowService.delete_workflow(db, workflow_id)
-
-        if not success:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
-
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    return None
-
-
 # ============= Template Management =============
+# NOTE: 템플릿 라우트는 /{workflow_id} 보다 먼저 정의되어야 합니다.
+# FastAPI는 위에서 아래로 순서대로 라우트를 매칭하므로,
+# /templates가 {workflow_id}로 잘못 매칭되는 것을 방지합니다.
 
 
 @router.post("/templates", response_model=WorkflowTemplateReadSchema, status_code=status.HTTP_201_CREATED)
@@ -220,7 +160,7 @@ def list_workflow_templates(
 def clone_from_template(
     *,
     db: Session = SessionDepends,
-    template_id: int,
+    template_id: str,  # UUID 문자열로 변경
     workflow_name: str = Query(..., description="새 워크플로우 이름"),
     service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
     current_user: UserSchema = Depends(get_current_user),
@@ -288,6 +228,74 @@ def delete_workflow_template(
 
         if not success:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
+
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    return None
+
+
+# ============= Workflow CRUD =============
+# NOTE: 이 섹션은 템플릿 라우트 아래에 위치해야 합니다.
+# /{workflow_id} 패턴이 /templates를 가로채지 않도록 합니다.
+
+
+@router.get("/{workflow_id}", response_model=WorkflowReadSchema)
+def get_workflow(
+    *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
+):
+    """워크플로우 상세정보 조회"""
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    result = WorkflowReadSchema.from_orm(workflow)
+
+    # 추가 정보 설정
+    if workflow.service:
+        result.service_name = workflow.service.name
+    if workflow.template:
+        result.template_name = workflow.template.name
+
+    return result
+
+
+@router.put("/{workflow_id}", response_model=WorkflowReadSchema)
+def update_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    workflow_data: WorkflowUpdateRequest,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    워크플로우 수정
+
+    workflow_definition이 제공되면 컴포넌트와 연결도 업데이트됨
+    """
+    workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
+
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    return WorkflowReadSchema.from_orm(workflow)
+
+
+@router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_workflow(
+    *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
+):
+    """
+    워크플로우 삭제
+
+    템플릿의 경우 파생된 워크플로우가 있으면 삭제 불가
+    """
+    try:
+        success = WorkflowService.delete_workflow(db, workflow_id)
+
+        if not success:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -423,136 +431,6 @@ async def update_component_deployment_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{workflow_id}/sync-deployments")
-async def sync_workflow_deployments(
-    *,
-    db: Session = SessionDepends,
-    workflow_id: str,
-    current_user: UserSchema = Depends(get_current_user),
-):
-    """
-    워크플로우의 Kubeflow Pipeline 상태를 확인하고 KServe 배포 정보를 동기화합니다.
-
-    1. Kubeflow Pipeline 실행 상태 확인
-    2. Pipeline이 완료되었으면 KServe InferenceService 조회
-    3. DB에 배포 정보 업데이트
-    """
-    from core.kubeflow.kubeflow_manager import KubeflowManager
-    from kserve import KServeClient
-
-    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
-    if not workflow:
-        raise HTTPException(status_code=404, detail=f"Workflow {workflow_id} not found")
-
-    if not workflow.kubeflow_run_id:
-        raise HTTPException(status_code=400, detail="Workflow has no Kubeflow run ID")
-
-    try:
-        # 1. Kubeflow Pipeline 상태 확인
-        kf_manager = KubeflowManager()
-        run = kf_manager.kfp_client.get_run(workflow.kubeflow_run_id)
-
-        pipeline_status = run.state if hasattr(run, "state") else run.run.state if hasattr(run, "run") else "UNKNOWN"
-
-        logger.info(f"Pipeline {workflow.kubeflow_run_id} status: {pipeline_status}")
-
-        # 2. Pipeline이 완료되었으면 KServe 서비스 조회
-        if pipeline_status in ["SUCCEEDED", "COMPLETED"]:
-            kserve_client = KServeClient()
-            namespace = settings.KUBEFLOW_NAMESPACE or "kubeflow-user-example-com"
-
-            synced_count = 0
-            failed_count = 0
-
-            # 워크플로우의 모든 MODEL 컴포넌트 처리
-            for component in workflow.components:
-                if component.type != ComponentType.MODEL:
-                    continue
-
-                try:
-                    # KServe InferenceService 조회 (workflow-id 레이블로 필터링)
-                    services = kserve_client.get(namespace=namespace)
-
-                    # 해당 컴포넌트의 서비스 찾기
-                    matching_service = None
-                    if hasattr(services, "items"):
-                        for svc in services.get("items", []):
-                            labels = svc.get("metadata", {}).get("labels", {})
-                            if (
-                                labels.get("workflow-id") == workflow_id
-                                and labels.get("component-id") == component.component_id
-                            ):
-                                matching_service = svc
-                                break
-
-                    if matching_service:
-                        # 서비스 정보 추출
-                        metadata = matching_service.get("metadata", {})
-                        status_info = matching_service.get("status", {})
-
-                        service_name = metadata.get("name", "")
-
-                        # URL 정보 추출
-                        internal_url = status_info.get("address", {}).get("url", "")
-
-                        # Hostname 생성
-                        service_hostname = f"{service_name}.{namespace}.example.com"
-
-                        # 모델 이름 정제
-                        model = db.query(Model).filter(Model.id == component.model_id).first()
-                        model_name = model.name.replace("/", "-") if model else component.name
-
-                        # Ready 상태 확인
-                        conditions = status_info.get("conditions", [])
-                        is_ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
-
-                        deployment_status = "deployed" if is_ready else "deploying"
-
-                        # DB 업데이트
-                        KServeDeploymentService.update_deployment_status(
-                            db=db,
-                            workflow_id=workflow_id,
-                            component_id=component.component_id,
-                            service_name=service_name,
-                            service_hostname=service_hostname,
-                            model_name=model_name,
-                            status=deployment_status,
-                            internal_url=internal_url or f"http://{service_name}.{namespace}.svc.cluster.local",
-                            error_message=None,
-                        )
-
-                        synced_count += 1
-                        logger.info(f"Synced deployment info for component {component.component_id}: {service_name}")
-
-                    else:
-                        # 서비스를 찾지 못한 경우
-                        logger.warning(f"No KServe service found for component {component.component_id}")
-                        failed_count += 1
-
-                except Exception as e:
-                    logger.error(f"Failed to sync component {component.component_id}: {str(e)}")
-                    failed_count += 1
-
-            return {
-                "workflow_id": workflow_id,
-                "pipeline_status": pipeline_status,
-                "synced_count": synced_count,
-                "failed_count": failed_count,
-                "message": f"Synced {synced_count} deployments, {failed_count} failed",
-            }
-
-        else:
-            return {
-                "workflow_id": workflow_id,
-                "pipeline_status": pipeline_status,
-                "message": f"Pipeline is still running or not completed yet (status: {pipeline_status})",
-            }
-
-    except Exception as e:
-        logger.error(f"Failed to sync workflow deployments: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @router.post("/{workflow_id}/inference")
 async def inference_workflow_model(
     *,
@@ -611,8 +489,6 @@ async def inference_workflow_model(
     )
 
     if component and component.model_id:
-        from db.models.model import Model
-
         model = db.query(Model).filter(Model.id == component.model_id).first()
         if model:
             model_info.update(
@@ -703,18 +579,54 @@ async def inference_workflow_model(
 
 @router.get("/{workflow_id}/models")
 def get_deployed_models(
-    *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    check_k8s_status: bool = Query(False, description="Kubernetes에서 실시간 상태 확인 여부"),
+    current_user: UserSchema = Depends(get_current_user),
 ):
     """
     워크플로우에 배포된 모델 목록 조회
+
+    Args:
+        check_k8s_status: True이면 Kubernetes InferenceService 상태도 추가 확인 (기본값: False)
+                         DB의 kserve_deployments 테이블 상태가 우선입니다.
     """
+    from core.kubeflow.kserve_helper import get_inference_service_status
+
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    # Service를 통한 배포된 모델 목록 조회
+    # ✅ DB에서 배포된 모델 목록 조회 (이것이 주 소스)
     deployed_models = KServeDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
+
+    # ✅ Kubernetes에서 실시간 상태 확인 (선택적, 추가 정보로만 사용)
+    if check_k8s_status:
+        namespace = settings.KUBEFLOW_NAMESPACE or "kubeflow-user-example-com"
+
+        for model in deployed_models:
+            component_id = model.get("component_id")
+            if component_id:
+                try:
+                    # workflow_id와 component_id로 InferenceService 조회
+                    service_info = get_inference_service_status(
+                        namespace=namespace,
+                        workflow_id=workflow_id,
+                        component_id=component_id,
+                    )
+
+                    if service_info:
+                        # Kubernetes 상태를 추가 정보로만 제공 (DB 상태는 유지)
+                        model["k8s_is_ready"] = service_info.get("is_ready")
+                        model["k8s_exists"] = True
+                    else:
+                        model["k8s_exists"] = False
+
+                except Exception as e:
+                    logger.error(f"Failed to check k8s status for {component_id}: {e}")
+                    model["k8s_error"] = str(e)
 
     return {
         "workflow_id": workflow_id,
@@ -770,8 +682,6 @@ def check_model_status(
     # 모델 이름 조회
     model_name = model_info.get("model_name", component_id)
     if model_info.get("model_id"):
-        from db.models.model import Model
-
         model = db.query(Model).filter(Model.id == model_info["model_id"]).first()
         if model:
             model_name = model.name

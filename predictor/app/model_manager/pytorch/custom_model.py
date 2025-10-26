@@ -176,9 +176,9 @@ class PytorchModelManager(BaseModelManager):
         except Exception as e:
             logger.error(f"추론 중 오류 발생: {e}")
             raise e
-        finally:
-            torch.cuda.empty_cache()
-            self._clear_model()
+        # finally:
+        #     torch.cuda.empty_cache()
+        #     self._clear_model()
 
     def _process_image_classification(self, inputs, outputs):  # 입력 형태를 통일하기 위해 input 파라미터 유지
         """

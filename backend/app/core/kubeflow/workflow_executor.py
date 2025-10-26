@@ -778,6 +778,7 @@ class WorkflowExecutor:
         Returns:
             삭제된 서비스 개수
         """
+        from core.kubeflow.kserve_helper import get_all_workflow_services
         from kserve import KServeClient
         from kubernetes import config
 
@@ -792,24 +793,23 @@ class WorkflowExecutor:
             namespace = settings.KUBEFLOW_NAMESPACE
             deleted_count = 0
 
-            # namespace의 모든 서비스 조회
+            # ✅ 개선: Label selector로 워크플로우의 서비스만 조회
             try:
-                services = kserve_client.get(namespace=namespace)
-                if isinstance(services, dict) and "items" in services:
-                    for service in services["items"]:
-                        metadata = service.get("metadata", {})
-                        name = metadata.get("name", "")
+                services = get_all_workflow_services(namespace=namespace, workflow_id=workflow_id)
 
-                        # 워크플로우 ID가 서비스 이름에 포함되어 있는지 확인
-                        if f"workflow-{workflow_id}" in name:
-                            try:
-                                kserve_client.delete(name, namespace=namespace)
-                                deleted_count += 1
-                                logger.info(f"Deleted service {name}")
-                            except Exception as e:
-                                logger.error(f"Failed to delete service {name}: {e}")
+                for service in services:
+                    metadata = service.get("metadata", {})
+                    name = metadata.get("name", "")
+
+                    try:
+                        kserve_client.delete(name, namespace=namespace)
+                        deleted_count += 1
+                        logger.info(f"Deleted service {name} for workflow {workflow_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to delete service {name}: {e}")
+
             except Exception as e:
-                logger.error(f"Failed to list services: {e}")
+                logger.error(f"Failed to list services for workflow {workflow_id}: {e}")
 
             return deleted_count
 
@@ -819,7 +819,10 @@ class WorkflowExecutor:
 
     def get_workflow_status(self, workflow: Workflow) -> Dict[str, Any]:
         """
-        워크플로우 실행 상태 조회
+        워크플로우 실행 상태 조회 (DB 기반)
+
+        kserve_deployments 테이블의 정보를 기반으로 상태를 반환합니다.
+        Kubernetes를 직접 조회하지 않습니다.
 
         Args:
             workflow: 워크플로우
@@ -827,11 +830,13 @@ class WorkflowExecutor:
         Returns:
             상태 정보
         """
+        from services.kserve_deployment import KServeDeploymentService
+
         status = {
             "workflow_id": str(workflow.id),
             "status": workflow.status.value,
             "kubeflow_run_id": workflow.kubeflow_run_id,
-            "deployed_services": {},
+            "deployed_models": [],
         }
 
         # Kubeflow 실행 상태 확인
@@ -842,16 +847,16 @@ class WorkflowExecutor:
             except Exception as e:
                 logger.error(f"Failed to get run status: {str(e)}")
 
-        # 배포된 서비스 상태 확인
-        if self.kserve_manager:
-            for component in workflow.components:
-                if component.type == ComponentType.MODEL:
-                    service_name = self.deployed_services.get(component.component_id)
-                    if service_name:
-                        service_url = self.kserve_manager.get_inference_service_url(service_name)
-                        status["deployed_services"][component.component_id] = {
-                            "service_name": service_name,
-                            "url": service_url,
-                        }
+        # ✅ DB 기반 배포 상태 조회 (kserve_deployments 테이블)
+        if self.db:
+            try:
+                deployed_models = KServeDeploymentService.get_deployed_models(
+                    self.db, str(workflow.id), include_component_info=True
+                )
+
+                status["deployed_models"] = deployed_models
+
+            except Exception as e:
+                logger.error(f"Failed to get deployed models from DB: {e}")
 
         return status

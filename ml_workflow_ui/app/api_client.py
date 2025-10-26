@@ -1,0 +1,201 @@
+"""API 클라이언트 - Backend API와 통신"""
+
+import base64
+import logging
+from typing import Any, Dict, List, Optional
+
+import requests
+from config.settings import get_settings
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+class APIClient:
+    """Backend API 클라이언트"""
+
+    def __init__(self, token: str):
+        self.token = token
+        self.base_url = settings.REST_API_URL
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+    def _get(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+        """GET 요청"""
+        url = f"{self.base_url}{endpoint}"
+        try:
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error: {e}")
+            logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+            # 더 자세한 에러 메시지
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    error_detail = e.response.text or str(e)
+                raise Exception(f"API 오류 ({e.response.status_code}): {error_detail}")
+            raise Exception(f"API 요청 실패: {str(e)}")
+        except Exception as e:
+            logger.error(f"Request failed: {e}")
+            raise
+
+    def _post(self, endpoint: str, data: Optional[Dict] = None, files=None, params: Optional[Dict] = None) -> Any:
+        """POST 요청"""
+        url = f"{self.base_url}{endpoint}"
+        headers = self.headers.copy()
+
+        try:
+            if files:
+                # multipart/form-data인 경우 Content-Type 제거
+                headers.pop("Content-Type", None)
+                response = requests.post(url, headers=headers, data=data, files=files, params=params)
+            elif data is not None:
+                # data가 있을 때만 json으로 전송
+                response = requests.post(url, headers=headers, json=data, params=params)
+            else:
+                # data가 None이면 Content-Type 제거하고 Query 파라미터만 사용
+                headers.pop("Content-Type", None)
+                response = requests.post(url, headers=headers, params=params)
+
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error: {e}")
+            logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+            # 더 자세한 에러 메시지
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    error_detail = e.response.text or str(e)
+                raise Exception(f"API 오류 ({e.response.status_code}): {error_detail}")
+            raise Exception(f"API 요청 실패: {str(e)}")
+        except Exception as e:
+            logger.error(f"Request failed: {e}")
+            raise
+
+    # ============= Authentication =============
+    @staticmethod
+    def authenticate(username: str, password: str) -> Optional[str]:
+        """로그인 - 토큰 반환"""
+        try:
+            response = requests.post(
+                f"{settings.REST_API_URL}/api/v1/authentications/token",
+                data={"username": username, "password": password},
+            )
+            response.raise_for_status()
+            return response.json()["access_token"]
+        except Exception as e:
+            logger.error(f"Authentication failed: {e}")
+            return None
+
+    # ============= Workflow Templates =============
+    def get_workflow_templates(self, category: Optional[str] = None) -> List[Dict]:
+        """워크플로우 템플릿 목록 조회"""
+        params = {}
+        if category:
+            params["category"] = category
+        return self._get("/api/v1/workflows/templates", params=params)
+
+    def clone_from_template(self, template_id: str, workflow_name: str, service_id: Optional[int] = None) -> Dict:
+        """템플릿으로부터 워크플로우 생성"""
+        params = {"workflow_name": workflow_name}
+        if service_id:
+            params["service_id"] = service_id
+        # Query 파라미터로 전송 (라우터가 Query()로 정의됨)
+        return self._post(f"/api/v1/workflows/templates/{template_id}/clone", data=None, params=params)
+
+    # ============= Workflow =============
+    def get_workflows(
+        self,
+        is_template: Optional[bool] = None,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> Dict:
+        """워크플로우 목록 조회"""
+        params = {"skip": skip, "limit": limit}
+        if is_template is not None:
+            params["is_template"] = is_template
+        if status:
+            params["status"] = status
+        return self._get("/api/v1/workflows", params=params)
+
+    def get_workflow(self, workflow_id: str) -> Dict:
+        """워크플로우 상세 조회"""
+        return self._get(f"/api/v1/workflows/{workflow_id}")
+
+    def execute_workflow(self, workflow_id: str, parameters: Optional[Dict] = None) -> Dict:
+        """워크플로우 실행"""
+        data = {"parameters": parameters or {}}
+        return self._post(f"/api/v1/workflows/{workflow_id}/execute", data=data)
+
+    def get_workflow_status(self, workflow_id: str) -> Dict:
+        """워크플로우 실행 상태 조회"""
+        return self._get(f"/api/v1/workflows/{workflow_id}/status")
+
+    # ============= Deployed Models =============
+    def get_deployed_models(self, workflow_id: str) -> Dict:
+        """워크플로우에 배포된 모델 목록 조회"""
+        return self._get(f"/api/v1/workflows/{workflow_id}/models")
+
+    def get_all_deployed_workflows(self) -> Dict:
+        """모든 배포된 워크플로우 목록 조회 (템플릿 제외)"""
+        return self.get_workflows(is_template=False)
+
+    def cleanup_workflow(self, workflow_id: str) -> Dict:
+        """워크플로우 리소스 정리 (배포된 서비스 삭제)"""
+        return self._post(f"/api/v1/workflows/{workflow_id}/cleanup")
+
+    # ============= Inference =============
+    def inference(
+        self,
+        workflow_id: str,
+        component_id: str,
+        image_path: str,
+        labels: List[str],
+    ) -> Dict:
+        """배포된 모델에 추론 요청
+
+        Args:
+            workflow_id: 워크플로우 ID (path parameter)
+            component_id: 컴포넌트 ID (query parameter)
+            image_path: 이미지 파일 경로
+            labels: 텍스트 레이블 리스트 (query parameter, 여러 개)
+
+        Returns:
+            {
+                "workflow_id": str,
+                "component_id": str,
+                "predictions": str | dict,  # base64 문자열 또는 JSON 객체
+                "model_info": dict,
+                "labels": list[str]
+            }
+        """
+        with open(image_path, "rb") as f:
+            files = {"image": ("image.jpg", f, "image/jpeg")}
+
+            # multipart/form-data 요청
+            # component_id와 labels는 쿼리 파라미터로 전달
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/inference"
+            headers = {"Authorization": f"Bearer {self.token}"}
+
+            # 쿼리 파라미터 구성
+            # labels를 여러 개의 쿼리 파라미터로 전달 (FastAPI List[str] = Query(...))
+            params = [("component_id", component_id)]
+            for label in labels:
+                params.append(("labels", label))
+
+            response = requests.post(
+                url,
+                headers=headers,
+                params=params,
+                files=files,
+            )
+            response.raise_for_status()
+            return response.json()
