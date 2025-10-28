@@ -10,8 +10,13 @@ import gradio as gr
 logger = logging.getLogger(__name__)
 
 
-def create_quick_deployment_ui(app_state):
-    """Quick Service Deployment UI 생성"""
+def create_quick_deployment_ui(app_state, tabs=None):
+    """Quick Service Deployment UI 생성
+
+    Args:
+        app_state: 애플리케이션 상태
+        tabs: Gradio Tabs 컴포넌트 (탭 전환을 위해 사용)
+    """
 
     # 상태 저장
     template_list_state = gr.State([])
@@ -25,12 +30,6 @@ def create_quick_deployment_ui(app_state):
 
             간편하게 템플릿을 선택하고 배포하세요!
             """
-            )
-
-            category_filter = gr.Dropdown(
-                label="📁 카테고리 필터",
-                choices=["전체", "Object Detection", "Image Classification", "Text Analysis"],
-                value="전체",
             )
 
             refresh_templates_btn = gr.Button("🔄 템플릿 목록 새로고침", size="sm")
@@ -60,11 +59,14 @@ def create_quick_deployment_ui(app_state):
 
             gr.Markdown("---")
 
-            check_status_btn = gr.Button("🔍 배포 상태 확인 (DB 기반)", variant="secondary", size="lg")
+            # 배포 관리 탭으로 이동하는 안내
+            gr.Markdown("### 📊 배포 상태 확인")
 
-            status_output = gr.Textbox(label="📈 상세 상태", interactive=False, lines=5)
+            go_to_deployment_btn = gr.Button("📊 배포 관리 탭으로 이동하기", variant="primary", size="lg")
 
-    def load_templates(category: str):
+            gr.Markdown(value="👆 위 버튼을 클릭하여 배포 관리 탭에서 배포 상태를 확인하세요.", visible=True)
+
+    def load_templates():
         """템플릿 목록 로드"""
         if not app_state.api_client:
             error_msg = "❌ API client가 초기화되지 않았습니다. 먼저 로그인해주세요."
@@ -78,12 +80,11 @@ def create_quick_deployment_ui(app_state):
             )
 
         try:
-            logger.info(f"Loading templates with category: {category}")
-            category_param = None if category == "전체" else category
+            logger.info("Loading all templates")
 
             # API 호출 시 자세한 로깅
             logger.info(f"Calling API: {app_state.api_client.base_url}/api/v1/workflows/templates")
-            templates = app_state.api_client.get_workflow_templates(category=category_param)
+            templates = app_state.api_client.get_workflow_templates(category=None)
 
             logger.info(f"Received {len(templates)} templates from API")
 
@@ -98,8 +99,8 @@ def create_quick_deployment_ui(app_state):
                     [],
                 )
 
-            # 드롭다운 선택지 생성
-            choices = [(f"{t.get('name')} ({t.get('category', 'N/A')})", t.get("id")) for t in templates]
+            # 드롭다운 선택지 생성 (Category 정보 제외)
+            choices = [(t.get("name"), t.get("id")) for t in templates]
 
             success_msg = f"✅ {len(templates)}개의 템플릿을 불러왔습니다."
             return (
@@ -148,9 +149,6 @@ def create_quick_deployment_ui(app_state):
 
 **📊 상태:** {selected.get('status', 'N/A')}
 
-**👤 생성자:** {selected.get('creator_id', 'N/A')}
-
-**📅 생성일:** {selected.get('created_at', 'N/A')}
 
 ---
 
@@ -212,9 +210,9 @@ def create_quick_deployment_ui(app_state):
             output_messages.append("=" * 60)
             output_messages.append("")
             output_messages.append("💡 다음 단계:")
-            output_messages.append("   1. '배포 상태 확인' 버튼으로 진행 상황 모니터링")
-            output_messages.append("   2. 배포 완료 후 '배포 정보 동기화' 버튼 클릭")
-            output_messages.append("   3. Playground 탭에서 추론 테스트")
+            output_messages.append("   1. 상단의 '배포 관리' 탭으로 이동")
+            output_messages.append("   2. 배포된 워크플로우 새로고침 후 상태 확인")
+            output_messages.append("   3. 배포 완료 후 Playground 탭에서 추론 테스트")
             output_messages.append("")
             output_messages.append("⏱️  예상 소요 시간: 2-3분")
 
@@ -230,68 +228,15 @@ def create_quick_deployment_ui(app_state):
 
             return ("\n".join(output_messages), "", gr.update(visible=False))
 
-    def check_deployment_status(workflow_id: str):
-        """배포 상태 확인 (상세)"""
-        if not app_state.api_client:
-            return "❌ 로그인이 필요합니다."
-
-        if not workflow_id:
-            return "❌ 먼저 Quick Service를 배포해주세요."
-
-        try:
-            result = app_state.api_client.get_workflow_status(workflow_id=workflow_id)
-
-            status_lines = []
-            status_lines.append("=" * 50)
-            status_lines.append("📊 배포 상태 상세 정보")
-            status_lines.append("=" * 50)
-            status_lines.append("")
-            status_lines.append(f"🆔 Workflow ID: {result.get('workflow_id')}")
-            status_lines.append(f"📌 상태: {result.get('status')}")
-            status_lines.append(f"🔗 Kubeflow Run ID: {result.get('kubeflow_run_id')}")
-            status_lines.append("")
-
-            # 배포된 모델 정보
-            if result.get("deployed_models"):
-                status_lines.append("🚀 배포된 모델 정보:")
-                status_lines.append("-" * 50)
-                for idx, model in enumerate(result.get("deployed_models", []), 1):
-                    status_lines.append("")
-                    status_lines.append(f"[모델 #{idx}]")
-                    status_lines.append(f"  📦 Component ID: {model.get('component_id')}")
-                    status_lines.append(f"  ✅ 상태: {model.get('status')}")
-                    status_lines.append(f"  🏷️  서비스명: {model.get('service_name')}")
-                    if model.get("service_hostname"):
-                        status_lines.append(f"  🌐 Hostname: {model.get('service_hostname')}")
-            else:
-                status_lines.append("⏳ 모델 배포 진행 중...")
-                status_lines.append("   잠시 후 다시 확인해주세요.")
-
-            status_lines.append("")
-            status_lines.append("=" * 50)
-
-            return "\n".join(status_lines)
-
-        except Exception as e:
-            logger.error(f"Failed to check status: {e}")
-            return f"❌ 상태 확인 실패: {str(e)}"
+    def navigate_to_deployment():
+        """배포 관리 탭으로 이동"""
+        # 배포 관리 탭의 ID는 2입니다 (0: 로그인, 1: Quick Service, 2: 배포 관리, 3: Playground)
+        return gr.Tabs(selected=2)
 
     # 이벤트 핸들러 연결
     refresh_templates_btn.click(
         fn=load_templates,
-        inputs=[category_filter],
-        outputs=[
-            template_dropdown,
-            template_info_display,
-            template_error_msg,
-            selected_template_id,
-            template_list_state,
-        ],
-    )
-
-    category_filter.change(
-        fn=load_templates,
-        inputs=[category_filter],
+        inputs=[],
         outputs=[
             template_dropdown,
             template_info_display,
@@ -315,9 +260,22 @@ def create_quick_deployment_ui(app_state):
         outputs=[deployment_output, deployed_workflow_id_state, workflow_id_display],
     )
 
-    # 배포 상태 확인
-    check_status_btn.click(
-        fn=check_deployment_status,
-        inputs=[deployed_workflow_id_state],
-        outputs=[status_output],
-    )
+    # 배포 관리 탭으로 이동 버튼
+    if tabs:
+        go_to_deployment_btn.click(
+            fn=navigate_to_deployment,
+            inputs=[],
+            outputs=[tabs],
+        )
+
+    # 페이지 로드를 위한 함수와 출력 컴포넌트 반환
+    return {
+        "load_fn": load_templates,
+        "load_outputs": [
+            template_dropdown,
+            template_info_display,
+            template_error_msg,
+            selected_template_id,
+            template_list_state,
+        ],
+    }

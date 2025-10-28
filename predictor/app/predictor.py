@@ -162,19 +162,36 @@ class InferenceModel(Model):
             # Model Manager를 통한 추론 (새로운 방식)
             if hasattr(self, "model_manager") and self.model_manager:
                 device_str = "gpu" if torch.cuda.is_available() else "cpu"
-                predictions = self.model_manager.predict(data=image_bytes, device_str=device_str)
+                result = self.model_manager.predict(data=image_bytes, device_str=device_str)
 
-                # 예측 결과를 JSON 직렬화 가능한 형태로 변환
-                if hasattr(predictions, "tolist"):
-                    predictions = predictions.tolist()
-                elif isinstance(predictions, (np.ndarray, torch.Tensor)):
-                    predictions = predictions.tolist()
+                # result는 dict 형태: {"predictions": [...], "image_info": {...}}
+                if isinstance(result, dict):
+                    predictions = result.get("predictions", result)
+
+                    # 예측 결과를 JSON 직렬화 가능한 형태로 변환
+                    if hasattr(predictions, "tolist"):
+                        predictions = predictions.tolist()
+                    elif isinstance(predictions, (np.ndarray, torch.Tensor)):
+                        predictions = predictions.tolist()
+
+                    # image_info와 함께 결과 반환
+                    response_data = {"predictions": predictions, "image_info": result.get("image_info", {})}
+                else:
+                    # 하위 호환성: result가 dict가 아닌 경우
+                    if hasattr(result, "tolist"):
+                        predictions = result.tolist()
+                    elif isinstance(result, (np.ndarray, torch.Tensor)):
+                        predictions = result.tolist()
+                    else:
+                        predictions = result
+
+                    response_data = {"predictions": predictions}
 
                 return InferResponse(
                     response_id=generate_uuid(),
                     model_name=self.name,
                     infer_outputs=[
-                        InferOutput(name="OUTPUT_0", datatype="BYTES", shape=[1], data=[json.dumps(predictions)])
+                        InferOutput(name="OUTPUT_0", datatype="BYTES", shape=[1], data=[json.dumps(response_data)])
                     ],
                 )
 

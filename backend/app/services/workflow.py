@@ -213,6 +213,14 @@ class WorkflowService:
         return workflow_repository.get_templates(db, skip=skip, limit=limit, creator_id=creator_id, category=category)
 
     @staticmethod
+    def get_workflow_template_by_id(db: Session, template_id: str) -> Optional[Workflow]:
+        """워크플로우 템플릿 ID로 조회"""
+        template = workflow_repository.get_with_relations(db, template_id)
+        if template and template.is_template:
+            return template
+        return None
+
+    @staticmethod
     def clone_from_template(
         db: Session, template_id: str, workflow_name: str, service_id: Optional[int], creator_id: int
     ) -> Workflow:

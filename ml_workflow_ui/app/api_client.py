@@ -79,6 +79,45 @@ class APIClient:
             logger.error(f"Request failed: {e}")
             raise
 
+    def _delete(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+        """DELETE 요청"""
+        url = f"{self.base_url}{endpoint}"
+        try:
+            response = requests.delete(url, headers=self.headers, params=params)
+            response.raise_for_status()
+
+            # DELETE는 204 No Content를 반환할 수 있으므로 빈 응답 처리
+            if response.status_code == 204:
+                return {"message": "Successfully deleted"}
+
+            # 202 Accepted - 비동기 처리 시작 (run_id 등 포함)
+            if response.status_code == 202:
+                try:
+                    return response.json()
+                except Exception:
+                    return {"message": "Deletion accepted and processing"}
+
+            # 기타 응답 본문이 있으면 JSON 파싱
+            try:
+                return response.json()
+            except Exception:
+                return {"message": "Successfully deleted"}
+
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error: {e}")
+            logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'N/A'}")
+            # 더 자세한 에러 메시지
+            if hasattr(e, "response") and e.response is not None:
+                try:
+                    error_detail = e.response.json().get("detail", str(e))
+                except Exception:
+                    error_detail = e.response.text or str(e)
+                raise Exception(f"API 오류 ({e.response.status_code}): {error_detail}")
+            raise Exception(f"API 요청 실패: {str(e)}")
+        except Exception as e:
+            logger.error(f"Request failed: {e}")
+            raise
+
     # ============= Authentication =============
     @staticmethod
     def authenticate(username: str, password: str) -> Optional[str]:
@@ -94,6 +133,11 @@ class APIClient:
             logger.error(f"Authentication failed: {e}")
             return None
 
+    # ============= Component Types =============
+    def get_component_types(self) -> List[Dict]:
+        """사용 가능한 컴포넌트 타입 조회"""
+        return self._get("/api/v1/workflows/component-types")
+
     # ============= Workflow Templates =============
     def get_workflow_templates(self, category: Optional[str] = None) -> List[Dict]:
         """워크플로우 템플릿 목록 조회"""
@@ -101,6 +145,10 @@ class APIClient:
         if category:
             params["category"] = category
         return self._get("/api/v1/workflows/templates", params=params)
+
+    def get_workflow_template(self, template_id: str) -> Dict:
+        """워크플로우 템플릿 상세 조회"""
+        return self._get(f"/api/v1/workflows/templates/{template_id}")
 
     def clone_from_template(self, template_id: str, workflow_name: str, service_id: Optional[int] = None) -> Dict:
         """템플릿으로부터 워크플로우 생성"""
@@ -152,13 +200,46 @@ class APIClient:
         """워크플로우 리소스 정리 (배포된 서비스 삭제)"""
         return self._post(f"/api/v1/workflows/{workflow_id}/cleanup")
 
+    def delete_workflow(self, workflow_id: str) -> Dict:
+        """
+        워크플로우 삭제 시작
+
+        KServe InferenceService 삭제를 위한 Kubeflow Pipeline을 시작하고 cleanup_run_id를 반환합니다.
+
+        Returns:
+            {
+                "workflow_id": str,
+                "cleanup_run_id": str,
+                "status": "cleanup_in_progress",
+                ...
+            }
+        """
+        return self._delete(f"/api/v1/workflows/{workflow_id}")
+
+    def finalize_workflow_deletion(self, workflow_id: str, run_id: str) -> Dict:
+        """
+        워크플로우 삭제 완료 확인 및 DB 삭제
+
+        Args:
+            workflow_id: 워크플로우 ID
+            run_id: Cleanup pipeline run ID
+
+        Returns:
+            {
+                "status": "completed" | "in_progress" | "failed",
+                "deleted_from_db": bool,
+                ...
+            }
+        """
+        params = {"run_id": run_id}
+        return self._post(f"/api/v1/workflows/{workflow_id}/finalize-deletion", params=params)
+
     # ============= Inference =============
     def inference(
         self,
         workflow_id: str,
         component_id: str,
         image_path: str,
-        labels: List[str],
     ) -> Dict:
         """배포된 모델에 추론 요청
 
@@ -166,30 +247,25 @@ class APIClient:
             workflow_id: 워크플로우 ID (path parameter)
             component_id: 컴포넌트 ID (query parameter)
             image_path: 이미지 파일 경로
-            labels: 텍스트 레이블 리스트 (query parameter, 여러 개)
 
         Returns:
             {
                 "workflow_id": str,
                 "component_id": str,
                 "predictions": str | dict,  # base64 문자열 또는 JSON 객체
-                "model_info": dict,
-                "labels": list[str]
+                "model_info": dict
             }
         """
         with open(image_path, "rb") as f:
             files = {"image": ("image.jpg", f, "image/jpeg")}
 
             # multipart/form-data 요청
-            # component_id와 labels는 쿼리 파라미터로 전달
+            # component_id는 쿼리 파라미터로 전달
             url = f"{self.base_url}/api/v1/workflows/{workflow_id}/inference"
             headers = {"Authorization": f"Bearer {self.token}"}
 
             # 쿼리 파라미터 구성
-            # labels를 여러 개의 쿼리 파라미터로 전달 (FastAPI List[str] = Query(...))
-            params = [("component_id", component_id)]
-            for label in labels:
-                params.append(("labels", label))
+            params = {"component_id": component_id}
 
             response = requests.post(
                 url,

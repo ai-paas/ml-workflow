@@ -120,7 +120,7 @@ class PytorchModelManager(BaseModelManager):
         현재 테스트 대상 모델은 이미지 입력이기 때문에 이미지 전처리를 수행
         :param data: 이미지 데이터 (바이너리 또는 파일 객체)
         :param device: 추론 장치
-        :return: 전처리된 데이터
+        :return: 전처리된 데이터 (원본 크기 정보 포함)
         """
         try:
             if isinstance(data, bytes):
@@ -128,13 +128,22 @@ class PytorchModelManager(BaseModelManager):
             else:
                 image = Image.open(data)
 
+            # 원본 이미지 크기 저장 (width, height)
+            original_size = image.size
+            logger.info(f"Original image size: {original_size}")
+
             # RGB로 변환 (RGBA나 다른 형식일 경우)
             if image.mode != "RGB":
                 image = image.convert("RGB")
 
             # 이미지 프로세서에 전달
             inputs = self.pre_processor(images=image, return_tensors="pt")
-            return {k: v.to(device) for k, v in inputs.items()}
+            processed_inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            # 원본 크기 정보 추가
+            processed_inputs["original_size"] = original_size
+
+            return processed_inputs
         except Exception as e:
             logger.error(f"이미지 전처리 중 오류 발생: {e}")
             raise ValueError(f"이미지 전처리 실패: {str(e)}")
@@ -165,14 +174,37 @@ class PytorchModelManager(BaseModelManager):
             # 데이터 전처리
             inputs = self.preprocess_data(data, device)
 
+            # 메타데이터 추출 (모델에 전달하지 않음)
+            original_size = inputs.pop("original_size", None)
+
             with torch.no_grad():
-                # 모델 추론
+                # 모델 추론 (메타데이터 제외한 inputs만 전달)
                 outputs = model(**inputs)
 
                 if self.category not in self.post_processors:
                     raise ValueError(f"지원하지 않는 모델 카테고리입니다: {self.category}")
 
-                return self.post_processors[self.category](inputs, outputs)
+                # 예측 결과 가져오기
+                predictions = self.post_processors[self.category](inputs, outputs)
+
+                # 크기 정보 추가
+                model_input_size = inputs["pixel_values"].shape[-2:]  # (height, width)
+
+                result = {
+                    "predictions": predictions,
+                    "image_info": {
+                        "original_size": {"width": original_size[0], "height": original_size[1]}
+                        if original_size
+                        else None,
+                        "model_input_size": {"height": model_input_size[0], "width": model_input_size[1]},
+                    },
+                }
+
+                logger.info(
+                    f"Prediction result with image info: original={original_size}, model_input={model_input_size}"
+                )
+
+                return result
         except Exception as e:
             logger.error(f"추론 중 오류 발생: {e}")
             raise e

@@ -3,13 +3,89 @@
 import base64
 import io
 import logging
-from typing import Optional
+from typing import List, Optional
 
 import gradio as gr
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
+
+
+def draw_predictions_on_image(image_path: str, predictions: List[dict], image_info: dict = None) -> np.ndarray:
+    """이미지에 예측 결과(bbox, label)를 그려서 반환"""
+    try:
+        # 이미지 로드
+        image = Image.open(image_path)
+        original_width, original_height = image.size
+        draw = ImageDraw.Draw(image)
+
+        # 폰트 설정 (기본 폰트 사용)
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 20)
+        except Exception:
+            font = ImageFont.load_default()
+
+        # 크기 비율 계산 (bbox를 원본 이미지 크기로 스케일링)
+        scale_x = 1.0
+        scale_y = 1.0
+
+        if image_info:
+            model_input_size = image_info.get("model_input_size", {})
+            model_height = model_input_size.get("height")
+            model_width = model_input_size.get("width")
+
+            if model_height and model_width:
+                scale_x = original_width / model_width
+                scale_y = original_height / model_height
+                logger.info(
+                    f"Scaling bbox: model_input={model_width}x{model_height}, "
+                    f"original={original_width}x{original_height}, "
+                    f"scale=({scale_x:.2f}, {scale_y:.2f})"
+                )
+
+        # 각 prediction에 대해 bbox와 label 그리기
+        for pred in predictions:
+            score = pred.get("score", 0)
+            label = pred.get("label", "unknown")
+            box = pred.get("box", [])
+
+            # box는 [xmin, ymin, xmax, ymax] 형식
+            if len(box) >= 4:
+                # box가 리스트의 리스트인 경우 ([Array(4)]) 처리
+                if isinstance(box[0], list):
+                    box = box[0]
+
+                # bbox를 원본 이미지 크기로 스케일링
+                xmin = box[0] * scale_x
+                ymin = box[1] * scale_y
+                xmax = box[2] * scale_x
+                ymax = box[3] * scale_y
+
+                # 바운딩 박스 그리기 (빨간색, 두께 3)
+                draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=3)
+
+                # 레이블 텍스트 (label + score)
+                text = f"{label}: {score:.2f}"
+
+                # 텍스트 배경 박스
+                text_bbox = draw.textbbox((xmin, ymin - 25), text, font=font)
+                draw.rectangle(text_bbox, fill="red")
+
+                # 텍스트 그리기 (흰색)
+                draw.text((xmin, ymin - 25), text, fill="white", font=font)
+
+        # numpy array로 변환하여 반환
+        return np.array(image)
+
+    except Exception as e:
+        logger.error(f"Failed to draw predictions on image: {e}")
+        # 에러 발생 시 원본 이미지 반환
+        try:
+            image = Image.open(image_path)
+            return np.array(image)
+        except Exception:
+            return None
 
 
 def create_playground_ui(app_state):
@@ -32,6 +108,8 @@ def create_playground_ui(app_state):
             )
 
             refresh_workflows_btn = gr.Button("🔄 워크플로우 목록 새로고침", variant="secondary", size="lg")
+
+            workflow_count_message = gr.Markdown(value="", visible=False)
 
             workflow_dropdown = gr.Dropdown(
                 label="📦 워크플로우 선택", choices=[], interactive=True, info="추론을 실행할 워크플로우를 선택하세요"
@@ -56,29 +134,16 @@ def create_playground_ui(app_state):
             model_info_display = gr.Markdown(value="모델을 선택하면 상세 정보가 표시됩니다.", label="📋 모델 정보")
 
         with gr.Column(scale=1):
-            gr.Markdown("### 3️⃣ 추론 실행")
+            gr.Markdown(
+                """### 3️⃣ 추론 실행
+            이미지를 업로드한 후 추론을 실행하세요."""
+            )
 
             image_input = gr.Image(
                 label="이미지 업로드",
                 type="filepath",
                 height=300,
             )
-
-            gr.Markdown("#### 텍스트 입력 (레이블)")
-
-            # 동적 텍스트 입력 필드
-            with gr.Column():
-                text_inputs = []
-                for i in range(5):
-                    text_input = gr.Textbox(
-                        label=f"텍스트 {i+1}",
-                        placeholder="예: a cat, a remote control",
-                        visible=(i == 0),  # 첫 번째만 기본으로 표시
-                    )
-                    text_inputs.append(text_input)
-
-                add_text_btn = gr.Button("텍스트 입력 추가", size="sm")
-                visible_count_state = gr.State(1)
 
             run_inference_btn = gr.Button("추론 실행 🚀", variant="primary", size="lg")
 
@@ -99,6 +164,7 @@ def create_playground_ui(app_state):
         if not app_state.api_client:
             error_msg = "❌ 로그인이 필요합니다."
             return (
+                gr.update(value=error_msg, visible=True),
                 gr.update(choices=[], value=None),
                 "워크플로우를 선택하면 상세 정보가 표시됩니다.",
                 gr.update(visible=True, value=error_msg),
@@ -129,6 +195,7 @@ def create_playground_ui(app_state):
             if not active_workflows:
                 msg = "⚠️ 배포된 워크플로우가 없습니다."
                 return (
+                    gr.update(value=msg, visible=True),
                     gr.update(choices=[], value=None),
                     "워크플로우를 선택하면 상세 정보가 표시됩니다.",
                     gr.update(visible=True, value=msg),
@@ -140,14 +207,35 @@ def create_playground_ui(app_state):
                     "",
                 )
 
-            # 드롭다운 선택지 생성 (이름과 ID 표시)
-            choices = [(f"{w.get('name')} (ID: {w.get('id')[:8]}...)", w.get("id")) for w in active_workflows]
+            # 드롭다운 선택지 생성 (워크플로우명 + 템플릿명)
+            choices = []
+            for w in active_workflows:
+                workflow_name = w.get("name", "N/A")
+                template_id = w.get("template_id")
+
+                # 템플릿 정보 조회
+                template_name = None
+                if template_id and app_state.api_client:
+                    try:
+                        template_info = app_state.api_client.get_workflow_template(template_id)
+                        template_name = template_info.get("name")
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch template info for {template_id}: {e}")
+
+                # 표시 텍스트 구성
+                if template_name:
+                    display_text = f"{workflow_name} (템플릿: {template_name})"
+                else:
+                    display_text = workflow_name
+
+                choices.append((display_text, w.get("id")))
 
             success_msg = f"✅ {len(active_workflows)}개의 워크플로우를 찾았습니다."
             return (
+                gr.update(value=success_msg, visible=True),
                 gr.update(choices=choices, value=None),
                 "워크플로우를 선택하면 상세 정보가 표시됩니다.",
-                gr.update(visible=True, value=success_msg),
+                gr.update(visible=False),
                 gr.update(choices=[], value=None),
                 "모델을 선택하면 상세 정보가 표시됩니다.",
                 active_workflows,
@@ -160,6 +248,7 @@ def create_playground_ui(app_state):
             logger.error(f"Failed to load workflows: {e}")
             error_msg = f"❌ 워크플로우 로드 실패: {str(e)}"
             return (
+                gr.update(value=error_msg, visible=True),
                 gr.update(choices=[], value=None),
                 "워크플로우를 선택하면 상세 정보가 표시됩니다.",
                 gr.update(visible=True, value=error_msg),
@@ -197,23 +286,27 @@ def create_playground_ui(app_state):
             logger.error(f"Workflow {workflow_id} not found in workflows_list")
             return ("워크플로우 정보를 찾을 수 없습니다.", gr.update(choices=[], value=None), "모델을 선택하면 상세 정보가 표시됩니다.", [], "", "")
 
-        # 워크플로우 상세 정보
+        # 템플릿 정보 조회
+        template_name = "N/A"
+        template_id = selected.get("template_id")
+
+        if template_id and app_state.api_client:
+            try:
+                template_info = app_state.api_client.get_workflow_template(template_id)
+                template_name = template_info.get("name", "N/A")
+            except Exception as e:
+                logger.warning(f"Failed to fetch template info for {template_id}: {e}")
+                template_name = template_id  # fallback to template_id
+
+        # 워크플로우 상세 정보 (상태, 카테고리, 템플릿명만 표시)
         workflow_info = f"""
 ### 📋 {selected.get('name', 'N/A')}
-
-**🆔 Workflow ID:** `{selected.get('id', 'N/A')}`
 
 **📊 상태:** {selected.get('status', 'N/A')}
 
 **📁 카테고리:** {selected.get('category', 'N/A')}
 
-**📝 설명:** {selected.get('description', '설명이 없습니다.')}
-
-**📅 생성일:** {selected.get('created_at', 'N/A')}
-
----
-
-배포된 모델을 선택하세요.
+**📑 템플릿:** {template_name}
         """
 
         # 배포된 모델 로드
@@ -295,34 +388,14 @@ def create_playground_ui(app_state):
 **🔗 Gateway URL:** `{selected.get('gateway_url', 'N/A')}`
 
 **📅 배포 시간:** {selected.get('deployed_at', 'N/A')}
-
----
-
-이미지를 업로드하고 텍스트 레이블을 입력한 후 추론을 실행하세요.
         """
 
         return model_info, component_id
-
-    def add_text_input_field(visible_count: int):
-        """텍스트 입력 필드 추가 (가시성 토글)"""
-        if visible_count >= 5:
-            return visible_count, *[gr.update() for _ in range(5)]
-
-        new_count = visible_count + 1
-        updates = []
-        for i in range(5):
-            if i < new_count:
-                updates.append(gr.update(visible=True))
-            else:
-                updates.append(gr.update(visible=False))
-
-        return new_count, *updates
 
     def run_inference(
         workflow_id: str,
         component_id: str,
         image_path: Optional[str],
-        *text_values,
     ):
         """추론 실행"""
         if not app_state.api_client:
@@ -334,34 +407,45 @@ def create_playground_ui(app_state):
         if not image_path:
             return "❌ 이미지를 업로드해주세요.", None, None
 
-        # 빈 텍스트 입력 제외
-        labels = [text for text in text_values if text and text.strip()]
-
-        if not labels:
-            return "❌ 최소 1개의 텍스트 레이블을 입력해주세요.", None, None
-
         try:
             # 추론 요청
             result = app_state.api_client.inference(
                 workflow_id=workflow_id,
                 component_id=component_id,
                 image_path=image_path,
-                labels=labels,
             )
 
             status_msg = (
-                f"✅ 추론 완료!\n"
-                f"- Workflow: {result.get('workflow_id')}\n"
-                f"- Component: {result.get('component_id')}\n"
-                f"- Labels: {', '.join(result.get('labels', []))}"
+                f"✅ 추론 완료!\n" f"- Workflow: {result.get('workflow_id')}\n" f"- Component: {result.get('component_id')}"
             )
 
             # 결과 이미지 처리
             predictions = result.get("predictions")
+            image_info = result.get("image_info", {})
             result_image = None
 
             if predictions:
-                if isinstance(predictions, str):
+                if isinstance(predictions, list):
+                    # 리스트 형태의 predictions (bbox, label, score 포함)
+                    logger.info(f"Predictions is a list with {len(predictions)} items")
+                    logger.info(f"Image info: {image_info}")
+                    try:
+                        # 원본 이미지에 predictions 그리기 (image_info 전달)
+                        result_image = draw_predictions_on_image(image_path, predictions, image_info)
+                        logger.info(f"Successfully drew {len(predictions)} predictions on image")
+
+                        # 상태 메시지에 감지된 객체 수 추가
+                        status_msg += f"\n- 감지된 객체: {len(predictions)}개"
+                    except Exception as e:
+                        logger.error(f"Failed to draw predictions: {e}")
+                        # 에러 발생 시 원본 이미지 표시
+                        try:
+                            image = Image.open(image_path)
+                            result_image = np.array(image)
+                        except Exception:
+                            pass
+
+                elif isinstance(predictions, str):
                     # Base64 인코딩된 이미지 문자열인 경우
                     try:
                         image_bytes = base64.b64decode(predictions)
@@ -370,7 +454,6 @@ def create_playground_ui(app_state):
                         logger.info("Successfully decoded base64 image")
                     except Exception as e:
                         logger.error(f"Failed to decode base64 image: {e}")
-                        # 디코딩 실패 시 predictions 내용 확인
                         pred_len = len(predictions) if isinstance(predictions, str) else "N/A"
                         logger.debug(f"predictions type: {type(predictions)}, length: {pred_len}")
 
@@ -398,6 +481,7 @@ def create_playground_ui(app_state):
         fn=load_workflows,
         inputs=[],
         outputs=[
+            workflow_count_message,
             workflow_dropdown,
             workflow_info_display,
             status_message,
@@ -429,14 +513,25 @@ def create_playground_ui(app_state):
         outputs=[model_info_display, selected_component_id_state],
     )
 
-    add_text_btn.click(
-        fn=add_text_input_field,
-        inputs=[visible_count_state],
-        outputs=[visible_count_state] + text_inputs,
-    )
-
     run_inference_btn.click(
         fn=run_inference,
-        inputs=[selected_workflow_id_state, selected_component_id_state, image_input] + text_inputs,
+        inputs=[selected_workflow_id_state, selected_component_id_state, image_input],
         outputs=[inference_status, inference_output_image, inference_output_json],
     )
+
+    # 페이지 로드를 위한 함수와 출력 컴포넌트 반환
+    return {
+        "load_fn": load_workflows,
+        "load_outputs": [
+            workflow_count_message,
+            workflow_dropdown,
+            workflow_info_display,
+            status_message,
+            model_dropdown,
+            model_info_display,
+            workflows_state,
+            selected_workflow_id_state,
+            deployed_models_state,
+            selected_component_id_state,
+        ],
+    }

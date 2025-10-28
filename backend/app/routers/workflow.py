@@ -16,6 +16,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Upload
 from repos.workflow import workflow_repository
 from schemas.user import UserSchema
 from schemas.workflow import (
+    ComponentTypeInfo,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
     WorkflowExecuteRequest,
@@ -35,6 +36,45 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 router = APIRouter(prefix="/workflows", tags=["Workflows"])
+
+
+# ============= Component Types =============
+
+
+@router.get("/component-types", response_model=List[ComponentTypeInfo])
+def get_component_types():
+    """
+    사용 가능한 컴포넌트 타입 및 component_id 조회
+
+    워크플로우 템플릿/워크플로우 생성 시 사용할 수 있는 컴포넌트 타입과 component_id를 반환합니다.
+
+    **사용 방법:**
+    1. 이 API를 호출하여 사용 가능한 component_id 확인
+    2. 워크플로우 정의 시 확인한 component_id를 명시적으로 입력
+
+    **필드 설명:**
+    - `type`: 컴포넌트 타입 (START, END, MODEL)
+    - `component_id`: 해당 타입에서 사용해야 하는 ID (일반적으로 type과 동일)
+    - `name`: 타입의 한글 표시명
+    - `description`: 타입 설명
+    """
+    return [
+        ComponentTypeInfo(
+            type=ComponentType.START.value,
+            component_id=ComponentType.START.value,
+            name="시작 노드",
+            description="워크플로우의 시작점",
+        ),
+        ComponentTypeInfo(
+            type=ComponentType.END.value, component_id=ComponentType.END.value, name="종료 노드", description="워크플로우의 종료점"
+        ),
+        ComponentTypeInfo(
+            type=ComponentType.MODEL.value,
+            component_id=ComponentType.MODEL.value,
+            name="모델 노드",
+            description="ML 모델을 실행하는 노드",
+        ),
+    ]
 
 
 # ============= Workflow CRUD =============
@@ -156,6 +196,28 @@ def list_workflow_templates(
     return results
 
 
+@router.get("/templates/{template_id}", response_model=WorkflowTemplateReadSchema)
+def get_workflow_template(
+    *,
+    db: Session = SessionDepends,
+    template_id: str,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """워크플로우 템플릿 상세 조회"""
+    template = WorkflowService.get_workflow_template_by_id(db=db, template_id=template_id)
+
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+
+    result = WorkflowTemplateReadSchema.model_validate(template)
+
+    # 사용 횟수 계산
+    usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+    result.usage_count = usage_count
+
+    return result
+
+
 @router.post("/templates/{template_id}/clone", response_model=WorkflowReadSchema)
 def clone_from_template(
     *,
@@ -216,6 +278,7 @@ def delete_workflow_template(
     """
     워크플로우 템플릿 삭제
 
+    템플릿은 배포된 KServe InferenceService가 없으므로 즉시 DB에서 삭제됩니다.
     파생된 워크플로우가 있으면 삭제 불가
     """
     # 템플릿인지 확인
@@ -224,6 +287,7 @@ def delete_workflow_template(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
 
     try:
+        # DB에서 템플릿 삭제
         success = WorkflowService.delete_workflow(db, template_id)
 
         if not success:
@@ -282,25 +346,256 @@ def update_workflow(
     return WorkflowReadSchema.from_orm(workflow)
 
 
-@router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_workflow(
+async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300) -> bool:
+    """
+    Kubeflow Pipeline 실행 완료를 대기
+
+    Args:
+        run_id: Pipeline run ID
+        max_wait_seconds: 최대 대기 시간 (초)
+
+    Returns:
+        성공 여부
+    """
+    import asyncio
+
+    kf_manager = KubeflowManager()
+    elapsed = 0
+    check_interval = 3  # 3초마다 확인
+
+    logger.info(f"Waiting for pipeline run {run_id} to complete (max {max_wait_seconds}s)")
+
+    while elapsed < max_wait_seconds:
+        try:
+            run = kf_manager.kfp_client.get_run(run_id)
+
+            # Run 객체 구조 디버깅
+            logger.info(f"Run object type: {type(run)}")
+            logger.info(f"Run object attributes: {dir(run)}")
+
+            # 다양한 경로로 status 추출 시도
+            status = None
+
+            # V2beta1Run 객체 처리
+            if hasattr(run, "state"):
+                status = run.state
+                logger.info(f"Found status via run.state: {status}")
+            elif hasattr(run, "status"):
+                status = run.status
+                logger.info(f"Found status via run.status: {status}")
+            elif hasattr(run, "run"):
+                if hasattr(run.run, "status"):
+                    status = run.run.status
+                    logger.info(f"Found status via run.run.status: {status}")
+                elif hasattr(run.run, "state"):
+                    status = run.run.state
+                    logger.info(f"Found status via run.run.state: {status}")
+
+            # dict로 변환 가능한 경우
+            if not status and hasattr(run, "to_dict"):
+                run_dict = run.to_dict()
+                logger.info(f"Run dict keys: {run_dict.keys()}")
+                status = run_dict.get("state") or run_dict.get("status")
+                if status:
+                    logger.info(f"Found status via to_dict: {status}")
+
+            if status:
+                logger.info(f"Pipeline run {run_id} current status: {status}")
+
+                # 완료 상태 확인 (다양한 상태 문자열 지원)
+                status_upper = str(status).upper()
+
+                if status_upper in ["SUCCEEDED", "SUCCESS", "COMPLETED"]:
+                    logger.info(f"Pipeline run {run_id} completed successfully")
+                    return True
+                elif status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
+                    logger.error(f"Pipeline run {run_id} failed with status: {status}")
+                    return False
+                else:
+                    logger.info(f"Pipeline run {run_id} is still running: {status}")
+            else:
+                logger.warning(f"Could not extract status from run object for {run_id}")
+
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+        except Exception as e:
+            logger.warning(f"Error checking pipeline status for {run_id}: {e}")
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+    logger.warning(f"Pipeline run {run_id} did not complete within {max_wait_seconds} seconds")
+    return False
+
+
+@router.delete("/{workflow_id}", status_code=status.HTTP_202_ACCEPTED)
+async def delete_workflow(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
-    워크플로우 삭제
+    워크플로우 삭제 시작
 
-    템플릿의 경우 파생된 워크플로우가 있으면 삭제 불가
+    Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제를 시작하고 run_id를 반환합니다.
+    실제 DB 삭제는 /workflows/{workflow_id}/finalize-deletion API를 통해 완료 확인 후 수행됩니다.
+
+    Returns:
+        202 Accepted: cleanup_run_id를 포함한 응답
     """
     try:
-        success = WorkflowService.delete_workflow(db, workflow_id)
-
-        if not success:
+        # 워크플로우 존재 여부 확인
+        workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+        if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        # Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제 시작
+        cleanup_run_id = None
+        try:
+            executor = WorkflowExecutor(db)
+            cleanup_result = executor.cleanup_deployed_services(workflow_id)
+            cleanup_run_id = cleanup_result.get("cleanup_run_id")
 
-    return None
+            logger.info(f"Cleanup pipeline started for workflow {workflow_id}: run_id={cleanup_run_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to start cleanup pipeline for workflow {workflow_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to start cleanup pipeline: {str(e)}"
+            )
+
+        return {
+            "message": "Workflow deletion started",
+            "workflow_id": workflow_id,
+            "cleanup_run_id": cleanup_run_id,
+            "status": "cleanup_in_progress",
+            "next_step": (
+                f"Call /workflows/{workflow_id}/finalize-deletion?" f"run_id={cleanup_run_id} to complete deletion"
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete workflow {workflow_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete workflow: {str(e)}"
+        )
+
+
+@router.post("/{workflow_id}/finalize-deletion")
+async def finalize_workflow_deletion(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    워크플로우 삭제 완료 처리
+
+    Kubeflow Pipeline cleanup이 완료되었는지 확인하고, 완료되었다면 DB에서 워크플로우를 삭제합니다.
+
+    Args:
+        workflow_id: 삭제할 워크플로우 ID
+        run_id: Cleanup pipeline run ID
+
+    Returns:
+        - status: "completed" (완료), "in_progress" (진행중), "failed" (실패)
+        - deleted_from_db: DB 삭제 여부 (completed인 경우에만 true)
+    """
+    try:
+        # 워크플로우 존재 여부 확인
+        workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+        if not workflow:
+            # 이미 삭제된 경우
+            return {
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "status": "completed",
+                "deleted_from_db": True,
+                "message": "Workflow already deleted",
+            }
+
+        # Pipeline 완료 확인
+        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+
+        if success:
+            # Pipeline 완료됨 - DB에서 삭제
+            logger.info(f"Cleanup pipeline completed for workflow {workflow_id}, deleting from DB")
+
+            delete_success = WorkflowService.delete_workflow(db, workflow_id)
+
+            if delete_success:
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "completed",
+                    "deleted_from_db": True,
+                    "message": "Workflow deleted successfully",
+                }
+            else:
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "completed",
+                    "deleted_from_db": False,
+                    "message": "Pipeline completed but DB deletion failed",
+                }
+        else:
+            # 아직 진행중이거나 실패
+            # 실제 상태 확인
+            try:
+                from ..core.kubeflow.kubeflow_manager import KubeflowManager
+
+                kf_manager = KubeflowManager()
+                run = kf_manager.kfp_client.get_run(run_id)
+
+                # 상태 추출
+                status_value = None
+                if hasattr(run, "state"):
+                    status_value = run.state
+                elif hasattr(run, "status"):
+                    status_value = run.status
+                elif hasattr(run, "run"):
+                    if hasattr(run.run, "status"):
+                        status_value = run.run.status
+                    elif hasattr(run.run, "state"):
+                        status_value = run.run.state
+
+                if status_value:
+                    status_upper = str(status_value).upper()
+                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
+                        return {
+                            "workflow_id": workflow_id,
+                            "run_id": run_id,
+                            "status": "failed",
+                            "deleted_from_db": False,
+                            "message": f"Cleanup pipeline failed with status: {status_value}",
+                        }
+
+                # 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "in_progress",
+                    "deleted_from_db": False,
+                    "message": "Cleanup pipeline still in progress",
+                }
+
+            except Exception as e:
+                logger.error(f"Failed to check pipeline status: {e}")
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "unknown",
+                    "deleted_from_db": False,
+                    "message": f"Failed to check pipeline status: {str(e)}",
+                }
+
+    except Exception as e:
+        logger.error(f"Failed to finalize workflow deletion: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to finalize deletion: {str(e)}"
+        )
 
 
 # ============= Workflow Execution =============
@@ -438,7 +733,6 @@ async def inference_workflow_model(
     workflow_id: str,
     component_id: str,
     image: UploadFile = File(...),
-    labels: List[str] = Query(...),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -501,7 +795,7 @@ async def inference_workflow_model(
             )
 
     # KServe V2 Protocol 형식으로 요청 데이터 구성
-    payload = {"image": image_base64, "text": labels}  # 레이블 리스트
+    payload = {"image": image_base64}
 
     # V2 프로토콜 요청 형식
     data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
@@ -518,7 +812,6 @@ async def inference_workflow_model(
         url = f"{infer_svc_url}/v2/models/{model_name}/infer"
 
         logger.info(f"Sending inference request to {url}")
-        logger.info(f"Labels: {labels}")
 
         response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
         response.raise_for_status()
@@ -531,22 +824,37 @@ async def inference_workflow_model(
             prediction_data = outputs[0].get("data", [])
             if prediction_data and len(prediction_data) > 0:
                 # 첫 번째 출력 데이터 반환
-                predictions = prediction_data[0]
+                response_data = prediction_data[0]
 
                 # JSON 문자열인 경우 파싱
-                if isinstance(predictions, str):
+                if isinstance(response_data, str):
                     try:
-                        predictions = json.loads(predictions)
+                        response_data = json.loads(response_data)
                     except Exception:
                         pass
 
-                return {
-                    "workflow_id": workflow_id,
-                    "component_id": component_id,
-                    "predictions": predictions,
-                    "model_info": model_info,
-                    "labels": labels,
-                }
+                # response_data가 dict이고 predictions와 image_info를 포함하는 경우
+                if isinstance(response_data, dict):
+                    predictions = response_data.get("predictions", response_data)
+                    image_info = response_data.get("image_info", {})
+
+                    logger.info(f"Parsed predictions with image_info: {image_info}")
+
+                    return {
+                        "workflow_id": workflow_id,
+                        "component_id": component_id,
+                        "predictions": predictions,
+                        "image_info": image_info,
+                        "model_info": model_info,
+                    }
+                else:
+                    # 하위 호환성: response_data가 dict가 아닌 경우
+                    return {
+                        "workflow_id": workflow_id,
+                        "component_id": component_id,
+                        "predictions": response_data,
+                        "model_info": model_info,
+                    }
 
         # 예상치 못한 응답 형식
         return {
@@ -554,7 +862,6 @@ async def inference_workflow_model(
             "component_id": component_id,
             "raw_response": result,
             "model_info": model_info,
-            "labels": labels,
         }
 
     except requests.exceptions.HTTPError as http_err:
@@ -582,51 +889,20 @@ def get_deployed_models(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    check_k8s_status: bool = Query(False, description="Kubernetes에서 실시간 상태 확인 여부"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     워크플로우에 배포된 모델 목록 조회
 
-    Args:
-        check_k8s_status: True이면 Kubernetes InferenceService 상태도 추가 확인 (기본값: False)
-                         DB의 kserve_deployments 테이블 상태가 우선입니다.
+    DB의 kserve_deployments 테이블에서 배포된 모델 정보를 조회합니다.
     """
-    from core.kubeflow.kserve_helper import get_inference_service_status
-
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    # ✅ DB에서 배포된 모델 목록 조회 (이것이 주 소스)
+    # DB에서 배포된 모델 목록 조회
     deployed_models = KServeDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
-
-    # ✅ Kubernetes에서 실시간 상태 확인 (선택적, 추가 정보로만 사용)
-    if check_k8s_status:
-        namespace = settings.KUBEFLOW_NAMESPACE or "kubeflow-user-example-com"
-
-        for model in deployed_models:
-            component_id = model.get("component_id")
-            if component_id:
-                try:
-                    # workflow_id와 component_id로 InferenceService 조회
-                    service_info = get_inference_service_status(
-                        namespace=namespace,
-                        workflow_id=workflow_id,
-                        component_id=component_id,
-                    )
-
-                    if service_info:
-                        # Kubernetes 상태를 추가 정보로만 제공 (DB 상태는 유지)
-                        model["k8s_is_ready"] = service_info.get("is_ready")
-                        model["k8s_exists"] = True
-                    else:
-                        model["k8s_exists"] = False
-
-                except Exception as e:
-                    logger.error(f"Failed to check k8s status for {component_id}: {e}")
-                    model["k8s_error"] = str(e)
 
     return {
         "workflow_id": workflow_id,
@@ -745,14 +1021,20 @@ def check_model_status(
         }
 
 
-@router.post("/{workflow_id}/cleanup")
-def cleanup_workflow_resources(
+@router.post("/{workflow_id}/cleanup", status_code=status.HTTP_202_ACCEPTED)
+async def cleanup_workflow_resources(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
-    워크플로우 리소스 정리
+    워크플로우 리소스 정리 시작
 
-    배포된 KServe 인퍼런스 서비스들을 삭제
+    Kubeflow Pipeline을 통해 배포된 KServe InferenceService들을 삭제하고 run_id를 반환합니다.
+    워크플로우 자체는 유지하되, 배포된 서비스만 정리
+
+    완료 확인은 /workflows/{workflow_id}/finalize-cleanup API를 사용하세요.
+
+    Returns:
+        202 Accepted: cleanup_run_id를 포함한 응답
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
@@ -761,26 +1043,130 @@ def cleanup_workflow_resources(
 
     try:
         executor = WorkflowExecutor(db)
-        deleted_count = executor.cleanup_deployed_services(str(workflow_id))
+        cleanup_result = executor.cleanup_deployed_services(str(workflow_id))
+        cleanup_run_id = cleanup_result.get("cleanup_run_id")
 
-        # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
-        if workflow.status == WorkflowStatus.ERROR:
-            workflow.status = WorkflowStatus.DRAFT
-            db.commit()
-
-        # 배포된 모델 정보 초기화
-        if workflow.workflow_definition:
-            workflow.workflow_definition["deployed_models"] = []
-            db.commit()
+        logger.info(f"Cleanup pipeline started for workflow {workflow_id}: run_id={cleanup_run_id}")
 
         return {
+            "message": "Cleanup started",
             "workflow_id": workflow_id,
-            "deleted_services": deleted_count,
-            "message": f"Successfully cleaned up {deleted_count} services",
+            "cleanup_run_id": cleanup_run_id,
+            "status": "cleanup_in_progress",
+            "next_step": f"Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion",
         }
 
     except Exception as e:
         logger.error(f"Failed to cleanup workflow resources: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to cleanup resources: {str(e)}"
+        )
+
+
+@router.post("/{workflow_id}/finalize-cleanup")
+async def finalize_cleanup(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    워크플로우 정리 완료 처리
+
+    Kubeflow Pipeline cleanup이 완료되었는지 확인하고, 완료되었다면 워크플로우 상태를 업데이트합니다.
+
+    Args:
+        workflow_id: 워크플로우 ID
+        run_id: Cleanup pipeline run ID
+
+    Returns:
+        - status: "completed" (완료), "in_progress" (진행중), "failed" (실패)
+        - workflow_updated: 워크플로우 상태 업데이트 여부
+    """
+    try:
+        # 워크플로우 존재 여부 확인
+        workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+        # Pipeline 완료 확인
+        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+
+        if success:
+            # Pipeline 완료됨 - 워크플로우 상태 업데이트
+            logger.info(f"Cleanup pipeline completed for workflow {workflow_id}, updating workflow state")
+
+            # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
+            if workflow.status == WorkflowStatus.ERROR:
+                workflow.status = WorkflowStatus.DRAFT
+                db.commit()
+
+            # 배포된 모델 정보 초기화
+            if workflow.workflow_definition:
+                workflow.workflow_definition["deployed_models"] = []
+                db.commit()
+
+            return {
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "status": "completed",
+                "workflow_updated": True,
+                "message": "Cleanup completed and workflow state updated",
+            }
+        else:
+            # 아직 진행중이거나 실패
+            # 실제 상태 확인
+            try:
+                from ..core.kubeflow.kubeflow_manager import KubeflowManager
+
+                kf_manager = KubeflowManager()
+                run = kf_manager.kfp_client.get_run(run_id)
+
+                # 상태 추출
+                status_value = None
+                if hasattr(run, "state"):
+                    status_value = run.state
+                elif hasattr(run, "status"):
+                    status_value = run.status
+                elif hasattr(run, "run"):
+                    if hasattr(run.run, "status"):
+                        status_value = run.run.status
+                    elif hasattr(run.run, "state"):
+                        status_value = run.run.state
+
+                if status_value:
+                    status_upper = str(status_value).upper()
+                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
+                        return {
+                            "workflow_id": workflow_id,
+                            "run_id": run_id,
+                            "status": "failed",
+                            "workflow_updated": False,
+                            "message": f"Cleanup pipeline failed with status: {status_value}",
+                        }
+
+                # 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "in_progress",
+                    "workflow_updated": False,
+                    "message": "Cleanup pipeline still in progress",
+                }
+
+            except Exception as e:
+                logger.error(f"Failed to check pipeline status: {e}")
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "unknown",
+                    "workflow_updated": False,
+                    "message": f"Failed to check pipeline status: {str(e)}",
+                }
+
+    except Exception as e:
+        logger.error(f"Failed to finalize cleanup: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to finalize cleanup: {str(e)}"
         )

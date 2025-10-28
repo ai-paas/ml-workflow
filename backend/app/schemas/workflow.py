@@ -26,13 +26,22 @@ class ComponentType(str, Enum):
     MODEL = "MODEL"  # 모델 노드
 
 
+class ComponentTypeInfo(BaseModel):
+    """컴포넌트 타입 정보"""
+
+    type: str = Field(..., description="컴포넌트 타입 (START, END, MODEL)")
+    component_id: str = Field(..., description="자동 생성되는 component_id")
+    name: str = Field(..., description="타입 표시명")
+    description: str = Field(..., description="타입 설명")
+
+
 # ============= Component 스키마 =============
 
 
 class ComponentCreateRequest(BaseModel):
     """컴포넌트 생성 요청"""
 
-    component_id: str = Field(..., description="워크플로우 내 고유 ID")
+    component_id: str = Field(..., description="워크플로우 내 고유 ID (START, END, MODEL 등 - /component-types API로 확인 가능)")
     name: str
     type: ComponentType
     config: Optional[dict] = None

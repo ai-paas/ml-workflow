@@ -22,20 +22,27 @@ class SessionManager:
         self.session_file = Path(__file__).parent / session_file
         self.token_expiry_hours = token_expiry_hours
 
-    def save_session(self, username: str, token: str) -> None:
-        """세션 정보 저장"""
+    def save_session(self, username: str, token: str, current_tab: int = 0) -> None:
+        """세션 정보 저장
+
+        Args:
+            username: 사용자명
+            token: 인증 토큰
+            current_tab: 현재 선택된 탭 ID (기본값: 0 - 로그인 탭)
+        """
         try:
             session_data = {
                 "username": username,
                 "token": token,
                 "created_at": datetime.now().isoformat(),
                 "expires_at": (datetime.now() + timedelta(hours=self.token_expiry_hours)).isoformat(),
+                "current_tab": current_tab,
             }
 
             with open(self.session_file, "w") as f:
                 json.dump(session_data, f)
 
-            logger.info(f"Session saved for user: {username}")
+            logger.info(f"Session saved for user: {username}, tab: {current_tab}")
 
         except Exception as e:
             logger.error(f"Failed to save session: {e}")
@@ -77,3 +84,19 @@ class SessionManager:
         """세션이 유효한지 확인"""
         session = self.load_session()
         return session is not None
+
+    def update_current_tab(self, tab_id: int) -> None:
+        """현재 탭 정보만 업데이트
+
+        Args:
+            tab_id: 현재 선택된 탭 ID
+        """
+        try:
+            session = self.load_session()
+            if session:
+                session["current_tab"] = tab_id
+                with open(self.session_file, "w") as f:
+                    json.dump(session, f)
+                logger.debug(f"Updated current tab to: {tab_id}")
+        except Exception as e:
+            logger.error(f"Failed to update current tab: {e}")

@@ -19,7 +19,7 @@ settings = get_settings()
 # 설정
 SECRET_KEY = settings.LOGIN_SECRET_KEY
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_SECONDS = 3600  # 1시간
+ACCESS_TOKEN_EXPIRE_SECONDS = 86400  # 24시간
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/authentications/token")

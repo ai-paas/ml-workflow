@@ -767,55 +767,207 @@ class WorkflowExecutor:
             if os.path.exists(pipeline_filename):
                 os.remove(pipeline_filename)
 
-    def cleanup_deployed_services(self, workflow_id: str) -> int:
+    def cleanup_deployed_services(self, workflow_id: str) -> Dict[str, Any]:
         """
         워크플로우의 배포된 서비스 정리
-        Kubeflow Pipeline 내에서 배포된 KServe 서비스들을 정리
+        Kubeflow Pipeline을 통해 배포된 KServe 서비스들을 정리
 
         Args:
             workflow_id: 워크플로우 ID
 
         Returns:
-            삭제된 서비스 개수
+            삭제 결과 정보
         """
-        from core.kubeflow.kserve_helper import get_all_workflow_services
-        from kserve import KServeClient
-        from kubernetes import config
-
         try:
-            # Kubernetes 설정
-            try:
-                config.load_incluster_config()
-            except Exception:
-                config.load_kube_config()
+            # 초기화
+            if not self.kf_manager:
+                self.kf_manager = KubeflowManager()
 
-            kserve_client = KServeClient()
-            namespace = settings.KUBEFLOW_NAMESPACE
-            deleted_count = 0
+            logger.info(f"Creating cleanup pipeline for workflow {workflow_id}")
 
-            # ✅ 개선: Label selector로 워크플로우의 서비스만 조회
-            try:
-                services = get_all_workflow_services(namespace=namespace, workflow_id=workflow_id)
+            # 파이프라인 함수 생성
+            pipeline_func = self._create_cleanup_pipeline_function(workflow_id)
 
-                for service in services:
-                    metadata = service.get("metadata", {})
-                    name = metadata.get("name", "")
+            # 파이프라인 컴파일
+            pipeline_name = f"cleanup-workflow-{workflow_id}"
+            pipeline_filename = f"/tmp/{pipeline_name}-{uuid.uuid4().hex[:8]}.yaml"
 
-                    try:
-                        kserve_client.delete(name, namespace=namespace)
-                        deleted_count += 1
-                        logger.info(f"Deleted service {name} for workflow {workflow_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to delete service {name}: {e}")
+            Compiler().compile(pipeline_func, pipeline_filename)
 
-            except Exception as e:
-                logger.error(f"Failed to list services for workflow {workflow_id}: {e}")
+            # 파이프라인 실행
+            experiment_name = f"workflow-{workflow_id}-cleanup"
+            experiment = self.kf_manager.get_experiment_by_name(experiment_name=experiment_name)
+            if not experiment:
+                experiment = self.kf_manager.create_experiment(experiment_name)
 
-            return deleted_count
+            exp_id = experiment.experiment_id if hasattr(experiment, "experiment_id") else experiment.id
+
+            run = self.kf_manager.kfp_client.run_pipeline(
+                experiment_id=exp_id,
+                job_name=f"{pipeline_name}-run-{uuid.uuid4().hex[:8]}",
+                pipeline_package_path=pipeline_filename,
+                enable_caching=False,
+            )
+
+            # run_id 추출
+            if hasattr(run, "run_id"):
+                run_id = run.run_id
+            elif hasattr(run, "id"):
+                run_id = run.id
+            else:
+                run_dict = run.to_dict() if hasattr(run, "to_dict") else {}
+                run_id = run_dict.get("run_id") or run_dict.get("id") or f"unknown-{uuid.uuid4().hex[:8]}"
+
+            logger.info(f"Cleanup pipeline started with run_id: {run_id}")
+
+            # 임시 파일 삭제
+            if os.path.exists(pipeline_filename):
+                os.remove(pipeline_filename)
+
+            return {
+                "workflow_id": workflow_id,
+                "cleanup_run_id": run_id,
+                "status": "cleanup_initiated",
+                "message": "Cleanup pipeline started successfully",
+            }
 
         except Exception as e:
-            logger.error(f"Failed to cleanup workflow services: {e}")
-        return 0
+            logger.error(f"Failed to start cleanup pipeline: {e}")
+            raise Exception(f"Failed to start cleanup pipeline: {str(e)}")
+
+    def _create_cleanup_pipeline_function(self, workflow_id: str) -> callable:
+        """
+        InferenceService 삭제를 위한 Kubeflow 파이프라인 함수 생성
+
+        Args:
+            workflow_id: 워크플로우 ID
+
+        Returns:
+            파이프라인 함수
+        """
+
+        @dsl.pipeline(
+            name=f"cleanup-workflow-{workflow_id}",
+            description=f"Cleanup InferenceServices for workflow {workflow_id}",
+        )
+        def cleanup_pipeline():
+            self._create_cleanup_component_task(workflow_id)
+
+        return cleanup_pipeline
+
+    def _create_cleanup_component_task(self, workflow_id: str) -> Any:
+        """
+        InferenceService 삭제 컴포넌트 태스크 생성
+
+        Args:
+            workflow_id: 워크플로우 ID
+
+        Returns:
+            Kubeflow 태스크
+        """
+
+        @dsl.component(
+            base_image="python:3.10",
+            packages_to_install=[
+                "kubernetes==28.1.0",
+            ],
+        )
+        def cleanup_inference_services(workflow_id: str) -> str:
+            import json
+            import logging
+
+            from kubernetes import client
+            from kubernetes import config as k8s_config
+
+            logging.basicConfig(level=logging.INFO)
+            logger = logging.getLogger(__name__)
+
+            try:
+                # Kubernetes 설정
+                k8s_config.load_incluster_config()
+
+                # Custom Object API 사용
+                api = client.CustomObjectsApi()
+                namespace = "kubeflow-user-example-com"
+
+                logger.info(f"Querying InferenceServices for workflow: {workflow_id}")
+
+                # Label selector로 InferenceService 조회
+                label_selector = f"workflow-id={workflow_id}"
+
+                result = api.list_namespaced_custom_object(
+                    group="serving.kserve.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="inferenceservices",
+                    label_selector=label_selector,
+                )
+
+                services = result.get("items", [])
+                logger.info(f"Found {len(services)} InferenceServices for workflow {workflow_id}")
+
+                deleted_count = 0
+                failed_count = 0
+
+                # CustomObjectsApi로 각 서비스 삭제
+                for service in services:
+                    service_name = service.get("metadata", {}).get("name")
+                    if service_name:
+                        try:
+                            logger.info(f"Deleting InferenceService: {service_name} in namespace: {namespace}")
+
+                            # InferenceService 삭제
+                            api.delete_namespaced_custom_object(
+                                group="serving.kserve.io",
+                                version="v1beta1",
+                                namespace=namespace,
+                                plural="inferenceservices",
+                                name=service_name,
+                            )
+
+                            deleted_count += 1
+                            logger.info(f"Successfully deleted InferenceService: {service_name}")
+
+                        except client.exceptions.ApiException as e:
+                            if e.status == 404:
+                                logger.warning(f"InferenceService not found: {service_name}")
+                                # 404는 이미 없는 것이므로 failed에 카운트하지 않음
+                            else:
+                                logger.error(
+                                    f"Failed to delete InferenceService {service_name}: {e.status} - {e.reason}"
+                                )
+                                failed_count += 1
+                        except Exception as e:
+                            logger.error(f"Unexpected error deleting InferenceService {service_name}: {e}")
+                            failed_count += 1
+                    else:
+                        logger.warning("Service name not found in service metadata")
+                        failed_count += 1
+
+                result_data = {
+                    "workflow_id": workflow_id,
+                    "deleted": deleted_count,
+                    "failed": failed_count,
+                    "total": len(services),
+                    "status": "completed",
+                }
+
+                logger.info(f"Cleanup completed: {json.dumps(result_data)}")
+                return json.dumps(result_data)
+
+            except Exception as e:
+                logger.error(f"Cleanup failed: {str(e)}")
+                error_result = {
+                    "workflow_id": workflow_id,
+                    "deleted": 0,
+                    "failed": 0,
+                    "total": 0,
+                    "status": "failed",
+                    "error": str(e),
+                }
+                return json.dumps(error_result)
+
+        return cleanup_inference_services(workflow_id=workflow_id)
 
     def get_workflow_status(self, workflow: Workflow) -> Dict[str, Any]:
         """
