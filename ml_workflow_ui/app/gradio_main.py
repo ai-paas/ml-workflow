@@ -139,30 +139,6 @@ def create_app():
                         # 세션 데이터를 저장할 숨겨진 필드
                         save_session_trigger = gr.Textbox(visible=False, elem_id="save_session_trigger")
 
-                def handle_login(username, password):
-                    """로그인 처리"""
-                    success, message, session_json = authenticate(username, password)
-                    if success:
-                        # 로그인 성공 시
-                        return (
-                            gr.update(visible=False),  # login_form 숨기기
-                            gr.update(visible=True),  # logout_form 보이기
-                            gr.update(value=message, visible=True),  # status_msg
-                            f"✅ 로그인됨: {app_state.username}",  # login_status
-                            gr.Tabs(selected=1),  # Quick Service Deployment 탭으로 이동
-                            session_json,  # localStorage에 저장할 세션 데이터
-                        )
-                    else:
-                        # 로그인 실패 시
-                        return (
-                            gr.update(visible=True),  # login_form 유지
-                            gr.update(visible=False),  # logout_form 숨김
-                            gr.update(value=message, visible=True),  # status_msg
-                            "❌ 로그인 필요",  # login_status
-                            gr.Tabs(),  # 탭 변경 없음
-                            "",  # 빈 세션 데이터
-                        )
-
                 def handle_logout():
                     """로그아웃 처리"""
                     msg = logout()
@@ -173,24 +149,6 @@ def create_app():
                         "❌ 로그인 필요",  # login_status
                         gr.Tabs(selected=0),  # 계정 탭으로 이동
                     )
-
-                login_btn.click(
-                    fn=handle_login,
-                    inputs=[username_input, password_input],
-                    outputs=[login_form, logout_form, status_msg, login_status, tabs, save_session_trigger],
-                ).then(
-                    fn=None,
-                    inputs=[save_session_trigger],
-                    outputs=[],
-                    js="""
-                    (sessionData) => {
-                        if (sessionData) {
-                            localStorage.setItem('ml_workflow_session', sessionData);
-                            console.log('Session saved to localStorage');
-                        }
-                    }
-                    """,
-                )
 
                 logout_btn.click(
                     fn=handle_logout,
@@ -237,43 +195,185 @@ def create_app():
                 )
                 playground_info = create_playground_ui(app_state)
 
-        # 탭 변경 시 삭제 확인 메시지 숨기기
+        # 탭 변경 시 데이터 로드 및 삭제 확인 메시지 숨기기
         def on_tab_change(evt: gr.SelectData):
             """탭 변경 시 처리"""
-            logger.info(f"Tab changed to: {evt.index}")
+            tab_index = evt.index
+            logger.info(f"Tab changed to: {tab_index}")
+
+            # 탭별로 데이터 로드
+            outputs = []
+
             # 삭제 확인 메시지 숨기기
-            return gr.update(visible=False), gr.update(visible=False)
+            outputs.extend([gr.update(visible=False), gr.update(visible=False)])
+
+            # Quick Service Deployment 탭 (id=1)
+            if tab_index == 1:
+                quick_outputs = quick_deployment_info["load_fn"]()
+                outputs.extend(quick_outputs)
+            else:
+                # 다른 탭이면 변경 없음
+                outputs.extend([gr.update() for _ in quick_deployment_info["load_outputs"]])
+
+            # 배포 관리 탭 (id=2)
+            if tab_index == 2:
+                deployment_outputs = deployment_info["load_fn"]()
+                outputs.extend(deployment_outputs)
+            else:
+                outputs.extend([gr.update() for _ in deployment_info["load_outputs"]])
+
+            # Playground 탭 (id=3)
+            if tab_index == 3:
+                playground_outputs = playground_info["load_fn"]()
+                outputs.extend(playground_outputs)
+            else:
+                outputs.extend([gr.update() for _ in playground_info["load_outputs"]])
+
+            return tuple(outputs)
 
         tabs.select(
             fn=on_tab_change,
             inputs=[],
-            outputs=[delete_confirm_box, delete_confirm_btn],
+            outputs=[
+                delete_confirm_box,
+                delete_confirm_btn,
+                # Quick Service Deployment 출력들
+                *quick_deployment_info["load_outputs"],
+                # 배포 관리 출력들
+                *deployment_info["load_outputs"],
+                # Playground 출력들
+                *playground_info["load_outputs"],
+            ],
+        )
+
+        # 로그인 버튼 핸들러 연결 (모든 탭 생성 후)
+        def handle_login_with_data(username, password):
+            """로그인 처리 및 탭 데이터 로드"""
+            success, message, session_json = authenticate(username, password)
+
+            outputs = []
+
+            if success:
+                # 로그인 성공 시
+                outputs.extend(
+                    [
+                        gr.update(visible=False),  # login_form 숨기기
+                        gr.update(visible=True),  # logout_form 보이기
+                        gr.update(value=message, visible=True),  # status_msg
+                        f"✅ 로그인됨: {app_state.username}",  # login_status
+                        gr.Tabs(selected=1),  # Quick Service Deployment 탭으로 이동
+                        session_json,  # localStorage에 저장할 세션 데이터
+                    ]
+                )
+
+                # 로그인 성공 후 모든 탭 데이터 로드
+                outputs.extend(quick_deployment_info["load_fn"]())
+                outputs.extend(deployment_info["load_fn"]())
+                outputs.extend(playground_info["load_fn"]())
+            else:
+                # 로그인 실패 시
+                outputs.extend(
+                    [
+                        gr.update(visible=True),  # login_form 유지
+                        gr.update(visible=False),  # logout_form 숨김
+                        gr.update(value=message, visible=True),  # status_msg
+                        "❌ 로그인 필요",  # login_status
+                        gr.Tabs(),  # 탭 변경 없음
+                        "",  # 빈 세션 데이터
+                    ]
+                )
+
+                # 로그인 실패 시 탭 출력은 변경 없음
+                outputs.extend([gr.update() for _ in quick_deployment_info["load_outputs"]])
+                outputs.extend([gr.update() for _ in deployment_info["load_outputs"]])
+                outputs.extend([gr.update() for _ in playground_info["load_outputs"]])
+
+            return tuple(outputs)
+
+        login_btn.click(
+            fn=handle_login_with_data,
+            inputs=[username_input, password_input],
+            outputs=[
+                login_form,
+                logout_form,
+                status_msg,
+                login_status,
+                tabs,
+                save_session_trigger,
+                # Quick Service Deployment 출력들
+                *quick_deployment_info["load_outputs"],
+                # 배포 관리 출력들
+                *deployment_info["load_outputs"],
+                # Playground 출력들
+                *playground_info["load_outputs"],
+            ],
+        ).then(
+            fn=None,
+            inputs=[save_session_trigger],
+            outputs=[],
+            js="""
+            (sessionData) => {
+                if (sessionData) {
+                    localStorage.setItem('ml_workflow_session', sessionData);
+                    console.log('Session saved to localStorage');
+                }
+            }
+            """,
         )
 
         # 앱 로드 시 localStorage에서 세션 복원
         def restore_session_on_load(session_json):
-            """페이지 로드 시 localStorage에서 세션 복원"""
+            """페이지 로드 시 localStorage에서 세션 복원 및 데이터 로드"""
             session_restored, status_text, current_tab = restore_session(session_json)
 
+            outputs = []
+
             if session_restored:
-                return (
-                    gr.update(visible=False),  # login_form 숨기기
-                    gr.update(visible=True),  # logout_form 보이기
-                    status_text,  # login_status
-                    gr.Tabs(selected=current_tab),  # 저장된 탭으로 이동
+                outputs.extend(
+                    [
+                        gr.update(visible=False),  # login_form 숨기기
+                        gr.update(visible=True),  # logout_form 보이기
+                        status_text,  # login_status
+                        gr.Tabs(selected=current_tab),  # 저장된 탭으로 이동
+                    ]
                 )
+
+                # 세션 복원 후 모든 탭 데이터 로드
+                outputs.extend(quick_deployment_info["load_fn"]())
+                outputs.extend(deployment_info["load_fn"]())
+                outputs.extend(playground_info["load_fn"]())
             else:
-                return (
-                    gr.update(visible=True),  # login_form 보이기
-                    gr.update(visible=False),  # logout_form 숨기기
-                    status_text,  # login_status
-                    gr.Tabs(selected=0),  # 로그인 탭으로
+                outputs.extend(
+                    [
+                        gr.update(visible=True),  # login_form 보이기
+                        gr.update(visible=False),  # logout_form 숨기기
+                        status_text,  # login_status
+                        gr.Tabs(selected=0),  # 로그인 탭으로
+                    ]
                 )
+
+                # 세션 없을 때는 데이터 로드 안함
+                outputs.extend([gr.update() for _ in quick_deployment_info["load_outputs"]])
+                outputs.extend([gr.update() for _ in deployment_info["load_outputs"]])
+                outputs.extend([gr.update() for _ in playground_info["load_outputs"]])
+
+            return tuple(outputs)
 
         app.load(
             fn=restore_session_on_load,
             inputs=[session_storage],
-            outputs=[login_form, logout_form, login_status, tabs],
+            outputs=[
+                login_form,
+                logout_form,
+                login_status,
+                tabs,
+                # Quick Service Deployment 출력들
+                *quick_deployment_info["load_outputs"],
+                # 배포 관리 출력들
+                *deployment_info["load_outputs"],
+                # Playground 출력들
+                *playground_info["load_outputs"],
+            ],
             js="""
             () => {
                 const sessionData = localStorage.getItem('ml_workflow_session') || '';
@@ -281,25 +381,6 @@ def create_app():
                 return [sessionData];
             }
             """,
-        )
-
-        # 앱 로드 시 Quick Service Deployment, 배포 관리, Playground의 목록 자동 로드
-        app.load(
-            fn=quick_deployment_info["load_fn"],
-            inputs=[],
-            outputs=quick_deployment_info["load_outputs"],
-        )
-
-        app.load(
-            fn=deployment_info["load_fn"],
-            inputs=[],
-            outputs=deployment_info["load_outputs"],
-        )
-
-        app.load(
-            fn=playground_info["load_fn"],
-            inputs=[],
-            outputs=playground_info["load_outputs"],
         )
 
     return app
