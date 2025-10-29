@@ -37,7 +37,11 @@ def create_deployment_management_ui(app_state):
                 info="관리할 워크플로우를 선택하세요",
             )
 
-            workflow_info_display = gr.Markdown(value="워크플로우를 선택하면 상세 정보가 표시됩니다.", label="📋 워크플로우 정보")
+            workflow_info_display = gr.Markdown(
+                value="워크플로우를 선택하면 \
+상세 정보가 표시됩니다.",
+                label="📋 워크플로우 정보",
+            )
 
             status_message = gr.Textbox(label="⚠️ 상태 메시지", interactive=False, visible=False, lines=2)
 
@@ -67,7 +71,11 @@ def create_deployment_management_ui(app_state):
 
             refresh_status_btn = gr.Button("🔄 배포 상태 새로고침", variant="secondary", size="sm")
 
-            deployment_status_display = gr.Markdown(value="워크플로우를 선택하면 배포 상태가 표시됩니다.", elem_classes="deployment-status")
+            deployment_status_display = gr.Markdown(
+                value="워크플로우를 선택하면 \
+배포 상태가 표시됩니다.",
+                elem_classes="deployment-status",
+            )
 
     def load_deployed_workflows():
         """배포된 워크플로우 목록 로드"""

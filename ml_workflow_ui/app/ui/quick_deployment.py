@@ -35,10 +35,14 @@ def create_quick_deployment_ui(app_state, tabs=None):
             refresh_templates_btn = gr.Button("🔄 템플릿 목록 새로고침", size="sm")
 
             # 템플릿 선택 드롭다운
-            template_dropdown = gr.Dropdown(label="✨ 템플릿 선택", choices=[], interactive=True, info="배포할 템플릿을 선택하세요")
+            template_dropdown = gr.Dropdown(
+                label="✨ 템플릿 선택", choices=[], interactive=True, info="배포할 템플릿을 선택하세요"
+            )
 
             # 템플릿 상세 정보 표시
-            template_info_display = gr.Markdown(value="템플릿을 선택하면 상세 정보가 표시됩니다.", label="📋 템플릿 상세 정보")
+            template_info_display = gr.Markdown(
+                value="템플릿을 선택하면 상세 정보가 표시됩니다.", label="📋 템플릿 상세 정보"
+            )
 
             template_error_msg = gr.Textbox(label="⚠️ 상태 메시지", interactive=False, visible=False, lines=2)
 

@@ -115,7 +115,11 @@ def create_playground_ui(app_state):
                 label="📦 워크플로우 선택", choices=[], interactive=True, info="추론을 실행할 워크플로우를 선택하세요"
             )
 
-            workflow_info_display = gr.Markdown(value="워크플로우를 선택하면 상세 정보가 표시됩니다.", label="📋 워크플로우 정보")
+            workflow_info_display = gr.Markdown(
+                value="워크플로우를 선택하면 \
+상세 정보가 표시됩니다.",
+                label="📋 워크플로우 정보",
+            )
 
             status_message = gr.Textbox(label="⚠️ 상태 메시지", interactive=False, visible=False, lines=2)
 
@@ -129,7 +133,9 @@ def create_playground_ui(app_state):
             """
             )
 
-            model_dropdown = gr.Dropdown(label="🤖 모델 선택", choices=[], interactive=True, info="추론을 실행할 모델을 선택하세요")
+            model_dropdown = gr.Dropdown(
+                label="🤖 모델 선택", choices=[], interactive=True, info="추론을 실행할 모델을 선택하세요"
+            )
 
             model_info_display = gr.Markdown(value="모델을 선택하면 상세 정보가 표시됩니다.", label="📋 모델 정보")
 
@@ -451,7 +457,9 @@ def create_playground_ui(app_state):
             )
 
             status_msg = (
-                f"✅ 추론 완료!\n" f"- Workflow: {result.get('workflow_id')}\n" f"- Component: {result.get('component_id')}"
+                f"✅ 추론 완료!\n"
+                f"- Workflow: {result.get('workflow_id')}\n"
+                f"- Component: {result.get('component_id')}"
             )
 
             # 결과 이미지 처리

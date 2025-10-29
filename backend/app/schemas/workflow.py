@@ -41,7 +41,11 @@ class ComponentTypeInfo(BaseModel):
 class ComponentCreateRequest(BaseModel):
     """컴포넌트 생성 요청"""
 
-    component_id: str = Field(..., description="워크플로우 내 고유 ID (START, END, MODEL 등 - /component-types API로 확인 가능)")
+    component_id: str = Field(
+        ...,
+        description="워크플로우 내 고유 ID \
+(START, END, MODEL 등 - /component-types API로 확인 가능)",
+    )
     name: str
     type: ComponentType
     config: Optional[dict] = None
