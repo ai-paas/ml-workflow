@@ -193,9 +193,9 @@ class PytorchModelManager(BaseModelManager):
                 result = {
                     "predictions": predictions,
                     "image_info": {
-                        "original_size": {"width": original_size[0], "height": original_size[1]}
-                        if original_size
-                        else None,
+                        "original_size": (
+                            {"width": original_size[0], "height": original_size[1]} if original_size else None
+                        ),
                         "model_input_size": {"height": model_input_size[0], "width": model_input_size[1]},
                     },
                 }

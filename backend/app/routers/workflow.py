@@ -66,7 +66,10 @@ def get_component_types():
             description="워크플로우의 시작점",
         ),
         ComponentTypeInfo(
-            type=ComponentType.END.value, component_id=ComponentType.END.value, name="종료 노드", description="워크플로우의 종료점"
+            type=ComponentType.END.value,
+            component_id=ComponentType.END.value,
+            name="종료 노드",
+            description="워크플로우의 종료점",
         ),
         ComponentTypeInfo(
             type=ComponentType.MODEL.value,

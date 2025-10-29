@@ -284,7 +284,14 @@ def create_playground_ui(app_state):
 
         if not selected:
             logger.error(f"Workflow {workflow_id} not found in workflows_list")
-            return ("워크플로우 정보를 찾을 수 없습니다.", gr.update(choices=[], value=None), "모델을 선택하면 상세 정보가 표시됩니다.", [], "", "")
+            return (
+                "워크플로우 정보를 찾을 수 없습니다.",
+                gr.update(choices=[], value=None),
+                "모델을 선택하면 상세 정보가 표시됩니다.",
+                [],
+                "",
+                "",
+            )
 
         # 템플릿 정보 조회
         template_name = "N/A"
@@ -313,7 +320,14 @@ def create_playground_ui(app_state):
         try:
             if not app_state.api_client:
                 logger.error("No api_client")
-                return (workflow_info, gr.update(choices=[], value=None), "모델을 선택하면 상세 정보가 표시됩니다.", [], workflow_id, "")
+                return (
+                    workflow_info,
+                    gr.update(choices=[], value=None),
+                    "모델을 선택하면 상세 정보가 표시됩니다.",
+                    [],
+                    workflow_id,
+                    "",
+                )
 
             logger.info(f"Fetching deployed models for workflow {workflow_id}")
             result = app_state.api_client.get_deployed_models(workflow_id)
@@ -327,7 +341,14 @@ def create_playground_ui(app_state):
 
             if not models:
                 logger.warning("No models found")
-                return (workflow_info, gr.update(choices=[], value=None), "⚠️ 배포된 모델이 없습니다.", [], workflow_id, "")
+                return (
+                    workflow_info,
+                    gr.update(choices=[], value=None),
+                    "⚠️ 배포된 모델이 없습니다.",
+                    [],
+                    workflow_id,
+                    "",
+                )
 
             # 모델 드롭다운 선택지 생성 (모든 모델 표시, deployed 필터링 제거)
             model_choices = [
@@ -342,7 +363,14 @@ def create_playground_ui(app_state):
 
             if not model_choices:
                 logger.warning("No model choices created")
-                return (workflow_info, gr.update(choices=[], value=None), "⚠️ 모델 선택지를 생성할 수 없습니다.", [], workflow_id, "")
+                return (
+                    workflow_info,
+                    gr.update(choices=[], value=None),
+                    "⚠️ 모델 선택지를 생성할 수 없습니다.",
+                    [],
+                    workflow_id,
+                    "",
+                )
 
             logger.info(f"Returning model choices: {model_choices}")
             return (
@@ -356,7 +384,14 @@ def create_playground_ui(app_state):
 
         except Exception as e:
             logger.error(f"Failed to load models: {e}", exc_info=True)
-            return (workflow_info, gr.update(choices=[], value=None), f"❌ 모델 로드 실패: {str(e)}", [], workflow_id, "")
+            return (
+                workflow_info,
+                gr.update(choices=[], value=None),
+                f"❌ 모델 로드 실패: {str(e)}",
+                [],
+                workflow_id,
+                "",
+            )
 
     def on_model_selected(component_id: Optional[str], models_list: list):
         """모델 선택 시 상세 정보 표시"""

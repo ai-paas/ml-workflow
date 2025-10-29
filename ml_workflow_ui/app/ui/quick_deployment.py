@@ -52,7 +52,10 @@ def create_quick_deployment_ui(app_state, tabs=None):
             deploy_btn = gr.Button("🚀 Quick Service 배포 시작", variant="primary", size="lg")
 
             deployment_output = gr.Textbox(
-                label="📊 배포 진행 상황", interactive=False, lines=10, placeholder="템플릿을 선택하고 '배포 시작' 버튼을 클릭하세요..."
+                label="📊 배포 진행 상황",
+                interactive=False,
+                lines=10,
+                placeholder="템플릿을 선택하고 '배포 시작' 버튼을 클릭하세요...",
             )
 
             workflow_id_display = gr.Textbox(label="🆔 배포된 워크플로우 ID", interactive=False, visible=False)
