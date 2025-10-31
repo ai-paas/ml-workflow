@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import shutil
 import tempfile
 import zipfile
@@ -10,6 +11,8 @@ from repos.dataset import dataset_registry_repository, dataset_repository
 from schemas.dataset import DatasetBaseSchema, DatasetReadSchema, DatasetRegistryBaseSchema, DatasetRegistryReadSchema
 from sqlalchemy.orm import Session
 from utils.dataset_registry import DatasetRegistry
+
+logger = logging.getLogger(__name__)
 
 
 class DatasetService:
@@ -47,13 +50,16 @@ class DatasetService:
         try:
             # 업로드된 파일 내용 읽기
             file_content = file.file.read()
+            # 파일 포인터 리셋 (다른 곳에서 재사용 가능하도록)
+            file.file.seek(0)
 
             # ZIP 파일 형식 검증 및 압축 해제
             temp_dir = Path(tempfile.mkdtemp())
             try:
                 with zipfile.ZipFile(io.BytesIO(file_content)) as zip_ref:
                     zip_ref.extractall(temp_dir)
-            except zipfile.BadZipFile:
+            except zipfile.BadZipFile as e:
+                logger.warning(f"ZIP 파일 형식 검증 실패: {str(e)}")
                 return {
                     "is_valid": False,
                     "message": "파일이 유효한 ZIP 형식이 아닙니다.",
@@ -118,6 +124,7 @@ class DatasetService:
 
             # 검증 실패 시 에러 반환
             if validation_errors:
+                logger.warning(f"데이터셋 구조 검증 실패: {validation_errors}")
                 return {
                     "is_valid": False,
                     "message": "데이터셋 구조 검증 실패",
@@ -125,6 +132,7 @@ class DatasetService:
                     "details": {"errors": validation_errors},
                 }
 
+            logger.info(f"데이터셋 파일 검증 성공: {file.filename}")
             return {
                 "is_valid": True,
                 "message": "데이터셋 파일이 유효합니다.",
@@ -133,6 +141,7 @@ class DatasetService:
             }
 
         except Exception as e:
+            logger.error(f"데이터셋 검증 중 예외 발생: {str(e)}", exc_info=True)
             return {
                 "is_valid": False,
                 "message": f"데이터셋 검증 중 오류 발생: {str(e)}",
@@ -145,31 +154,55 @@ class DatasetService:
                 shutil.rmtree(temp_dir)
 
     @staticmethod
-    def create(db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile):
-        # UploadFile의 file 속성은 SpooledTemporaryFile 객체이므로
-        # 직접 임시 파일 경로를 사용할 수 있습니다
+    def create(db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile) -> DatasetReadSchema:
+        """데이터셋 생성
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_file_path = Path(temp_dir) / file.filename
-            temp_file_path.write_bytes(file.file.read())
-            run_id, dataset_version, artifact_uri, dataset_uri = DatasetRegistry().log_dataset(temp_dir, obj_in.name)
+        Args:
+            db: 데이터베이스 세션
+            obj_in: 데이터셋 기본 스키마
+            file: 업로드된 파일
 
-        # 데이터셋 객체 생성
-        dataset_obj = dataset_repository.create(db, obj_in=obj_in)
-        dataset_id = dataset_obj.id
+        Returns:
+            생성된 데이터셋 읽기 스키마
 
-        # 데이터셋 레지스트리 정보 생성
-        dataset_registry_repository.create(
-            db,
-            obj_in=DatasetRegistryBaseSchema(
-                artifact_path=artifact_uri,
-                uri=dataset_uri,
-                dataset_id=dataset_id,
-            ),
-        )
+        Raises:
+            ValueError: 검증 오류 발생 시
+            Exception: 데이터셋 등록 중 오류 발생 시
+        """
+        try:
+            # UploadFile의 file 속성은 SpooledTemporaryFile 객체이므로
+            # 직접 임시 파일 경로를 사용할 수 있습니다
+            # 파일 포인터 리셋 (이전에 읽었을 수 있으므로)
+            file.file.seek(0)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_file_path = Path(temp_dir) / file.filename
+                temp_file_path.write_bytes(file.file.read())
+                run_id, dataset_version, artifact_uri, dataset_uri = DatasetRegistry().log_dataset(
+                    temp_dir, obj_in.name
+                )
 
-        db.commit()
-        return dataset_repository.get(db, dataset_id)
+            # 데이터셋 객체 생성
+            dataset_obj = dataset_repository.create(db, obj_in=obj_in)
+            dataset_id = dataset_obj.id
+
+            # 데이터셋 레지스트리 정보 생성
+            dataset_registry_repository.create(
+                db,
+                obj_in=DatasetRegistryBaseSchema(
+                    artifact_path=artifact_uri,
+                    uri=dataset_uri,
+                    dataset_id=dataset_id,
+                ),
+            )
+
+            db.commit()
+            logger.info(f"데이터셋 생성 성공: {obj_in.name} (ID: {dataset_id})")
+            return dataset_repository.get(db, dataset_id)
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"데이터셋 생성 중 오류 발생: {str(e)}", exc_info=True)
+            raise
 
 
 class DatasetRegistryService:

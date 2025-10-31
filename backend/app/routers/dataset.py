@@ -29,12 +29,10 @@ def validate_dataset_file(
 
     파일 형식, 구조 등을 검증합니다.
     """
-    try:
-        validation_result = DatasetService.validate_dataset_file(file)
-        return DatasetValidationResponse(**validation_result)
-    except Exception as e:
-        logger.error(f"데이터셋 검증 중 오류 발생: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"데이터셋 검증 중 오류가 발생했습니다: {str(e)}")
+    validation_result = DatasetService.validate_dataset_file(file)
+    if not validation_result.get("is_valid"):
+        logger.warning(f"데이터셋 검증 실패: {validation_result.get('message')}")
+    return DatasetValidationResponse(**validation_result)
 
 
 # TODO: 책임 분리 필요.
@@ -53,9 +51,6 @@ def create_dataset(
     파일 검증은 /datasets/validate API를 먼저 호출하여 수행하세요.
     """
     try:
-        # 파일 포인터 초기화 (업로드를 위해)
-        file.file.seek(0)
-
         # 데이터셋 정보 저장
         dataset_data = DatasetBaseSchema(
             name=name,
