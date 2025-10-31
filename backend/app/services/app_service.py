@@ -6,14 +6,13 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from config.settings import get_settings
-from db.models.service import Service, ServiceMonitoring, ServiceStatus, Workflow, WorkflowStatus
+from db.models.service import Service, ServiceMonitoring, Workflow, WorkflowStatus
 from repos.app_service import service_monitoring_repository, service_repository
 from repos.workflow import workflow_repository
 from schemas.app_service import (
     MonitoringMetrics,
     ServiceCreateInternal,
     ServiceCreateRequest,
-    ServiceDeployRequest,
     ServiceMonitoringData,
     ServiceUpdateRequest,
     WorkflowMonitoring,
@@ -36,10 +35,8 @@ class AppServiceService:
             if existing:
                 raise ValueError(f"Service with name '{service_data.name}' already exists")
 
-            # ServiceCreateInternal 사용 (creator_id와 status 포함)
-            service_internal = ServiceCreateInternal(
-                **service_data.model_dump(), creator_id=creator_id, status=ServiceStatus.DRAFT
-            )
+            # ServiceCreateInternal 사용 (creator_id 포함)
+            service_internal = ServiceCreateInternal(**service_data.model_dump(), creator_id=creator_id)
 
             # base의 create 메서드 사용 (DB 작업 포함)
             service = service_repository.create(db, obj_in=service_internal)
@@ -65,12 +62,9 @@ class AppServiceService:
         skip: int = 0,
         limit: int = 100,
         creator_id: Optional[int] = None,
-        status: Optional[ServiceStatus] = None,
     ) -> List[Service]:
         """서비스 목록 조회"""
-        return service_repository.get_multi_with_filters(
-            db, skip=skip, limit=limit, creator_id=creator_id, status=status
-        )
+        return service_repository.get_multi_with_filters(db, skip=skip, limit=limit, creator_id=creator_id)
 
     @staticmethod
     def update_service(db: Session, service_id: str, service_data: ServiceUpdateRequest) -> Optional[Service]:
@@ -171,3 +165,69 @@ class AppServiceService:
         return ServiceMonitoringData(
             total_metrics=total_metrics, workflow_metrics=workflow_metrics, period_start=start_time, period_end=end_time
         )
+
+
+class ServiceMonitoringService:
+    """서비스 모니터링 관련 비즈니스 로직"""
+
+    @staticmethod
+    def record_inference_request(
+        db: Session,
+        service_id: str,
+        workflow_id: str,
+        user_id: int,
+        response_time_ms: float,
+        is_success: bool,
+        is_object_detection: bool = True,
+    ) -> ServiceMonitoring:
+        """추론 요청 기록
+
+        Args:
+            db: 데이터베이스 세션
+            service_id: 서비스 ID
+            workflow_id: 워크플로우 ID
+            user_id: 사용자 ID
+            response_time_ms: 응답 시간 (밀리초)
+            is_success: 성공 여부
+            is_object_detection: Object Detection 여부 (토큰 사용량 0으로 설정)
+
+        Returns:
+            생성된 ServiceMonitoring 레코드
+        """
+        try:
+            # 메트릭 계산
+            message_count = 1  # 요청당 1건
+            active_users = 1  # 해당 사용자 1명
+            token_usage = 0 if is_object_detection else 0  # Object Detection은 토큰 사용량 없음
+            avg_interaction_count = 1.0  # 사용자당 평균 요청 수 (개별 레코드는 1)
+            error_count = 0 if is_success else 1
+            success_rate = 100.0 if is_success else 0.0
+
+            # ServiceMonitoring 레코드 생성
+            monitoring_record = ServiceMonitoring(
+                service_id=service_id,
+                workflow_id=workflow_id,
+                timestamp=datetime.utcnow(),
+                message_count=message_count,
+                active_users=active_users,
+                token_usage=token_usage,
+                avg_interaction_count=avg_interaction_count,
+                response_time_ms=response_time_ms,
+                error_count=error_count,
+                success_rate=success_rate,
+            )
+
+            db.add(monitoring_record)
+            db.flush()
+
+            logger.info(
+                f"Monitoring record created: service_id={service_id}, workflow_id={workflow_id}, "
+                f"user_id={user_id}, response_time={response_time_ms}ms, success={is_success}"
+            )
+
+            return monitoring_record
+
+        except Exception as e:
+            logger.error(f"Failed to record inference request: {str(e)}")
+            db.rollback()
+            raise

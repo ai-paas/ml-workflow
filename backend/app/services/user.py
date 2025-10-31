@@ -17,7 +17,8 @@ class UserService:
 
     @staticmethod
     def get_by_username(db: Session, username: str) -> Optional[UserModel]:
-        return user_repository.filter(db, filters={"username": username}).first()
+        results = user_repository.filter(db, filters={"username": username})
+        return results[0] if results else None
 
     @staticmethod
     def get_all(db: Session) -> list[UserModel]:

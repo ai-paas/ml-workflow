@@ -13,6 +13,7 @@ from schemas.workflow import (
     WorkflowCreateInternal,
     WorkflowCreateRequest,
     WorkflowDefinition,
+    WorkflowUpdateInternal,
     WorkflowUpdateRequest,
 )
 from sqlalchemy.orm import Session
@@ -40,31 +41,26 @@ class WorkflowService:
                 if not template or not template.is_template:
                     raise ValueError(f"Template {workflow_data.template_id} not found")
 
-                # 템플릿의 정의를 복사
-                if not workflow_data.workflow_definition and template.workflow_definition:
-                    workflow_data.workflow_definition = WorkflowDefinition(
-                        **(
-                            json.loads(template.workflow_definition)
-                            if isinstance(template.workflow_definition, str)
-                            else template.workflow_definition
-                        )
-                    )
+                # 템플릿의 workflow_definition은 사용하지 않음 (components와 connections를 직접 복사)
 
-            # WorkflowCreateInternal 사용 (status와 creator_id 포함)
+            # workflow_definition은 DB에 저장하지 않고 컴포넌트/연결 생성에만 사용
+            workflow_definition_dict = None
+            workflow_data_dict = workflow_data.model_dump()
+            if workflow_data_dict.get("workflow_definition"):
+                workflow_definition_dict = workflow_data_dict.pop("workflow_definition")
+
+            # WorkflowCreateInternal 사용 (status와 creator_id 포함, workflow_definition 제외)
             workflow_internal = WorkflowCreateInternal(
-                **workflow_data.model_dump(), status=initial_status, creator_id=creator_id
+                **workflow_data_dict, status=initial_status, creator_id=creator_id
             )
-
-            # workflow_definition을 dict로 변환 (필요시)
-            if workflow_internal.workflow_definition:
-                workflow_internal.workflow_definition = workflow_internal.workflow_definition.model_dump()
 
             # base의 create 메서드 사용 (DB 작업 포함)
             workflow = workflow_repository.create(db, obj_in=workflow_internal)
 
             # 워크플로우 정의가 있으면 컴포넌트와 연결 생성
-            if workflow_data.workflow_definition:
-                WorkflowService._create_components_and_connections(db, workflow.id, workflow_data.workflow_definition)
+            if workflow_definition_dict:
+                definition = WorkflowDefinition(**workflow_definition_dict)
+                WorkflowService._create_components_and_connections(db, workflow.id, definition)
 
             db.commit()
 
@@ -153,12 +149,12 @@ class WorkflowService:
                 definition = WorkflowDefinition(**update_data["workflow_definition"])
                 WorkflowService._create_components_and_connections(db, workflow_id, definition)
 
-                # JSON으로 저장
-                update_data["workflow_definition"] = definition.dict()
+            # workflow_definition은 DB에 저장하지 않으므로 update_data에서 무조건 제거
+            update_data.pop("workflow_definition", None)
 
             # base의 update 메서드 사용
-            # UpdateSchemaType을 받으므로 WorkflowUpdateRequest 생성
-            update_request = WorkflowUpdateRequest(**update_data)
+            # UpdateSchemaType을 받으므로 WorkflowUpdateInternal 생성
+            update_request = WorkflowUpdateInternal(**update_data)
             workflow = workflow_repository.update(db, db_obj=workflow, obj_in=update_request)
 
             db.commit()
@@ -230,7 +226,7 @@ class WorkflowService:
         if not template or not template.is_template:
             raise ValueError(f"Template {template_id} not found")
 
-        # 템플릿 정의를 복사하여 새 워크플로우 생성
+        # 새 워크플로우 생성 (workflow_definition 없이)
         workflow_data = WorkflowCreateRequest(
             name=workflow_name,
             description=f"Created from template: {template.name}",
@@ -238,18 +234,55 @@ class WorkflowService:
             service_id=service_id,
             is_template=False,
             template_id=template_id,
-            workflow_definition=(
-                WorkflowDefinition(
-                    **(
-                        json.loads(template.workflow_definition)
-                        if isinstance(template.workflow_definition, str)
-                        else template.workflow_definition
-                    )
-                )
-                if template.workflow_definition
-                else None
-            ),
+            workflow_definition=None,  # workflow_definition은 사용하지 않음
         )
 
-        # 템플릿으로부터 생성된 워크플로우는 바로 ACTIVE 상태로 생성
-        return WorkflowService.create_workflow(db, workflow_data, creator_id, initial_status=WorkflowStatus.ACTIVE)
+        # workflow_definition은 DB에 저장하지 않으므로 제거
+        workflow_data_dict = workflow_data.model_dump()
+        workflow_data_dict.pop("workflow_definition", None)
+
+        # WorkflowCreateInternal 사용 (status와 creator_id 포함, workflow_definition 제외)
+        workflow_internal = WorkflowCreateInternal(
+            **workflow_data_dict, status=WorkflowStatus.ACTIVE, creator_id=creator_id
+        )
+
+        # base의 create 메서드 사용 (DB 작업 포함)
+        workflow = workflow_repository.create(db, obj_in=workflow_internal)
+
+        # 템플릿의 컴포넌트와 연결을 직접 복사
+        component_map = {}  # template_component_id -> new_component_id 매핑
+
+        # 컴포넌트 복사
+        for template_component in template.components:
+            new_component = WorkflowComponent(
+                workflow_id=workflow.id,
+                component_id=template_component.component_id,
+                name=template_component.name,
+                type=template_component.type,
+                config=template_component.config,
+                model_id=template_component.model_id,
+            )
+            db.add(new_component)
+            db.flush()
+            component_map[template_component.id] = new_component.id
+
+        # 연결 복사
+        for template_connection in template.component_connections:
+            # source_component_id와 target_component_id를 새 컴포넌트 ID로 매핑
+            source_new_id = component_map.get(template_connection.source_component_id)
+            target_new_id = component_map.get(template_connection.target_component_id)
+
+            if source_new_id and target_new_id:
+                new_connection = ComponentConnection(
+                    workflow_id=workflow.id,
+                    source_component_id=source_new_id,
+                    target_component_id=target_new_id,
+                    connection_type=template_connection.connection_type,
+                    config=template_connection.config,
+                )
+                db.add(new_connection)
+
+        db.commit()
+
+        logger.info(f"Workflow cloned from template successfully: {workflow.id}")
+        return workflow

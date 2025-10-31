@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,7 @@ from schemas.workflow import (
 )
 from services.kserve_deployment import KServeDeploymentService
 from services.workflow import WorkflowService
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -99,6 +101,8 @@ def create_workflow(
     try:
         workflow = WorkflowService.create_workflow(db=db, workflow_data=workflow_data, creator_id=current_user.id)
 
+        # 관계를 다시 로드하여 스키마로 변환
+        workflow = WorkflowService.get_workflow_by_id(db, workflow.id)
         return WorkflowReadSchema.model_validate(workflow)
 
     except ValueError as e:
@@ -112,32 +116,79 @@ def create_workflow(
 def list_workflows(
     *,
     db: Session = SessionDepends,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page_size: Optional[int] = Query(
+        default=None,
+        description="페이지 사이즈",
+        examples=[10, 20, 30],
+        ge=1,
+        le=1000,
+    ),
+    page: Optional[int] = Query(
+        default=None,
+        description="페이지 번호",
+        examples=[1, 2, 3],
+        ge=1,
+    ),
     creator_id: Optional[int] = Query(None),
     service_id: Optional[int] = Query(None),
-    is_template: Optional[bool] = Query(None),
     status: Optional[str] = Query(None),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    워크플로우 목록 조회
+    워크플로우 목록 조회 (템플릿 제외)
 
-    - **is_template**: true면 템플릿만, false면 일반 워크플로우만 조회
+    - **page**: 페이지 번호
+    - **page_size**: 페이지 사이즈
+    - **creator_id**: 생성자 ID 필터
+    - **service_id**: 서비스 ID 필터
+    - **status**: 워크플로우 상태 필터
     """
+    from db.models.service import Workflow, WorkflowStatus
+
+    # 전체 개수 조회를 위한 쿼리 구성 (템플릿 제외)
+    count_query = db.query(func.count(Workflow.id)).filter(Workflow.is_template == False)
+    if creator_id is not None:
+        count_query = count_query.filter(Workflow.creator_id == creator_id)
+    if service_id is not None:
+        count_query = count_query.filter(Workflow.service_id == service_id)
+    if status is not None:
+        try:
+            status_enum = WorkflowStatus(status)
+            count_query = count_query.filter(Workflow.status == status_enum)
+        except ValueError:
+            pass
+
+    # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
+    if page is None or page_size is None:
+        workflows = WorkflowService.get_workflows(
+            db=db,
+            skip=0,
+            limit=10000,
+            creator_id=creator_id,
+            service_id=service_id,
+            is_template=False,
+            status=status,
+        )
+        items = [WorkflowBaseSchema.model_validate(w) for w in workflows]
+        return WorkflowListSchema(total=len(items), items=items)
+
+    # 페이지네이션 적용
+    total_count = count_query.scalar()
+    skip = page_size * (page - 1)
+
     workflows = WorkflowService.get_workflows(
         db=db,
         skip=skip,
-        limit=limit,
+        limit=page_size,
         creator_id=creator_id,
         service_id=service_id,
-        is_template=is_template,
+        is_template=False,
         status=status,
     )
 
     items = [WorkflowBaseSchema.model_validate(w) for w in workflows]
 
-    return WorkflowListSchema(total=len(items), items=items)
+    return WorkflowListSchema(total=total_count, items=items)
 
 
 # ============= Template Management =============
@@ -176,14 +227,49 @@ def create_workflow_template(
 def list_workflow_templates(
     *,
     db: Session = SessionDepends,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    page_size: Optional[int] = Query(
+        default=None,
+        description="페이지 사이즈",
+        examples=[10, 20, 30],
+        ge=1,
+        le=1000,
+    ),
+    page: Optional[int] = Query(
+        default=None,
+        description="페이지 번호",
+        examples=[1, 2, 3],
+        ge=1,
+    ),
     category: Optional[str] = Query(None),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """워크플로우 템플릿 목록 조회"""
+    from db.models.service import Workflow
+
+    # 전체 개수 조회를 위한 쿼리 구성
+    count_query = db.query(func.count(Workflow.id)).filter(Workflow.is_template == True)
+    if category:
+        count_query = count_query.filter(Workflow.category == category)
+
+    # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
+    if page is None or page_size is None:
+        templates = WorkflowService.get_workflow_templates(
+            db=db, skip=0, limit=10000, creator_id=None, category=category  # 모든 사용자의 템플릿 조회 가능
+        )
+        results = []
+        for template in templates:
+            result = WorkflowTemplateReadSchema.model_validate(template)
+            # 사용 횟수 계산
+            usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+            result.usage_count = usage_count
+            results.append(result)
+        return results
+
+    # 페이지네이션 적용
+    skip = page_size * (page - 1)
+
     templates = WorkflowService.get_workflow_templates(
-        db=db, skip=skip, limit=limit, creator_id=None, category=category  # 모든 사용자의 템플릿 조회 가능
+        db=db, skip=skip, limit=page_size, creator_id=None, category=category  # 모든 사용자의 템플릿 조회 가능
     )
 
     results = []
@@ -240,7 +326,9 @@ def clone_from_template(
             creator_id=current_user.id,
         )
 
-        return WorkflowReadSchema.from_orm(workflow)
+        # 관계를 다시 로드하여 스키마로 변환
+        workflow = WorkflowService.get_workflow_by_id(db, workflow.id)
+        return WorkflowReadSchema.model_validate(workflow)
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
@@ -317,15 +405,7 @@ def get_workflow(
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    result = WorkflowReadSchema.from_orm(workflow)
-
-    # 추가 정보 설정
-    if workflow.service:
-        result.service_name = workflow.service.name
-    if workflow.template:
-        result.template_name = workflow.template.name
-
-    return result
+    return WorkflowReadSchema.model_validate(workflow)
 
 
 @router.put("/{workflow_id}", response_model=WorkflowReadSchema)
@@ -346,7 +426,9 @@ def update_workflow(
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    return WorkflowReadSchema.from_orm(workflow)
+    # 관계를 다시 로드하여 스키마로 변환
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    return WorkflowReadSchema.model_validate(workflow)
 
 
 async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300) -> bool:
@@ -700,6 +782,15 @@ async def update_component_deployment_status(
     Kubeflow Pipeline 내에서 배포 완료 후 호출됩니다.
     """
     try:
+        # 워크플로우 존재 여부 확인
+        workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+        if not workflow:
+            logger.warning(f"Workflow {workflow_id} not found when updating deployment status")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow {workflow_id} not found",
+            )
+
         # Service를 통한 배포 상태 업데이트
         deployment = KServeDeploymentService.update_deployment_status(
             db=db,
@@ -724,6 +815,8 @@ async def update_component_deployment_status(
             },
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update deployment status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -742,15 +835,27 @@ async def inference_workflow_model(
     배포된 모델에 추론 요청 (KServe V2 Protocol)
 
     워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
+    추론 요청 시 ServiceMonitoring 테이블에 자동으로 기록됩니다.
     """
     import base64  # noqa: F401, F811
+    import time  # noqa: F401, F811
 
     import requests  # noqa: F401, F811
+    from services.app_service import ServiceMonitoringService
+
+    # 요청 시작 시간 기록
+    start_time = time.time()
 
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    # Service ID 확인 (워크플로우가 서비스에 연결되어 있는지)
+    service_id = workflow.service_id
+    if not service_id:
+        logger.warning(f"Workflow {workflow_id} is not associated with a service. Monitoring will be skipped.")
+        # 서비스가 없어도 추론은 진행 (하위 호환성)
 
     # Service를 통한 배포 검증
     is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component_id)
@@ -810,6 +915,8 @@ async def inference_workflow_model(
     kf_manager = KubeflowManager()
     cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
+    response_time_ms = 0.0
+
     try:
         # V2 프로토콜 엔드포인트로 요청 (Istio Gateway 경유)
         url = f"{infer_svc_url}/v2/models/{model_name}/infer"
@@ -818,6 +925,9 @@ async def inference_workflow_model(
 
         response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
         response.raise_for_status()
+
+        # 응답 시간 계산
+        response_time_ms = (time.time() - start_time) * 1000  # 밀리초로 변환
 
         result = response.json()
 
@@ -843,6 +953,24 @@ async def inference_workflow_model(
 
                     logger.info(f"Parsed predictions with image_info: {image_info}")
 
+                    # 모니터링 데이터 기록 (성공)
+                    if service_id:
+                        try:
+                            ServiceMonitoringService.record_inference_request(
+                                db=db,
+                                service_id=service_id,
+                                workflow_id=workflow_id,
+                                user_id=current_user.id,
+                                response_time_ms=response_time_ms,
+                                is_success=True,
+                                is_object_detection=True,  # 현재는 Object Detection만 지원
+                            )
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"Failed to record monitoring data: {e}")
+                            # 모니터링 실패해도 추론 결과는 반환
+                            db.rollback()
+
                     return {
                         "workflow_id": workflow_id,
                         "component_id": component_id,
@@ -852,6 +980,23 @@ async def inference_workflow_model(
                     }
                 else:
                     # 하위 호환성: response_data가 dict가 아닌 경우
+                    # 모니터링 데이터 기록 (성공)
+                    if service_id:
+                        try:
+                            ServiceMonitoringService.record_inference_request(
+                                db=db,
+                                service_id=service_id,
+                                workflow_id=workflow_id,
+                                user_id=current_user.id,
+                                response_time_ms=response_time_ms,
+                                is_success=True,
+                                is_object_detection=True,
+                            )
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"Failed to record monitoring data: {e}")
+                            db.rollback()
+
                     return {
                         "workflow_id": workflow_id,
                         "component_id": component_id,
@@ -860,6 +1005,23 @@ async def inference_workflow_model(
                     }
 
         # 예상치 못한 응답 형식
+        # 모니터링 데이터 기록 (성공 - 응답은 받았지만 형식이 예상과 다름)
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.id,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                    is_object_detection=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
         return {
             "workflow_id": workflow_id,
             "component_id": component_id,
@@ -868,23 +1030,107 @@ async def inference_workflow_model(
         }
 
     except requests.exceptions.HTTPError as http_err:
+        # 응답 시간 계산
+        response_time_ms = (time.time() - start_time) * 1000
+
         logger.error(f"HTTP error occurred: {http_err}")
         logger.error(f"Response content: {http_err.response.text if hasattr(http_err, 'response') else 'N/A'}")
+
+        # 모니터링 데이터 기록 (실패)
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.id,
+                    response_time_ms=response_time_ms,
+                    is_success=False,
+                    is_object_detection=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Model service returned error: {str(http_err)}"
         )
     except requests.exceptions.ConnectionError as conn_err:
+        # 응답 시간 계산
+        response_time_ms = (time.time() - start_time) * 1000
+
         logger.error(f"Connection error: {conn_err}")
+
+        # 모니터링 데이터 기록 (실패)
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.id,
+                    response_time_ms=response_time_ms,
+                    is_success=False,
+                    is_object_detection=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to model service. Service may not be ready.",
         )
-    except requests.exceptions.Timeout:
-        logger.error("Request timeout")
+    except requests.exceptions.Timeout as timeout_err:
+        # 응답 시간 계산
+        response_time_ms = (time.time() - start_time) * 1000
+
+        logger.error(f"Request timeout: {timeout_err}")
+
+        # 모니터링 데이터 기록 (실패 - 타임아웃)
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.id,
+                    response_time_ms=response_time_ms,
+                    is_success=False,
+                    is_object_detection=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
         raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Model inference request timed out")
     except Exception as e:
-        logger.error(f"Unexpected error during inference: {str(e)}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Inference failed: {str(e)}")
+        # 응답 시간 계산
+        response_time_ms = (time.time() - start_time) * 1000
+
+        logger.error(f"Unexpected error occurred: {e}")
+
+        # 모니터링 데이터 기록 (실패)
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.id,
+                    response_time_ms=response_time_ms,
+                    is_success=False,
+                    is_object_detection=True,
+                )
+                db.commit()
+            except Exception as mon_error:
+                logger.error(f"Failed to record monitoring data: {mon_error}")
+                db.rollback()
+
+        raise
 
 
 @router.get("/{workflow_id}/models")
@@ -907,9 +1153,17 @@ def get_deployed_models(
     # DB에서 배포된 모델 목록 조회
     deployed_models = KServeDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
 
+    # backend_api_url 동적 생성
+    backend_api_url = None
+    if deployed_models:
+        first_deployment = deployed_models[0]
+        gateway_url = first_deployment.get("gateway_url") or settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+        model_name = first_deployment.get("sanitized_model_name") or first_deployment.get("model_name")
+        backend_api_url = f"{gateway_url}/v2/models/{model_name}/infer"
+
     return {
         "workflow_id": workflow_id,
-        "backend_api_url": workflow.backend_api_url,
+        "backend_api_url": backend_api_url,
         "deployed_models": deployed_models,
         "total": len(deployed_models),
     }
@@ -933,39 +1187,33 @@ def check_model_status(
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-    # 배포된 모델 정보 확인
-    deployed_models = workflow.workflow_definition.get("deployed_models", []) if workflow.workflow_definition else []
-
-    model_info = None
-    for model in deployed_models:
-        if model.get("component_id") == component_id:
-            model_info = model
-            break
-
-    if not model_info:
+    # 배포된 모델 정보 확인 (KServeDeployment 테이블에서)
+    deployment = KServeDeploymentService.get_deployment_info(db, workflow_id, component_id)
+    if not deployment:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Model component {component_id} not found in workflow {workflow_id}",
         )
 
+    # 컴포넌트 정보 조회
+    component = (
+        db.query(WorkflowComponent)
+        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.component_id == component_id)
+        .first()
+    )
+
+    if not component:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Component {component_id} not found in workflow {workflow_id}",
+        )
+
     # KServe 서비스 접근 설정
-    namespace = settings.KUBEFLOW_NAMESPACE or "kubeflow-user-example-com"
-    service_name = f"workflow-{workflow_id}-{component_id}"
-
-    # Istio Gateway URL
-    infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-
-    # Virtual Service hostname
-    service_hostname = f"{service_name}.{namespace}.example.com"
-
-    # 모델 이름 조회
-    model_name = model_info.get("model_name", component_id)
-    if model_info.get("model_id"):
-        model = db.query(Model).filter(Model.id == model_info["model_id"]).first()
-        if model:
-            model_name = model.name
+    service_hostname = deployment["service_hostname"]
+    model_name = deployment["sanitized_model_name"]
 
     # V2 프로토콜 ready 엔드포인트
+    infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
     url = f"{infer_svc_url}/v2/models/{model_name}/ready"
 
     # 헤더 설정 (Istio routing용)
@@ -986,8 +1234,7 @@ def check_model_status(
                 "workflow_id": workflow_id,
                 "component_id": component_id,
                 "ready": result.get("ready", False),
-                "model_info": model_info,
-                "service_name": service_name,
+                "deployment_info": deployment,
                 "status": "ready" if result.get("ready", False) else "not_ready",
             }
         else:
@@ -995,8 +1242,7 @@ def check_model_status(
                 "workflow_id": workflow_id,
                 "component_id": component_id,
                 "ready": False,
-                "model_info": model_info,
-                "service_name": service_name,
+                "deployment_info": deployment,
                 "status": "not_ready",
                 "error": f"Service returned status code: {response.status_code}",
             }
@@ -1006,8 +1252,7 @@ def check_model_status(
             "workflow_id": workflow_id,
             "component_id": component_id,
             "ready": False,
-            "model_info": model_info,
-            "service_name": service_name,
+            "deployment_info": deployment,
             "status": "not_deployed",
             "error": "Unable to connect to model service",
         }
@@ -1017,8 +1262,7 @@ def check_model_status(
             "workflow_id": workflow_id,
             "component_id": component_id,
             "ready": False,
-            "model_info": model_info,
-            "service_name": service_name,
+            "deployment_info": deployment,
             "status": "error",
             "error": str(e),
         }
@@ -1103,11 +1347,6 @@ async def finalize_cleanup(
             # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
             if workflow.status == WorkflowStatus.ERROR:
                 workflow.status = WorkflowStatus.DRAFT
-                db.commit()
-
-            # 배포된 모델 정보 초기화
-            if workflow.workflow_definition:
-                workflow.workflow_definition["deployed_models"] = []
                 db.commit()
 
             return {

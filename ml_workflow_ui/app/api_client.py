@@ -139,11 +139,20 @@ class APIClient:
         return self._get("/api/v1/workflows/component-types")
 
     # ============= Workflow Templates =============
-    def get_workflow_templates(self, category: Optional[str] = None) -> List[Dict]:
+    def get_workflow_templates(
+        self,
+        category: Optional[str] = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+    ) -> List[Dict]:
         """워크플로우 템플릿 목록 조회"""
         params = {}
         if category:
             params["category"] = category
+        if page is not None:
+            params["page"] = page
+        if page_size is not None:
+            params["page_size"] = page_size
         return self._get("/api/v1/workflows/templates", params=params)
 
     def get_workflow_template(self, template_id: str) -> Dict:
@@ -161,15 +170,16 @@ class APIClient:
     # ============= Workflow =============
     def get_workflows(
         self,
-        is_template: Optional[bool] = None,
         status: Optional[str] = None,
-        skip: int = 0,
-        limit: int = 100,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
     ) -> Dict:
-        """워크플로우 목록 조회"""
-        params = {"skip": skip, "limit": limit}
-        if is_template is not None:
-            params["is_template"] = is_template
+        """워크플로우 목록 조회 (템플릿 제외)"""
+        params = {}
+        if page is not None:
+            params["page"] = page
+        if page_size is not None:
+            params["page_size"] = page_size
         if status:
             params["status"] = status
         return self._get("/api/v1/workflows", params=params)
@@ -194,7 +204,7 @@ class APIClient:
 
     def get_all_deployed_workflows(self) -> Dict:
         """모든 배포된 워크플로우 목록 조회 (템플릿 제외)"""
-        return self.get_workflows(is_template=False)
+        return self.get_workflows()
 
     def cleanup_workflow(self, workflow_id: str) -> Dict:
         """워크플로우 리소스 정리 (배포된 서비스 삭제)"""

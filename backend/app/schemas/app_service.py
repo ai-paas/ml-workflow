@@ -7,16 +7,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from schemas.base import TimeStampSchemaMixin
 from schemas.user import UserSchema
-from schemas.workflow import WorkflowBaseSchema, WorkflowReadSchema
-
-
-class ServiceStatus(str, Enum):
-    """서비스 상태"""
-
-    DRAFT = "DRAFT"
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-    DEPRECATED = "DEPRECATED"
+from schemas.workflow import WorkflowBaseSchema
 
 
 # ============= Monitoring 스키마 =============
@@ -60,10 +51,9 @@ class ServiceCreateRequest(BaseModel):
 
 
 class ServiceCreateInternal(ServiceCreateRequest):
-    """서비스 내부 생성용 - creator_id와 status 포함"""
+    """서비스 내부 생성용 - creator_id 포함"""
 
     creator_id: int
-    status: ServiceStatus = ServiceStatus.DRAFT
 
 
 class ServiceUpdateRequest(BaseModel):
@@ -72,7 +62,6 @@ class ServiceUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     tags: Optional[List[str]] = None
-    status: Optional[ServiceStatus] = None
 
 
 class ServiceBaseSchema(TimeStampSchemaMixin):
@@ -83,7 +72,6 @@ class ServiceBaseSchema(TimeStampSchemaMixin):
     description: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     creator_id: int
-    status: ServiceStatus
 
     class Config:
         from_attributes = True
@@ -105,9 +93,6 @@ class ServiceDetailSchema(ServiceBaseSchema):
     creator: UserSchema
     workflows: List[WorkflowBaseSchema] = Field(default_factory=list, description="연결된 워크플로우 목록")
     monitoring_data: Optional[ServiceMonitoringData] = Field(None, description="모니터링 데이터")
-    kserve_endpoint: Optional[str] = Field(None, description="KServe 엔드포인트")
-    public_url: Optional[str] = Field(None, description="공개 URL")
-    backend_api_url: Optional[str] = Field(None, description="백엔드 서비스 API URL")
 
     class Config:
         from_attributes = True
@@ -118,27 +103,3 @@ class ServiceListResponse(BaseModel):
 
     total: int
     items: List[ServiceBriefSchema]
-
-
-# ============= Service Deployment 스키마 =============
-class ServiceDeployRequest(BaseModel):
-    """서비스 배포 요청"""
-
-    min_replicas: int = Field(1, ge=0, description="최소 복제본 수")
-    max_replicas: int = Field(3, ge=1, description="최대 복제본 수")
-    cpu_request: str = Field("100m", description="CPU 요청량")
-    memory_request: str = Field("128Mi", description="메모리 요청량")
-    cpu_limit: str = Field("500m", description="CPU 제한")
-    memory_limit: str = Field("512Mi", description="메모리 제한")
-    enable_gpu: bool = Field(False, description="GPU 사용 여부")
-    gpu_count: int = Field(0, description="GPU 수")
-
-
-class ServiceDeployResponse(BaseModel):
-    """서비스 배포 응답"""
-
-    service_id: str
-    status: str
-    kserve_endpoint: str
-    public_url: str
-    message: str

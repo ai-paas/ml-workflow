@@ -6,7 +6,6 @@ from db.models.service import (
     ComponentConnection,
     Service,
     ServiceMonitoring,
-    ServiceStatus,
     Workflow,
     WorkflowComponent,
     WorkflowStatus,
@@ -37,22 +36,13 @@ class ServiceRepository(CRUDBase[Service, ServiceCreateRequest, ServiceUpdateReq
         )
 
     def get_multi_with_filters(
-        self,
-        db: Session,
-        *,
-        skip: int = 0,
-        limit: int = 100,
-        creator_id: Optional[int] = None,
-        status: Optional[ServiceStatus] = None
+        self, db: Session, *, skip: int = 0, limit: int = 100, creator_id: Optional[int] = None
     ) -> List[Service]:
         """필터링된 서비스 목록 조회"""
         query = db.query(Service).options(joinedload(Service.creator), joinedload(Service.workflows))
 
         if creator_id:
             query = query.filter(Service.creator_id == creator_id)
-
-        if status:
-            query = query.filter(Service.status == status)
 
         return query.offset(skip).limit(limit).all()
 

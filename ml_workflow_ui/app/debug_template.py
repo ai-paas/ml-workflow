@@ -58,21 +58,10 @@ def main():
                     print(f"   생성자: {t.get('creator', {}).get('username', 'N/A')}")
             print()
 
-        # 4. 전체 워크플로우 조회 (템플릿 포함)
-        print("3️⃣ 전체 워크플로우 조회 (템플릿 필터 없음)...")
+        # 4. 워크플로우 조회 (템플릿 제외)
+        print("3️⃣ 워크플로우 조회 (템플릿 제외)...")
         all_workflows = client.get_workflows()
-        print(f"✅ 전체 워크플로우: {all_workflows.get('total', 0)}개")
-
-        # 템플릿 필터링
-        templates_only = [w for w in all_workflows.get("items", []) if w.get("is_template")]
-        print(f"   - 템플릿: {len(templates_only)}개")
-        print(f"   - 일반 워크플로우: {all_workflows.get('total', 0) - len(templates_only)}개")
-        print()
-
-        if templates_only:
-            print("📋 템플릿 상세:")
-            for t in templates_only:
-                print(f"   - ID: {t.get('id')}, 이름: {t.get('name')}, 상태: {t.get('status')}")
+        print(f"✅ 일반 워크플로우: {all_workflows.get('total', 0)}개")
 
     except Exception as e:
         print(f"❌ 오류 발생: {e}")

@@ -4,8 +4,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from config.settings import get_settings
+from pydantic import BaseModel, Field, computed_field, model_serializer
 from schemas.base import TimeStampSchemaMixin
+from schemas.kserve_deployment import KServeDeploymentReadSchema
 from schemas.model import ModelBriefReadSchema
 from schemas.user import UserSchema
 
@@ -124,9 +126,15 @@ class WorkflowCreateRequest(BaseModel):
     workflow_definition: Optional[WorkflowDefinition] = None
 
 
-class WorkflowCreateInternal(WorkflowCreateRequest):
-    """워크플로우 내부 생성용 - status와 creator_id 포함"""
+class WorkflowCreateInternal(BaseModel):
+    """워크플로우 내부 생성용 - status와 creator_id 포함, workflow_definition 제외"""
 
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    service_id: Optional[str] = None
+    is_template: bool = Field(False, description="템플릿 여부")
+    template_id: Optional[str] = Field(None, description="템플릿 ID (템플릿으로부터 생성시)")
     status: WorkflowStatus = WorkflowStatus.DRAFT
     creator_id: int
 
@@ -140,6 +148,16 @@ class WorkflowUpdateRequest(BaseModel):
     status: Optional[WorkflowStatus] = None
     service_id: Optional[str] = None
     workflow_definition: Optional[WorkflowDefinition] = None
+
+
+class WorkflowUpdateInternal(BaseModel):
+    """워크플로우 내부 수정용 - WorkflowUpdateRequest와 동일하지만 workflow_definition 제외"""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[WorkflowStatus] = None
+    service_id: Optional[str] = None
 
 
 class WorkflowBaseSchema(TimeStampSchemaMixin):
@@ -163,15 +181,60 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     """워크플로우 상세 조회 응답"""
 
     creator: UserSchema
-    service_name: Optional[str] = None
-    template_name: Optional[str] = None
-    kubeflow_pipeline_id: Optional[str] = None
     kubeflow_run_id: Optional[str] = None
-    public_url: Optional[str] = None
-    backend_api_url: Optional[str] = None
-    workflow_definition: Optional[Dict[str, Any]] = None
     components: List[ComponentReadSchema] = Field(default_factory=list)
-    connections: List[ConnectionReadSchema] = Field(default_factory=list)
+    component_connections: List[ConnectionReadSchema] = Field(default_factory=list)
+    kserve_deployments: List[KServeDeploymentReadSchema] = Field(default_factory=list, exclude=True)
+    service: Optional[Any] = Field(None, exclude=True)  # Service 관계 객체 (직접 접근용, 응답에서 제외)
+    template: Optional[Any] = Field(None, exclude=True)  # Workflow 관계 객체 (직접 접근용, 응답에서 제외)
+
+    @computed_field
+    @property
+    def service_name(self) -> Optional[str]:
+        """서비스 이름 (service 관계에서 동적으로 가져옴)"""
+        if self.service:
+            return self.service.name
+        return None
+
+    @computed_field
+    @property
+    def template_name(self) -> Optional[str]:
+        """템플릿 이름 (template 관계에서 동적으로 가져옴)"""
+        if self.template:
+            return self.template.name
+        return None
+
+    @computed_field
+    @property
+    def public_url(self) -> Optional[str]:
+        """KServe 배포 정보를 기반으로 동적으로 생성된 공개 URL"""
+        if not self.kserve_deployments:
+            return None
+
+        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
+        first_deployment = self.kserve_deployments[0]
+        settings = get_settings()
+        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+        model_name = first_deployment.model_name
+
+        # KServe V2 Protocol inference 엔드포인트
+        return f"{gateway_url}/v2/models/{model_name}/infer"
+
+    @computed_field
+    @property
+    def backend_api_url(self) -> Optional[str]:
+        """KServe 배포 정보를 기반으로 동적으로 생성된 백엔드 API URL"""
+        if not self.kserve_deployments:
+            return None
+
+        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
+        first_deployment = self.kserve_deployments[0]
+        settings = get_settings()
+        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+        model_name = first_deployment.model_name
+
+        # KServe V2 Protocol inference 엔드포인트
+        return f"{gateway_url}/v2/models/{model_name}/infer"
 
     class Config:
         from_attributes = True

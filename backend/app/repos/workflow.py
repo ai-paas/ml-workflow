@@ -7,13 +7,15 @@ from repos.base import CRUDBase
 from schemas.workflow import (
     ComponentCreateRequest,
     ConnectionCreateRequest,
+    WorkflowCreateInternal,
     WorkflowCreateRequest,
+    WorkflowUpdateInternal,
     WorkflowUpdateRequest,
 )
 from sqlalchemy.orm import Session, joinedload
 
 
-class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateRequest, WorkflowUpdateRequest]):
+class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpdateInternal]):
     """Workflow Repository"""
 
     def get_with_relations(self, db: Session, workflow_id: str) -> Optional[Workflow]:
@@ -26,6 +28,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateRequest, WorkflowUpdat
                 joinedload(Workflow.template),
                 joinedload(Workflow.components).joinedload(WorkflowComponent.model),
                 joinedload(Workflow.component_connections),
+                joinedload(Workflow.kserve_deployments),
             )
             .filter(Workflow.id == workflow_id)
             .first()
@@ -92,7 +95,6 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateRequest, WorkflowUpdat
         workflow_id: str,
         status: WorkflowStatus,
         kubeflow_run_id: Optional[str] = None,
-        kubeflow_pipeline_id: Optional[str] = None,
     ) -> Optional[Workflow]:
         """워크플로우 상태 업데이트"""
         workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
@@ -102,8 +104,6 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateRequest, WorkflowUpdat
         workflow.status = status
         if kubeflow_run_id:
             workflow.kubeflow_run_id = kubeflow_run_id
-        if kubeflow_pipeline_id:
-            workflow.kubeflow_pipeline_id = kubeflow_pipeline_id
 
         db.add(workflow)
         db.flush()

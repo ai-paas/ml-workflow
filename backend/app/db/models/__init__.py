@@ -15,7 +15,6 @@ from .service import (
     ComponentType,
     Service,
     ServiceMonitoring,
-    ServiceStatus,
     Workflow,
     WorkflowComponent,
     WorkflowStatus,

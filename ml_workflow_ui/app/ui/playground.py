@@ -183,7 +183,7 @@ def create_playground_ui(app_state):
             )
 
         try:
-            result = app_state.api_client.get_workflows(is_template=False)
+            result = app_state.api_client.get_workflows()
             workflows = result.get("items", [])
 
             # ACTIVE 상태이고 배포된 모델이 있는 워크플로우만 필터링

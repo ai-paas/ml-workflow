@@ -84,13 +84,7 @@ class WorkflowExecutor:
             workflow.kubeflow_run_id = run_id
             workflow.status = WorkflowStatus.ACTIVE
 
-            # 배포된 모델 서비스 정보를 workflow_definition에 저장 (하위 호환성)
-            if workflow.workflow_definition is None:
-                workflow.workflow_definition = {}
-
-            workflow.workflow_definition["deployed_models"] = []
-
-            # KServe 배포 정보 초기화 (새로운 테이블 사용)
+            # KServe 배포 정보 초기화
             from services.kserve_deployment import KServeDeploymentService
 
             for component in workflow.components:
@@ -103,27 +97,21 @@ class WorkflowExecutor:
                         model_name=component.name,
                     )
 
-                    # workflow_definition에도 저장 (하위 호환성)
-                    workflow.workflow_definition["deployed_models"].append(
-                        {
-                            "component_id": component.component_id,
-                            "model_id": component.model_id,
-                            "model_name": component.name,
-                            "status": "deploying",
-                            "message": "Model deployment initiated via Kubeflow Pipeline",
-                        }
-                    )
-
             self.db.commit()
 
             logger.info(f"Workflow {workflow.id} successfully executed with run ID: {run_id}")
+
+            # 배포된 모델 정보 조회 (KServeDeployment 테이블에서)
+            deployed_models = KServeDeploymentService.get_deployed_models(
+                self.db, workflow.id, include_component_info=True
+            )
 
             return {
                 "workflow_id": str(workflow.id),
                 "kubeflow_run_id": run_id,
                 "status": "running",
                 "message": "Workflow execution initiated successfully. Model deployments in progress.",
-                "deployed_models": workflow.workflow_definition.get("deployed_models", []),
+                "deployed_models": deployed_models,
             }
 
         except Exception as e:
@@ -722,22 +710,9 @@ class WorkflowExecutor:
                     run_dict = run.to_dict() if hasattr(run, "to_dict") else {}
                     run_id = run_dict.get("run_id") or run_dict.get("id")
 
-                # pipeline_id 추출 (V2beta1Run에서는 일반적으로 별도로 저장하지 않음)
-                if hasattr(run, "pipeline_spec"):
-                    workflow.kubeflow_pipeline_id = (
-                        run.pipeline_spec.pipeline_id if hasattr(run.pipeline_spec, "pipeline_id") else None
-                    )
-                elif hasattr(run, "to_dict"):
-                    run_dict = run.to_dict()
-                    pipeline_spec = run_dict.get("pipeline_spec", {})
-                    workflow.kubeflow_pipeline_id = pipeline_spec.get("pipeline_id")
-                else:
-                    workflow.kubeflow_pipeline_id = None
-
             elif isinstance(run, dict):
                 # dict 형태인 경우
                 logger.info(f"Run dict keys: {run.keys()}")
-                workflow.kubeflow_pipeline_id = run.get("pipeline_id")
                 run_id = run.get("run_id") or run.get("id")
             else:
                 # 기타 객체 형태인 경우
@@ -745,14 +720,8 @@ class WorkflowExecutor:
                 # ApiRunDetail 객체의 경우
                 if hasattr(run, "run"):
                     actual_run = run.run
-                    workflow.kubeflow_pipeline_id = (
-                        actual_run.pipeline_spec.pipeline_id if hasattr(actual_run, "pipeline_spec") else None
-                    )
                     run_id = actual_run.id if hasattr(actual_run, "id") else None
                 else:
-                    workflow.kubeflow_pipeline_id = (
-                        run.pipeline_spec.pipeline_id if hasattr(run, "pipeline_spec") and run.pipeline_spec else None
-                    )
                     run_id = run.run_id if hasattr(run, "run_id") else (run.id if hasattr(run, "id") else None)
 
             if not run_id:

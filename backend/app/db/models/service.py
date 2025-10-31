@@ -18,15 +18,6 @@ if TYPE_CHECKING:
     from .user import UserModel
 
 
-class ServiceStatus(PyEnum):
-    """서비스 상태 열거형"""
-
-    DRAFT = "DRAFT"
-    ACTIVE = "ACTIVE"
-    INACTIVE = "INACTIVE"
-    DEPRECATED = "DEPRECATED"
-
-
 class WorkflowStatus(PyEnum):
     """워크플로우 상태 열거형"""
 
@@ -53,15 +44,6 @@ class Service(BaseModel, TimestampMixin):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags: Mapped[Optional[List]] = mapped_column(JSON, nullable=True)  # ["tag1", "tag2", ...]
     creator_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False)
-    status: Mapped[ServiceStatus] = mapped_column(Enum(ServiceStatus), default=ServiceStatus.DRAFT, nullable=False)
-
-    # KServe 관련 정보
-    kserve_endpoint: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    public_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    backend_api_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-
-    # 모니터링 데이터 (최근 집계 데이터 캐싱용)
-    monitoring_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Relationships
     creator: Mapped["UserModel"] = relationship("UserModel", back_populates="services")
@@ -94,15 +76,7 @@ class Workflow(BaseModel, TimestampMixin):
     )  # 템플릿으로부터 생성된 경우
 
     # Kubeflow 관련
-    kubeflow_pipeline_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     kubeflow_run_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-
-    # 워크플로우 정의 (컴포넌트와 연결 정보)
-    workflow_definition: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-
-    # URL 정보
-    public_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    backend_api_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     # Relationships
     service: Mapped[Optional["Service"]] = relationship("Service", back_populates="workflows")

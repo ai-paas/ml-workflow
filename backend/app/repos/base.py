@@ -112,7 +112,7 @@ class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
                 query = query.filter(getattr(self.model, attr).in_(value))
             else:
                 query = query.filter(getattr(self.model, attr) == value)
-        return query
+        return query.all()
 
     def is_active(self, db: Session) -> bool:
         return db.is_active()
