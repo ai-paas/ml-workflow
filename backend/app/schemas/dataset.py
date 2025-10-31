@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel
 from schemas.base import TimeStampSchemaMixin
 
@@ -41,3 +43,12 @@ class DatasetRegistryReadSchema(TimeStampSchemaMixin):
 
     class Config:
         from_attributes = True
+
+
+class DatasetValidationResponse(BaseModel):
+    """데이터셋 파일 검증 응답"""
+
+    is_valid: bool
+    message: str
+    root_dir: Optional[str] = None
+    details: Optional[dict] = None
