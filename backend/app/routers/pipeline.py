@@ -44,7 +44,7 @@ def create_mlflow_experiment(
     return experiment.experiment_id if experiment else -1
 
 
-@router.post("/training", response_model=bool)
+@router.post("/training", response_model=dict)
 def container_train(
     *,
     db: Session = SessionDepends,
@@ -173,10 +173,14 @@ def container_train(
                 "lrf": lrf,
             },
         )
-        return True
+        return {
+            "experiment_id": experiment_db_obj.id,
+        }
     except Exception as e:
         logger.error(f"error occured when register pipeline : {e}")
-        return False
+        return {
+            "experiment_id": None,
+        }
 
 
 @router.post("/model/registration", response_model=bool)

@@ -14,10 +14,13 @@ RUN apt-get update && apt-get install -y \
     gcc \
     build-essential \
     sudo \
-    && pip3 install pipenv
+    && rm -rf /var/lib/apt/lists/*
+
+# pipenv를 직접 pip로 설치 (에뮬레이션 문제 회피)
+RUN pip3 install --no-cache-dir pipenv
 
 # Copy only the Pipfile and Pipfile.lock to leverage Docker cache
-COPY Pipfile Pipfile.lock ./
+COPY train_eval/Pipfile train_eval/Pipfile.lock ./
 
 # Install the dependencies via pipenv
 RUN pipenv install --deploy --system
@@ -63,6 +66,7 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy the FastAPI app code into the container
-COPY . .
+COPY ./train_eval/ .
+COPY YOLOX ./YOLOX
 
 ENTRYPOINT python -m app.train_eval

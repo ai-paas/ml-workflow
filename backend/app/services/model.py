@@ -224,15 +224,12 @@ class CustomModelService:
     ):
         # 이미 pipeline에서 등록한 mlflow model_registry가 있다면 mlflow에 등록하지 말것
         if not model_registry_schema:
-            contents = file.file.read()
             model_name = model_schema.name
             model_name = model_name.replace("/", "-")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".gguf") as temp_file:
-                temp_file.write(contents)
-                # temp_file_path = temp_file.name
-                # model = torch.load(temp_file_path, map_location="cpu")
-                run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
-                model_uri = model_name
+            # log_artifact 내부에서 file.file.read()를 호출하므로, 파일 포인터를 처음으로 되돌릴 필요 없음
+            # 파일을 그대로 전달하면 됨
+            run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
+            model_uri = model_name
         else:
             # run_id = model_registry_schema.run_id
             artifact_uri = model_registry_schema.artifact_path

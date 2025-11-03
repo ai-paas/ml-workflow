@@ -13,14 +13,22 @@ RUN apt-get update && apt-get install -y \
     gcc \
     build-essential \
     sudo \
-    && pip3 install pipenv
+    && rm -rf /var/lib/apt/lists/*
+
+# pipenv를 직접 pip로 설치 (에뮬레이션 문제 회피)
+RUN pip3 install --no-cache-dir pipenv
 
 
 # Copy only the Pipfile and Pipfile.lock to leverage Docker cache
-COPY Pipfile Pipfile.lock ./
+COPY ./predictor/Pipfile ./predictor/Pipfile.lock ./
 
 # Install the dependencies via pipenv
 RUN pipenv install --deploy --system
+
+# Copy YOLOX folder for installation
+COPY YOLOX ./YOLOX
+RUN cd YOLOX && pip install --no-build-isolation --use-pep517 -v -e .
+
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 
 WORKDIR /app
@@ -49,7 +57,8 @@ COPY --from=builder /usr/local/lib/python3.10/dist-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy the FastAPI app code into the container
-COPY . .
+COPY ./predictor/ .
+COPY YOLOX ./YOLOX
 
 # 작업 디렉토리를 app으로 변경하고 python 모듈 실행
 WORKDIR /app/app
