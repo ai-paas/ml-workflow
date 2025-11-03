@@ -28,6 +28,7 @@ def serving_component(
     framework: str = "pytorch",  # 프레임워크 타입 추가
     run_id: str = None,  # MLflow run ID 추가
     kserve_gpu_yn: bool = False,
+    infer_image_url: str = None,
     request_gpu: str = "1",
     request_cpu: str = "200m",
     request_memory: str = "2Gi",
@@ -101,7 +102,7 @@ def serving_component(
         containers=[
             client.V1Container(
                 name="kserve-container",
-                image="aipaas-harbor.surromind.ai/ml-workflow/inference:latest",  # TensorFlow 모델 서빙을 위한 이미지
+                image=infer_image_url,  # TensorFlow 모델 서빙을 위한 이미지
                 # env=env_vars
                 args=container_args,
                 resources=client.V1ResourceRequirements(

@@ -23,6 +23,7 @@ def container_train_eval_component(
     restapi_url: str,
     restapi_username: str,
     restapi_password: str,
+    train_image_url: str,
     gpu_limit: str,
     batch_size: str,
     epochs: str,
@@ -33,7 +34,7 @@ def container_train_eval_component(
 ):
     return dsl.ContainerSpec(
         # TODO: harbor URL 변수로 관리 필요
-        image="aipaas-harbor.surromind.ai/ml-workflow/train:latest",
+        image=train_image_url,
         # TODO: Kubernetes는 보안과 유연성을 위해 기본적으로 컨테이너의 ENTRYPOINT를 무시하고 override함.
         command=["python", "-m", "app.train_eval"],
         args=[

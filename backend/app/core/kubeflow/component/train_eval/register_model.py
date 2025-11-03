@@ -73,8 +73,8 @@ def register_model_component(
                 logger.error(f"REST API 토큰 획득 중 오류 발생: {e}")
                 return None
 
-        def get_experiment_run_id(self, experiment_id: int) -> Optional[str]:
-            """실험 ID로부터 MLflow run ID 조회"""
+        def get_experiment_info(self, experiment_id: int) -> Optional[Dict[str, Any]]:
+            """실험 ID로부터 실험 정보 조회 (mlflow_run_id, reference_model_id)"""
             try:
                 response = self._session.get(
                     f"{self.base_url}/api/v1/experiments/{experiment_id}",
@@ -82,13 +82,35 @@ def register_model_component(
                 )
 
                 if response.status_code == 200:
-                    return response.json().get("mlflow_run_id")
+                    data = response.json()
+                    return {
+                        "mlflow_run_id": data.get("mlflow_run_id"),
+                        "reference_model_id": data.get("reference_model_id"),
+                    }
                 else:
                     logger.error(f"실험 조회 실패: {response.status_code} - {response.text}")
                     return None
 
             except Exception as e:
-                logger.error(f"실험 run ID 조회 중 오류 발생: {e}")
+                logger.error(f"실험 정보 조회 중 오류 발생: {e}")
+                return None
+
+        def get_model_name(self, model_id: int) -> Optional[str]:
+            """모델 ID로부터 모델 이름 조회"""
+            try:
+                response = self._session.get(
+                    f"{self.base_url}/api/v1/models/{model_id}",
+                    headers=self._get_headers(),
+                )
+
+                if response.status_code == 200:
+                    return response.json().get("name")
+                else:
+                    logger.error(f"모델 조회 실패: {response.status_code} - {response.text}")
+                    return None
+
+            except Exception as e:
+                logger.error(f"모델 이름 조회 중 오류 발생: {e}")
                 return None
 
         def get_model_metadata(self) -> Dict[str, int]:
@@ -202,10 +224,18 @@ def register_model_component(
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(mlflow_experiment_name)
 
-        # 실험 run ID 조회
-        run_id = api_client.get_experiment_run_id(experiment_id)
+        # 실험 정보 조회 (mlflow_run_id, reference_model_id)
+        experiment_info = api_client.get_experiment_info(experiment_id)
+        if not experiment_info:
+            raise Exception("실험 정보를 조회할 수 없습니다.")
+
+        run_id = experiment_info.get("mlflow_run_id")
+        reference_model_id = experiment_info.get("reference_model_id")
+
         if not run_id:
             raise Exception("실험 run ID를 조회할 수 없습니다.")
+        if not reference_model_id:
+            raise Exception("실험의 reference_model_id를 조회할 수 없습니다.")
 
         # 아티팩트 다운로드
         download_uuid_path = str(uuid.uuid4())
@@ -213,11 +243,25 @@ def register_model_component(
 
         try:
             # 체크포인트 파일 찾기
-            model_path = find_checkpoint_file(local_artifact_path)
+            original_model_path = find_checkpoint_file(local_artifact_path)
+
+            # reference_model의 name 조회
+            reference_model_name = api_client.get_model_name(reference_model_id)
+            if not reference_model_name:
+                raise Exception(f"모델 ID {reference_model_id}의 이름을 조회할 수 없습니다.")
+
+            # 파일명을 reference_model_name.pth로 변경
+            model_dir = os.path.dirname(original_model_path)
+            new_model_filename = f"{reference_model_name}.pth"
+            new_model_path = os.path.join(model_dir, new_model_filename)
+
+            # 파일명 변경
+            shutil.copy2(original_model_path, new_model_path)
+            logger.info(f"체크포인트 파일명 변경: {os.path.basename(original_model_path)} -> {new_model_filename}")
 
             # MLflow에 모델 등록
             with mlflow.start_run(run_name=f"{uuid.uuid4()}-model") as run:
-                mlflow.log_artifact(local_path=model_path, artifact_path=download_uuid_path, run_id=run.info.run_id)
+                mlflow.log_artifact(local_path=new_model_path, artifact_path=download_uuid_path, run_id=run.info.run_id)
 
                 # 모델 메타데이터 조회
                 metadata = api_client.get_model_metadata()

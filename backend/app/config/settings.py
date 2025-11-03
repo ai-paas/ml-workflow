@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     KUBEFLOW_NAMESPACE: str = Field(..., description="Kubeflow 네임스페이스")
     KUBEFLOW_EXPERIMENT_NAME: str = Field(..., description="Kubeflow 실험명")
 
+    TRAIN_IMAGE_URL: str = Field(..., description="학습 이미지 URL")
+    INFER_IMAGE_URL: str = Field(..., description="추론 이미지 URL")
+
     # 데이터베이스 설정
     DB_TYPE: str = Field(..., description="데이터베이스 타입 (예: postgresql)")
     DB_NAME: str = Field(..., description="데이터베이스 이름")

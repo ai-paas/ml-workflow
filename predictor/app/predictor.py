@@ -18,6 +18,7 @@ from model_manager.base import BaseModelManager
 from model_manager.keras.custom_model import KerasModelManager
 from model_manager.onnx.custom_model import OnnxModelManager
 from model_manager.pytorch.custom_model import PytorchModelManager
+from model_manager.yolox.custom_model import YoloxModelManager
 from PIL import Image, ImageDraw
 from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
@@ -31,6 +32,7 @@ class ModelManagerFactory:
         "pytorch": PytorchModelManager,
         "keras": KerasModelManager,
         "onnx": OnnxModelManager,
+        "yolox": YoloxModelManager,
     }
 
     @classmethod

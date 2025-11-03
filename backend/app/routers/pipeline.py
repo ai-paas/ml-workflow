@@ -77,6 +77,7 @@ def container_train(
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        train_image_url: str,
         gpu_limit: str,
         batch_size: str,
         epochs: str,
@@ -100,6 +101,7 @@ def container_train(
             restapi_url=restapi_url,
             restapi_username=restapi_username,
             restapi_password=restapi_password,
+            train_image_url=train_image_url,
             gpu_limit=gpu_limit,
             batch_size=batch_size,
             epochs=epochs,
@@ -164,6 +166,7 @@ def container_train(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
+                "train_image_url": train_image_url,
                 "gpu_limit": gpus,
                 "batch_size": batch_size,
                 "epochs": epochs,
@@ -279,6 +282,7 @@ def serve(
         framework: str,  # 프레임워크 파라미터 추가
         run_id: str,  # run_id 파라미터 추가
         kserve_gpu_yn: bool,
+        infer_image_url: str,
         request_gpu: str,
         request_cpu: str,
         request_memory: str,
@@ -299,6 +303,7 @@ def serve(
             framework=framework,  # 프레임워크 전달
             run_id=run_id,  # run_id 전달
             kserve_gpu_yn=kserve_gpu_yn,
+            infer_image_url=infer_image_url,
             request_gpu=request_gpu,
             request_cpu=request_cpu,
             request_memory=request_memory,
@@ -361,6 +366,7 @@ def serve(
                 "framework": framework,  # 프레임워크 전달
                 "run_id": run_id,  # run_id 전달
                 "kserve_gpu_yn": settings.KSERVE_GPU,  # kserve_gpu -> kserve_gpu_yn으로 수정
+                "infer_image_url": settings.INFER_IMAGE_URL,
                 # TODO: 추후 외부에서 인자로 받아야함.
                 "request_gpu": request_gpu,
                 "request_cpu": request_cpu,
