@@ -9,16 +9,16 @@ import kserve
 import mlflow
 import numpy as np
 import torch
+
+# Model Manager Factory 및 관련 import
+from app.model_manager.base import BaseModelManager
+from app.model_manager.keras.custom_model import KerasModelManager
+from app.model_manager.onnx.custom_model import OnnxModelManager
+from app.model_manager.pytorch.custom_model import PytorchModelManager
+from app.model_manager.yolox.custom_model import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
 from kserve.utils.utils import generate_uuid
-
-# Model Manager Factory 및 관련 import
-from model_manager.base import BaseModelManager
-from model_manager.keras.custom_model import KerasModelManager
-from model_manager.onnx.custom_model import OnnxModelManager
-from model_manager.pytorch.custom_model import PytorchModelManager
-from model_manager.yolox.custom_model import YoloxModelManager
 from PIL import Image, ImageDraw
 from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
@@ -131,7 +131,7 @@ class InferenceModel(Model):
 
             # Model Manager를 통한 모델 로드
             if self.run_id:
-                self.model_manager.load_model(self.name, self.run_id)
+                self.model_manager.load_model(self.model_uri, self.run_id)
                 logging.logger.info(f"Model loaded successfully using {self.framework} framework")
             else:
                 # 기존 MLflow transformers 로드 방식 (하위 호환성)

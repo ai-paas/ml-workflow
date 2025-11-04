@@ -175,7 +175,38 @@ def load_model(db: Session = SessionDepends, *, model_id: int, current_user: Use
     }
 
 
+@router.get("/{model_id}/references")
+def check_model_references(
+    model_id: int, db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user)
+):
+    """
+    모델의 참조 관계 확인
+
+    Returns:
+        참조 정보 {'has_references': bool, 'references': list}
+    """
+    return ModelService.check_model_references(db, model_id)
+
+
 @router.delete("/{model_id}")
 def delete_model(model_id: int, db: Session = SessionDepends, current_user: UserSchema = Depends(get_current_user)):
-    ModelService().delete(db, model_id)
-    return True
+    """
+    모델 삭제
+    - 참조 관계 확인 후 안전하게 삭제
+    - 참조되는 데이터가 있으면 400 에러 반환
+    """
+    try:
+        result = ModelService().delete(db, model_id)
+        return {"success": result, "message": "모델이 성공적으로 삭제되었습니다."}
+    except RuntimeError as e:
+        # 참조 관계 때문에 삭제할 수 없는 경우
+        if "참조되고 있습니다" in str(e):
+            raise HTTPException(status_code=400, detail=str(e))
+        # 기타 런타임 에러
+        raise HTTPException(status_code=500, detail=str(e))
+    except ValueError as e:
+        # 모델을 찾을 수 없는 경우
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        # 예상치 못한 에러
+        raise HTTPException(status_code=500, detail=f"모델 삭제 중 오류가 발생했습니다: {str(e)}")

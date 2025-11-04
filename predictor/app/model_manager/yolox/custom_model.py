@@ -15,8 +15,8 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from logging_inference import logger
-from model_manager.base import BaseModelManager
+from app.logging_inference import logger
+from app.model_manager.base import BaseModelManager
 
 from YOLOX.yolox.data.data_augment import preproc
 
@@ -83,25 +83,79 @@ class YoloxModelManager(BaseModelManager):
             logger.info(f"모델 가중치 경로: {self.model_path}")
             logger.info(f"Config 경로: {self.config_path}")
 
+            # 디바이스 설정 (나중에 predict에서 실제로 설정됨)
+            self.device = torch.device("cpu")  # 기본값, predict에서 업데이트됨
+
+            # 먼저 체크포인트를 로드하여 실제 클래스 수 확인
+            ckpt = torch.load(self.model_path, map_location=self.device)
+
+            # checkpoint에서 실제 클래스 수 추출
+            # head.cls_preds.0.weight의 shape에서 클래스 수를 알 수 있음
+            checkpoint_num_classes = None
+            for key in ckpt["model"].keys():
+                if "head.cls_preds.0.weight" in key:
+                    # shape: [num_classes, 128, 1, 1]
+                    checkpoint_num_classes = ckpt["model"][key].shape[0]
+                    logger.info(f"체크포인트에서 감지된 클래스 수: {checkpoint_num_classes}")
+                    break
+
+            if checkpoint_num_classes is None:
+                raise ValueError("체크포인트에서 클래스 수를 감지할 수 없습니다.")
+
             # Config 모듈 import
             current_exp = importlib.import_module(self.config_path)
             self.exp = current_exp.Exp()
 
+            # 체크포인트의 클래스 수로 exp 설정
+            logger.info(f"Exp의 기본 num_classes: {self.exp.num_classes}")
+            self.exp.num_classes = checkpoint_num_classes
+            logger.info(f"Exp의 num_classes를 {checkpoint_num_classes}로 설정")
+
             # 모델 생성
             model = self.exp.get_model()
 
-            # 디바이스 설정 (나중에 predict에서 실제로 설정됨)
-            self.device = torch.device("cpu")  # 기본값, predict에서 업데이트됨
+            # 생성된 모델의 실제 클래스 수 확인
+            if hasattr(model, "head") and hasattr(model.head, "num_classes"):
+                logger.info(f"생성된 모델의 head.num_classes: {model.head.num_classes}")
+
+                # 모델의 클래스 수와 checkpoint의 클래스 수가 다르면 head를 재생성
+                if model.head.num_classes != checkpoint_num_classes:
+                    logger.warning(
+                        f"모델 클래스 수({model.head.num_classes})와 체크포인트 클래스 수({checkpoint_num_classes})가 불일치"
+                    )
+                    logger.info("모델 head를 재생성합니다...")
+
+                    # YOLOX head를 올바른 클래스 수로 재생성
+                    import torch.nn as nn
+
+                    from YOLOX.yolox.models import YOLOXHead
+
+                    # 기존 head의 설정 가져오기
+                    in_channels = model.head.in_channels if hasattr(model.head, "in_channels") else [256, 512, 1024]
+                    strides = model.head.strides if hasattr(model.head, "strides") else [8, 16, 32]
+
+                    # 새로운 head 생성
+                    model.head = YOLOXHead(
+                        num_classes=checkpoint_num_classes,
+                        strides=strides,
+                        in_channels=in_channels,
+                        act="silu",
+                        depthwise=False,
+                    )
+                    logger.info(f"새로운 head 생성 완료. num_classes: {model.head.num_classes}")
 
             model.to(self.device)
             model.eval()
 
             # 체크포인트 로드
-            ckpt = torch.load(self.model_path, map_location=self.device)
+            logger.info("체크포인트 state_dict 로드 시작...")
             model.load_state_dict(ckpt["model"])
+            logger.info("체크포인트 state_dict 로드 완료")
 
             self.model = model
-            logger.info(f"YOLOX 모델 로드 완료: {self.config_path}, 가중치: {self.model_path}")
+            logger.info(
+                f"YOLOX 모델 로드 완료: {self.config_path}, 가중치: {self.model_path}, 클래스 수: {checkpoint_num_classes}"
+            )
 
             return self.model
 
@@ -109,12 +163,12 @@ class YoloxModelManager(BaseModelManager):
             logger.error(f"YOLOX 모델 로드 실패: {e}")
             raise ValueError(f"YOLOX 모델 로드 실패: {str(e)}")
 
-    def preprocess_data(self, data: str | bytes | IO[bytes], image_size: int = 640):
+    def preprocess_data(self, data: str | bytes | IO[bytes], image_size: tuple = (640, 640)):
         """
         이미지 전처리 로직 구현
         :param data: 이미지 데이터 (바이너리 또는 파일 객체)
-        :param image_size: 입력 이미지 크기
-        :return: 전처리된 이미지 텐서와 비율 정보
+        :param image_size: 입력 이미지 크기 튜플 (height, width) - YOLOX 형식
+        :return: 전처리된 이미지 텐서, 가로비율, 세로비율, 원본 크기
         """
         try:
             # 이미지 읽기
@@ -127,24 +181,24 @@ class YoloxModelManager(BaseModelManager):
             if image is None:
                 raise ValueError("이미지를 읽을 수 없습니다")
 
-            # 원본 이미지 크기 저장
-            original_size = (image.shape[1], image.shape[0])  # (width, height)
-            logger.info(f"원본 이미지 크기: {original_size}")
+            # 원본 이미지 크기
+            orig_h, orig_w = image.shape[:2]
+            original_size = (orig_w, orig_h)  # (width, height)
 
-            # 전처리
-            if image_size is not None:
-                ratio = min(image_size / image.shape[0], image_size / image.shape[1])
-                img, _ = preproc(image, input_size=(image_size, image_size))
-            else:
-                default_size = 640
-                ratio = min(default_size / image.shape[0], default_size / image.shape[1])
-                img, _ = preproc(image, input_size=(default_size, default_size))
-                image_size = default_size
+            # 모델 입력 크기
+            model_h, model_w = image_size  # (height, width)
+
+            # 전처리 (YOLOX의 preproc 사용 - 리사이즈 + 패딩)
+            img, _ = preproc(image, input_size=image_size)
+
+            # 가로/세로 스케일 따로 계산
+            scale_x = model_w / orig_w  # 가로 스케일
+            scale_y = model_h / orig_h  # 세로 스케일
 
             # 텐서로 변환
             img = torch.from_numpy(img).to(self.device).unsqueeze(0).float()
 
-            return img, ratio, original_size, image_size
+            return img, scale_x, scale_y, original_size
 
         except Exception as e:
             logger.error(f"이미지 전처리 중 오류 발생: {e}")
@@ -158,75 +212,110 @@ class YoloxModelManager(BaseModelManager):
         :return: 예측 결과 딕셔너리
         """
         try:
-            if not self.model or not self.exp:
-                logger.error(f"ModelManager not ready: model={self.model}, exp={self.exp}")
-                raise ValueError("모델 추론이 준비되지 않았습니다")
-
             # 디바이스 설정
             self.device = torch.device("cuda" if torch.cuda.is_available() and device_str == "gpu" else "cpu")
             self.model = self.model.to(self.device)
 
-            logger.info(
-                f"start YOLOX inference\n"
-                f"  device={device_str}\n"
-                f"  model={type(self.model)}\n"
-                f"  data_type={type(data)}"
-            )
-
             # 이미지 크기 가져오기 (exp에서 기본값 사용)
-            image_size = getattr(self.exp, "test_size", 640)
+            test_size = getattr(self.exp, "test_size", (640, 640))
+
+            # test_size 정규화 - (height, width) 튜플 유지
+            if isinstance(test_size, (list, tuple)):
+                if len(test_size) == 1:
+                    image_size = (test_size[0], test_size[0])  # (H, W)
+                else:
+                    image_size = tuple(test_size)  # 이미 (H, W)
+            else:
+                # 단일 정수인 경우 정사각형으로
+                image_size = (test_size, test_size)  # (H, W)
 
             # 데이터 전처리
-            img_tensor, ratio, original_size, processed_size = self.preprocess_data(data, image_size)
+            img_tensor, scale_x, scale_y, original_size = self.preprocess_data(data, image_size)
 
             # 모델 추론
             with torch.no_grad():
                 prediction_result = self.model(img_tensor)
 
+                # YOLOX 데모 코드처럼 decoder 적용 (있는 경우)
+                if hasattr(self.model, "head") and hasattr(self.model.head, "decode_outputs"):
+                    prediction_result = self.model.head.decode_outputs(
+                        prediction_result, dtype=prediction_result.type()
+                    )
+
             # 후처리
+            num_classes = getattr(self.exp, "num_classes", len(COCO_CLASSES))
+
             original_predictions = postprocess(
                 prediction=prediction_result,
-                num_classes=len(COCO_CLASSES),
+                num_classes=num_classes,
                 conf_thre=self.conf,
                 nms_thre=self.iou,
             )[0]
 
             # 결과 처리
+            if original_predictions is None:
+                return {
+                    "predictions": [],
+                    "image_info": {
+                        "original_size": {"width": original_size[0], "height": original_size[1]},
+                        "model_input_size": {"width": image_size[1], "height": image_size[0]},
+                    },
+                }
+
             output = original_predictions.cpu()
-            bboxes = output[:, 0:4]
-            bboxes /= ratio
+            bboxes = output[:, 0:4].clone()  # 모델 출력 좌표
+
+            # bbox 좌표 변환 (단순 비율 적용)
+            # x1, x2는 가로 스케일로
+            # y1, y2는 세로 스케일로
+            if len(bboxes) > 0:
+                bboxes[:, [0, 2]] /= scale_x  # x1, x2
+                bboxes[:, [1, 3]] /= scale_y  # y1, y2
+
             cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]
 
             # 결과를 리스트로 변환
             predictions = []
             for bbox, score, cls_id in zip(bboxes, scores, cls):
+                cls_idx = int(cls_id.item())
+
+                x1, y1, x2, y2 = bbox.tolist()
+
+                # 유효한 bbox인지 확인
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                # 클래스 라벨 결정
+                if hasattr(self.exp, "dataset") and hasattr(self.exp.dataset, "class_names"):
+                    # exp에 커스텀 클래스가 정의되어 있으면 사용
+                    class_names = self.exp.dataset.class_names
+                    label = class_names[cls_idx] if cls_idx < len(class_names) else f"class_{cls_idx}"
+                elif cls_idx < len(COCO_CLASSES):
+                    # COCO 클래스 범위 내면 COCO_CLASSES 사용
+                    label = COCO_CLASSES[cls_idx]
+                else:
+                    # 그 외의 경우 클래스 인덱스 표시
+                    label = f"class_{cls_idx}"
+
                 predictions.append(
                     {
                         "score": float(score.item()),
-                        "label": (
-                            COCO_CLASSES[int(cls_id.item())]
-                            if int(cls_id.item()) < len(COCO_CLASSES)
-                            else f"unknown_{int(cls_id.item())}"
-                        ),
-                        "box": [float(x.item()) for x in bbox],  # [x1, y1, x2, y2]
+                        "label": label,
+                        "box": [x1, y1, x2, y2],  # [x1, y1, x2, y2]
                     }
                 )
 
             # 신뢰도 기준으로 정렬 및 상위 결과만 반환
             predictions = sorted(predictions, key=lambda x: x["score"], reverse=True)[:50]  # 최대 50개
 
-            logger.info(f"YOLOX 추론 완료: {len(predictions)}개 객체 검출")
-
-            result = {
+            return {
                 "predictions": predictions,
                 "image_info": {
                     "original_size": {"width": original_size[0], "height": original_size[1]},
-                    "model_input_size": {"width": processed_size, "height": processed_size},
+                    "model_input_size": {"width": image_size[1], "height": image_size[0]},
                 },
             }
-
-            return result
 
         except Exception as e:
             logger.error(f"YOLOX 추론 중 오류 발생: {e}")

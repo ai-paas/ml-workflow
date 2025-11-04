@@ -7,7 +7,6 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from config.settings import get_settings
-from core.kubeflow.kserve_manager import KServeManager
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
@@ -24,7 +23,6 @@ class WorkflowExecutor:
     def __init__(self, db: Session):
         self.db = db
         self.kf_manager = None
-        self.kserve_manager = None
         self.deployed_services = {}  # component_id -> inference_service_name
 
     def execute_workflow(self, workflow: Workflow, parameters: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -223,18 +221,24 @@ class WorkflowExecutor:
 
                 model = db.query(Model).filter(Model.id == component.model_id).first()
                 if model and hasattr(model, "registry") and model.registry:
-                    model_uri = model.registry.artifact_path or ""
+                    model_uri = model.registry.uri or ""
                     run_id = model.registry.run_id or ""
 
                     # framework 정보 추론
-                    if hasattr(model, "type_info") and model.type_info:
-                        type_name = model.type_info.name.lower()
-                        if "pytorch" in type_name or "torch" in type_name:
+                    if hasattr(model, "format_info") and model.format_info:
+                        format_name = model.format_info.name.lower()
+                        if "pytorch" in format_name or "torch" in format_name:
                             framework = "pytorch"
-                        elif "tensorflow" in type_name or "tf" in type_name:
+                        elif "tensorflow" in format_name or "tf" in format_name:
                             framework = "tensorflow"
-                        elif "onnx" in type_name:
+                        elif "onnx" in format_name:
                             framework = "onnx"
+                        elif "transformers" in format_name:
+                            framework = "transformers"
+                        elif "keras" in format_name:
+                            framework = "keras"
+                        elif "yolox" in format_name:
+                            framework = "yolox"
 
             # KServe 배포만 수행하는 컴포넌트 (추론은 별도로 수행)
             @dsl.component(
@@ -261,6 +265,7 @@ class WorkflowExecutor:
                 rest_api_url: str,
                 restapi_username: str,
                 restapi_password: str,
+                infer_image_url: str,
                 config: str = "{}",
                 gpu_enabled: bool = False,
             ) -> str:
@@ -343,10 +348,14 @@ class WorkflowExecutor:
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
 
-                    # 리소스 설정
+                    # 리소스 설정 (ephemeral-storage requests는 제거)
                     resources = client.V1ResourceRequirements(
-                        requests={"memory": "2Gi", "cpu": "200m"},
-                        limits={"memory": "4Gi", "cpu": "500m"},
+                        requests={
+                            "memory": "2Gi",
+                            "cpu": "200m",
+                            # ephemeral-storage requests 제거 - 노드 리소스 부족 시 스케줄링 방해 방지
+                        },
+                        limits={"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "1Gi"},  # 폭주 방지용 제한만 설정
                     )
 
                     if gpu_enabled:
@@ -359,7 +368,7 @@ class WorkflowExecutor:
                         containers=[
                             client.V1Container(
                                 name="kserve-container",
-                                image="aipaas-harbor.surromind.ai/ml-workflow/inference:latest",
+                                image=infer_image_url,
                                 args=container_args,
                                 resources=resources,
                                 env=[
@@ -393,32 +402,89 @@ class WorkflowExecutor:
                     logger.info(f"Deploying model service {service_name}")
                     kserve_client.create(inference_service, namespace=namespace)
 
-                    # 서비스가 준비될 때까지 대기 (최대 5분)
-                    max_wait = 300
-                    wait_interval = 10
+                    # 서비스가 준비될 때까지 대기 (최대 10분, ephemeral-storage 문제 대응)
+                    max_wait = 600  # 10분으로 증가
+                    wait_interval = 15  # 15초 간격
                     elapsed = 0
                     service_ready = False
+                    evicted_count = 0
+                    last_status = None
+
+                    # Pod 상태 확인을 위한 k8s client
+                    k8s_v1 = client.CoreV1Api()
 
                     while elapsed < max_wait:
                         try:
+                            # InferenceService 상태 확인
                             status = kserve_client.get(service_name, namespace=namespace)
-                            if status.get("status", {}).get("conditions"):
-                                ready = any(
-                                    c.get("type") == "Ready" and c.get("status") == "True"
-                                    for c in status["status"]["conditions"]
+                            conditions = status.get("status", {}).get("conditions", [])
+
+                            # Ready 상태 확인
+                            ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+
+                            if ready:
+                                logger.info(f"Service {service_name} is ready")
+                                service_ready = True
+                                break
+
+                            # 실패 상태 확인
+                            failed = any(c.get("type") == "Ready" and c.get("status") == "False" for c in conditions)
+
+                            if failed:
+                                # 실패 이유 확인
+                                for c in conditions:
+                                    if c.get("type") == "Ready" and c.get("status") == "False":
+                                        reason = c.get("reason", "")
+                                        message = c.get("message", "")
+                                        logger.warning(f"Service not ready: {reason} - {message}")
+
+                                        # RevisionMissing은 Pod가 생성 중이거나 Evicted된 경우
+                                        if "RevisionMissing" in reason or "Evicted" in message:
+                                            evicted_count += 1
+                                            logger.info(
+                                                f"Pod may have been evicted (count: {evicted_count}), "
+                                                f"waiting for retry..."
+                                            )
+
+                            # Pod 직접 확인 (Evicted 상태 감지)
+                            try:
+                                pods = k8s_v1.list_namespaced_pod(
+                                    namespace=namespace,
+                                    label_selector=f"serving.kserve.io/inferenceservice={service_name}",
                                 )
-                                if ready:
-                                    logger.info(f"Service {service_name} is ready")
-                                    service_ready = True
-                                    break
+                                for pod in pods.items:
+                                    if pod.status.phase == "Failed" and pod.status.reason == "Evicted":
+                                        logger.warning(f"Pod {pod.metadata.name} was evicted: {pod.status.message}")
+                                        # Evicted 메시지에서 노드 리소스 부족 정보 추출
+                                        if "ephemeral-storage" in str(pod.status.message):
+                                            logger.info("  → Node-level ephemeral-storage shortage detected")
+                                        evicted_count += 1
+                            except Exception as pod_error:
+                                logger.debug(f"Could not check pod status: {pod_error}")
+
+                            # 진행 상황 로그 (30초마다)
+                            if elapsed % 30 == 0:
+                                logger.info(f"Waiting for service {service_name}... ({elapsed}s elapsed)")
+                                if evicted_count > 0:
+                                    logger.info(
+                                        f"  Eviction detected {evicted_count} time(s), KServe will retry automatically"
+                                    )
+
                         except Exception as e:
-                            logger.warning(f"Waiting for service to be ready: {e}")
+                            logger.warning(f"Error checking service status: {e}")
 
                         time.sleep(wait_interval)
                         elapsed += wait_interval
 
                     if not service_ready:
-                        logger.warning(f"Service {service_name} may not be fully ready after {max_wait} seconds")
+                        if evicted_count > 0:
+                            logger.warning(
+                                f"Service {service_name} not ready after {max_wait}s, "
+                                f"but detected {evicted_count} eviction(s)"
+                            )
+                            logger.info("KServe will continue retrying in the background")
+                        else:
+                            logger.warning(f"Service {service_name} may not be fully ready after {max_wait} seconds")
 
                     # 서비스 URL 정보 생성
                     internal_url = f"http://{service_name}.{namespace}.svc.cluster.local"
@@ -429,7 +495,14 @@ class WorkflowExecutor:
 
                     config_dict = json.loads(config)
 
-                    deployment_status = "deployed" if service_ready else "deploying"
+                    # 상태 결정 (evicted 포함)
+                    if service_ready:
+                        deployment_status = "deployed"
+                    elif evicted_count > 0:
+                        deployment_status = "deploying"  # Evicted 후 재시도 중
+                        logger.info(f"Setting status to 'deploying' due to {evicted_count} eviction(s)")
+                    else:
+                        deployment_status = "deploying"  # 아직 배포 중
 
                     # DB 업데이트를 위해 Backend API 호출
                     try:
@@ -460,13 +533,21 @@ class WorkflowExecutor:
                                 f"components/{component_id}/deployment-status"
                             )
 
+                            # error_message 설정
+                            error_msg = None
+                            if evicted_count > 0:
+                                error_msg = (
+                                    f"Pod evicted {evicted_count} time(s) due to node resource shortage, "
+                                    f"KServe retrying..."
+                                )
+
                             update_payload = {
                                 "service_name": service_name,
                                 "service_hostname": service_hostname,
                                 "model_name": model_name,
                                 "status": deployment_status,
                                 "internal_url": internal_url,
-                                "error_message": None,
+                                "error_message": error_msg,
                             }
 
                             headers = {"Content-Type": "application/json"}
@@ -487,6 +568,24 @@ class WorkflowExecutor:
                         logger.error(f"Error updating deployment status in DB: {e}")
                         # DB 업데이트 실패해도 배포 자체는 성공이므로 계속 진행
 
+                    # 메시지 생성
+                    if service_ready:
+                        message = (
+                            f"Model deployed successfully. Access via gateway: {gateway_url} "
+                            f"with Host: {service_hostname}"
+                        )
+                    elif evicted_count > 0:
+                        message = (
+                            f"Model deployment in progress. Pod evicted {evicted_count} time(s) due to "
+                            f"node resource shortage. KServe is retrying automatically. "
+                            f"Service: {service_name}"
+                        )
+                    else:
+                        message = (
+                            f"Model deployment in progress. Service: {service_name}. "
+                            f"Check status at gateway: {gateway_url} with Host: {service_hostname}"
+                        )
+
                     result = {
                         "workflow_id": workflow_id,
                         "component_id": component_id,
@@ -497,10 +596,8 @@ class WorkflowExecutor:
                         "model_name": model_name,
                         "status": deployment_status,
                         "config": config_dict,
-                        "message": (
-                            f"Model deployed successfully. Access via gateway: {gateway_url} "
-                            f"with Host: {service_hostname}"
-                        ),
+                        "message": message,
+                        "evicted_count": evicted_count,  # 추가 정보
                     }
 
                     logger.info(f"Model deployment completed: {json.dumps(result)}")
@@ -581,6 +678,7 @@ class WorkflowExecutor:
                 rest_api_url=parameters.get("rest_api_url", ""),
                 restapi_username=parameters.get("restapi_username", ""),
                 restapi_password=parameters.get("restapi_password", ""),
+                infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
                 gpu_enabled=component.config.get("gpu_enabled", False) if component.config else False,
             )
@@ -673,8 +771,8 @@ class WorkflowExecutor:
             실행 ID
         """
         try:
-            # 실험 생성 또는 가져오기
-            experiment_name = f"workflow-{workflow.id}-experiments"
+            # 실험 생성 또는 가져오기 (환경변수의 KUBEFLOW_EXPERIMENT_NAME 사용)
+            experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
             experiment = self.kf_manager.get_experiment_by_name(experiment_name=experiment_name)
             if not experiment:
                 experiment = self.kf_manager.create_experiment(experiment_name)
@@ -763,8 +861,8 @@ class WorkflowExecutor:
 
             Compiler().compile(pipeline_func, pipeline_filename)
 
-            # 파이프라인 실행
-            experiment_name = f"workflow-{workflow_id}-cleanup"
+            # 파이프라인 실행 (환경변수의 KUBEFLOW_EXPERIMENT_NAME 사용)
+            experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
             experiment = self.kf_manager.get_experiment_by_name(experiment_name=experiment_name)
             if not experiment:
                 experiment = self.kf_manager.create_experiment(experiment_name)

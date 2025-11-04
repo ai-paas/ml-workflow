@@ -5,6 +5,9 @@ from enum import Enum
 from typing import Any, Optional
 
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
+from db.models.experiment import ExperimentModel
+from db.models.model import Model
+from db.models.service import Service, WorkflowComponent
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
 from repos.model import (
@@ -101,23 +104,153 @@ class ModelService:
         return result
 
     @staticmethod
-    def delete(db: Session, model_id: int):
-        try:
-            model_obj = model_repository.get(db, model_id)
-            run_id = model_obj.registry.run_id
-            artifact_path = model_obj.registry.artifact_path
-            s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "")
-            # 새로운 delete_model 메서드 사용 (기존 delete_transformers 대신)
-            ModelRegistry().delete_run_artifacts(run_id)
-            MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
+    def check_model_references(db: Session, model_id: int) -> dict:
+        """
+        모델이 참조되고 있는지 확인
 
-            model_registry_repository.delete(db, pk=model_obj.registry.id)
-            model_repository.delete(db, pk=model_id)
-            db.commit()
+        Returns:
+            dict: 참조 정보 {'has_references': bool, 'references': list}
+        """
+
+        references = []
+
+        # 1. Experiment에서 참조 확인
+        experiments = db.query(ExperimentModel).filter(ExperimentModel.reference_model_id == model_id).all()
+        if experiments:
+            references.append(
+                {
+                    "type": "experiment",
+                    "count": len(experiments),
+                    "items": [{"id": exp.id, "name": exp.name} for exp in experiments[:5]],  # 최대 5개만
+                }
+            )
+
+        # 2. WorkflowComponent에서 참조 확인
+        workflow_components = db.query(WorkflowComponent).filter(WorkflowComponent.model_id == model_id).all()
+        if workflow_components:
+            references.append(
+                {
+                    "type": "workflow_component",
+                    "count": len(workflow_components),
+                    "items": [
+                        {"id": wc.id, "name": wc.name, "workflow_id": wc.workflow_id} for wc in workflow_components[:5]
+                    ],
+                }
+            )
+
+        # 3. 다른 모델의 parent_model_id로 참조 확인 (자식 모델 확인)
+        child_models = db.query(Model).filter(Model.parent_model_id == model_id).all()
+        if child_models:
+            references.append(
+                {
+                    "type": "child_model",
+                    "count": len(child_models),
+                    "items": [{"id": m.id, "name": m.name} for m in child_models[:5]],
+                }
+            )
+
+        # 4. Service에서 참조 확인
+        services = db.query(Service).filter(Service.model_id == model_id).all()
+        if services:
+            references.append(
+                {
+                    "type": "service",
+                    "count": len(services),
+                    "items": [{"id": s.id, "name": s.name} for s in services[:5]],
+                }
+            )
+
+        return {"has_references": len(references) > 0, "references": references}
+
+    @staticmethod
+    def delete(db: Session, model_id: int):
+        """
+        모델 삭제 - 참조 확인 후 안전하게 삭제
+        """
+        try:
+            # 1. 모델 객체 가져오기
+            model_obj = model_repository.get(db, model_id)
+            if not model_obj:
+                raise ValueError(f"모델 ID {model_id}를 찾을 수 없습니다.")
+
+            # 2. 참조 관계 확인
+            ref_check = ModelService.check_model_references(db, model_id)
+            if ref_check["has_references"]:
+                ref_details = []
+                for ref in ref_check["references"]:
+                    ref_details.append(f"- {ref['type']}: {ref['count']}개")
+
+                raise RuntimeError(
+                    "모델을 삭제할 수 없습니다. 다음 항목에서 참조되고 있습니다:\n"
+                    + "\n".join(ref_details)
+                    + "\n\n참조하는 항목을 먼저 삭제하거나 수정해주세요."
+                )
+
+            # 3. MLflow 정보 미리 저장 (DB 삭제 전에 필요)
+            run_id = model_obj.registry.run_id if model_obj.registry else None
+            artifact_path = model_obj.registry.artifact_path if model_obj.registry else None
+            s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "") if artifact_path else None
+
+            # 4. 트랜잭션 시작 - MLflow/S3 삭제 후 DB 커밋
+            try:
+                # 4-1. DB 삭제 준비 (아직 커밋하지 않음)
+                # ModelRegistry는 CASCADE 설정으로 자동 삭제되지만 명시적으로 삭제
+                if model_obj.registry:
+                    model_registry_repository.delete(db, pk=model_obj.registry.id)
+
+                # Model 삭제 (아직 커밋 안됨)
+                model_repository.delete(db, pk=model_id)
+
+                # 4-2. MLflow/S3 삭제 시도
+                mlflow_deleted = False
+
+                # MLflow artifacts 삭제
+                if run_id:
+                    try:
+                        ModelRegistry().delete_run_artifacts(run_id)
+                        mlflow_deleted = True
+                    except Exception as mlflow_error:
+                        # MLflow 삭제 실패시 DB 롤백
+                        db.rollback()
+                        raise RuntimeError(f"MLflow 아티팩트 삭제 실패 (DB 변경사항 롤백됨): {str(mlflow_error)}")
+
+                # S3 폴더 삭제
+                if s3_artifact_path:
+                    try:
+                        MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
+                    except Exception as s3_error:
+                        # S3 삭제 실패 처리
+                        # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
+                        if mlflow_deleted:
+                            import warnings
+
+                            warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
+                            # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
+                        else:
+                            # MLflow도 삭제 안됐고 S3도 실패면 롤백
+                            db.rollback()
+                            raise RuntimeError(f"S3 폴더 삭제 실패 (DB 변경사항 롤백됨): {str(s3_error)}")
+
+                # 4-3. 모든 삭제가 성공하면 DB 커밋
+                db.commit()
+
+            except Exception as e:
+                # 이미 처리된 RuntimeError는 그대로 전달
+                if isinstance(e, RuntimeError):
+                    raise
+                # 예상치 못한 에러는 롤백 후 전달
+                db.rollback()
+                raise RuntimeError(f"모델 삭제 중 예상치 못한 오류 발생: {str(e)}")
+
+            return True
+
         except Exception as e:
+            # 이미 처리된 에러는 그대로 전달
+            if isinstance(e, (ValueError, RuntimeError)):
+                raise
+            # 예상치 못한 에러
             db.rollback()
-            raise RuntimeError(f"Model deletion failed: {str(e)}")
-        return True
+            raise RuntimeError(f"모델 삭제 중 오류 발생: {str(e)}")
 
     @staticmethod
     def load_transformers(model_uri: str):

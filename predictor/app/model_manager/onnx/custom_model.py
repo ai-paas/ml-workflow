@@ -6,8 +6,8 @@ from typing import IO
 import numpy as np
 import onnxruntime as ort
 import torch
-from logging_inference import logger
-from model_manager.base import BaseModelManager
+from app.logging_inference import logger
+from app.model_manager.base import BaseModelManager
 from PIL import Image
 from transformers import (
     AutoConfig,

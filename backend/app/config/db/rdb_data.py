@@ -36,6 +36,17 @@ MODEL_FORMAT_DATA_2 = [
     },
 ]
 
+MODEL_FORMAT_DATA_3 = [
+    {
+        "name": "tensorflow",
+        "description": "TensorFlow",
+    },
+    {
+        "name": "yolox",
+        "description": "YOLOX Object Detection",
+    },
+]
+
 MODEL_PROVIDER_DATA = [
     {
         "name": "Huggingface",

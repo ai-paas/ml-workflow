@@ -95,8 +95,8 @@ def register_model_component(
                 logger.error(f"실험 정보 조회 중 오류 발생: {e}")
                 return None
 
-        def get_model_name(self, model_id: int) -> Optional[str]:
-            """모델 ID로부터 모델 이름 조회"""
+        def get_model_info(self, model_id: int) -> Optional[Dict[str, Any]]:
+            """모델 ID로부터 모델 정보 조회 (name, format_id)"""
             try:
                 response = self._session.get(
                     f"{self.base_url}/api/v1/models/{model_id}",
@@ -104,17 +104,23 @@ def register_model_component(
                 )
 
                 if response.status_code == 200:
-                    return response.json().get("name")
+                    data = response.json()
+                    # format_info 객체에서 id 추출
+                    format_id = None
+                    if data.get("format_info"):
+                        format_id = data["format_info"].get("id")
+
+                    return {"name": data.get("name"), "format_id": format_id}
                 else:
                     logger.error(f"모델 조회 실패: {response.status_code} - {response.text}")
                     return None
 
             except Exception as e:
-                logger.error(f"모델 이름 조회 중 오류 발생: {e}")
+                logger.error(f"모델 정보 조회 중 오류 발생: {e}")
                 return None
 
         def get_model_metadata(self) -> Dict[str, int]:
-            """모델 메타데이터 조회 (provider, type, format ID)"""
+            """모델 메타데이터 조회 (provider, type ID)"""
             metadata = {}
 
             try:
@@ -139,17 +145,6 @@ def register_model_component(
                     metadata["type_id"] = type_response.json().get("id")
                 else:
                     raise Exception(f"Type 조회 실패: {type_response.text}")
-
-                # Format 조회
-                format_response = self._session.get(
-                    f"{self.base_url}/api/v1/models/formats",
-                    headers=self._get_headers(),
-                    params={"format_name": "pytorch"},
-                )
-                if format_response.status_code == 200:
-                    metadata["format_id"] = format_response.json().get("id")
-                else:
-                    raise Exception(f"Format 조회 실패: {format_response.text}")
 
                 return metadata
 
@@ -238,18 +233,52 @@ def register_model_component(
             raise Exception("실험의 reference_model_id를 조회할 수 없습니다.")
 
         # 아티팩트 다운로드
-        download_uuid_path = str(uuid.uuid4())
         local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id)
 
         try:
             # 체크포인트 파일 찾기
             original_model_path = find_checkpoint_file(local_artifact_path)
 
-            # reference_model의 name 조회
-            reference_model_name = api_client.get_model_name(reference_model_id)
+            # reference_model의 정보 조회 (name, format_id)
+            reference_model_info = api_client.get_model_info(reference_model_id)
+            if not reference_model_info:
+                raise Exception(f"모델 ID {reference_model_id}의 정보를 조회할 수 없습니다.")
+
+            reference_model_name = reference_model_info.get("name")
+            reference_format_id = reference_model_info.get("format_id")
+
             if not reference_model_name:
                 raise Exception(f"모델 ID {reference_model_id}의 이름을 조회할 수 없습니다.")
 
+            # format_id가 없는 경우 기본값 설정 (pytorch 또는 yolox 등)
+            if not reference_format_id:
+                logger.warning(
+                    f"모델 ID {reference_model_id}의 format_id를 조회할 수 없습니다. 기본값으로 pytorch 사용"
+                )
+                # 모델 이름으로 format 유추
+                if "yolox" in reference_model_name.lower():
+                    # YOLOX 모델인 경우
+                    format_response = api_client._session.get(
+                        f"{api_client.base_url}/api/v1/models/formats",
+                        headers=api_client._get_headers(),
+                        params={"format_name": "yolox"},
+                    )
+                    if format_response.status_code == 200:
+                        reference_format_id = format_response.json().get("id")
+                else:
+                    # 기본값으로 pytorch 사용
+                    format_response = api_client._session.get(
+                        f"{api_client.base_url}/api/v1/models/formats",
+                        headers=api_client._get_headers(),
+                        params={"format_name": "pytorch"},
+                    )
+                    if format_response.status_code == 200:
+                        reference_format_id = format_response.json().get("id")
+
+                if not reference_format_id:
+                    raise Exception("기본 format_id도 조회할 수 없습니다.")
+
+            reference_model_name = reference_model_name.replace("/", "-")
             # 파일명을 reference_model_name.pth로 변경
             model_dir = os.path.dirname(original_model_path)
             new_model_filename = f"{reference_model_name}.pth"
@@ -261,23 +290,25 @@ def register_model_component(
 
             # MLflow에 모델 등록
             with mlflow.start_run(run_name=f"{uuid.uuid4()}-model") as run:
-                mlflow.log_artifact(local_path=new_model_path, artifact_path=download_uuid_path, run_id=run.info.run_id)
+                mlflow.log_artifact(
+                    local_path=new_model_path, artifact_path=reference_model_name, run_id=run.info.run_id
+                )
 
-                # 모델 메타데이터 조회
+                # 모델 메타데이터 조회 (provider, type만 조회)
                 metadata = api_client.get_model_metadata()
 
-                # 모델 데이터 준비
+                # 모델 데이터 준비 (format_id는 reference_model의 것을 사용)
                 model_data = {
                     "name": train_model_name,
                     "description": description,
                     "provider_id": metadata["provider_id"],
                     "type_id": metadata["type_id"],
-                    "format_id": metadata["format_id"],
+                    "format_id": reference_format_id,  # reference_model의 format_id 사용
                     "parent_model_id": parent_model_id,
                     "model_registry_schema": json.dumps(
                         {
-                            "artifact_path": run.info.artifact_uri,
-                            "uri": "",
+                            "artifact_path": f"{run.info.artifact_uri}/{reference_model_name}",
+                            "uri": reference_model_name,
                             "run_id": run.info.run_id,
                         }
                     ),

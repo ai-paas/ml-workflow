@@ -341,7 +341,7 @@ def clone_from_template(
 def update_workflow_template(
     *,
     db: Session = SessionDepends,
-    template_id: int,
+    template_id: str,
     template_data: WorkflowUpdateRequest,
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -364,7 +364,7 @@ def update_workflow_template(
 
 @router.delete("/templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_workflow_template(
-    *, db: Session = SessionDepends, template_id: int, current_user: UserSchema = Depends(get_current_user)
+    *, db: Session = SessionDepends, template_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
     워크플로우 템플릿 삭제

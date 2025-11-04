@@ -12,6 +12,7 @@ from .rdb_data import (
     HYPERPARAMETER_TYPE_DATA,
     MODEL_FORMAT_DATA,
     MODEL_FORMAT_DATA_2,
+    MODEL_FORMAT_DATA_3,
     MODEL_PROVIDER_DATA,
     MODEL_TYPE_DATA,
     USER_DATA,
@@ -70,6 +71,16 @@ def add_model_format_2(db) -> None:
     print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA_2)}개 데이터 삽입 완료")
 
 
+def add_model_format_3(db) -> None:
+    """
+    TensorFlow와 YOLOX 모델 포맷 데이터를 추가합니다.
+    Args:
+        db: DB 세션
+    """
+    db.execute(insert(ModelFormat.__table__).values(MODEL_FORMAT_DATA_3))
+    print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA_3)}개 데이터 삽입 완료")
+
+
 def initialize_hyperparameter_type(db) -> None:
     """
     하이퍼파라미터 타입 데이터를 초기화합니다.
@@ -105,9 +116,9 @@ def main():
     parser.add_argument(
         "--version",
         "-v",
-        choices=["v1", "v2", "v3", "all"],
+        choices=["v1", "v2", "v3", "v4", "all"],
         default="all",
-        help="초기화할 데이터 버전을 선택합니다 (v1, v2, all)",
+        help="초기화할 데이터 버전을 선택합니다 (v1, v2, v3, v4, all)",
     )
 
     args = parser.parse_args()
@@ -130,6 +141,11 @@ def main():
             print("V3 데이터 초기화 중...")
             initialize_hyperparameter_type(db)
             print("V3 데이터 초기화 완료")
+
+        if args.version in ["v4", "all"]:
+            print("V4 데이터 초기화 중...")
+            add_model_format_3(db)
+            print("V4 데이터 초기화 완료")
 
         db.commit()
         print("데이터 초기화가 완료되었습니다.")

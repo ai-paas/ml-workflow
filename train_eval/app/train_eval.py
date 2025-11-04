@@ -374,6 +374,11 @@ class CustomTrainModel:
 
             dist_url = "auto" if args.dist_url is None else args.dist_url
             with mlflow.start_run(run_name=self.train_name) as run:
+                # 클래스 수를 MLflow에 로깅
+                mlflow.log_param("num_classes", num_classes)
+                mlflow.log_param("model_architecture", matched_exp_name)
+                logger.info(f"MLflow에 num_classes={num_classes} 로깅 완료")
+
                 # train.py의 launch 실행
                 os.environ["MLFLOW_NESTED_RUN"] = "TRUE"
                 os.environ["MLFLOW_RUN_ID"] = run.info.run_id
