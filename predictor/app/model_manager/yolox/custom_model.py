@@ -185,20 +185,18 @@ class YoloxModelManager(BaseModelManager):
             orig_h, orig_w = image.shape[:2]
             original_size = (orig_w, orig_h)  # (width, height)
 
-            # 모델 입력 크기
-            model_h, model_w = image_size  # (height, width)
+            # 전처리 - YOLOX의 preproc 사용
+            # preproc이 직접 ratio를 계산하고 반환함
+            img, ratio = preproc(image, input_size=image_size)
 
-            # 전처리 (YOLOX의 preproc 사용 - 리사이즈 + 패딩)
-            img, _ = preproc(image, input_size=image_size)
-
-            # 가로/세로 스케일 따로 계산
-            scale_x = model_w / orig_w  # 가로 스케일
-            scale_y = model_h / orig_h  # 세로 스케일
+            # 디버깅 정보
+            logger.info(f"원본 이미지: {orig_w}x{orig_h}, 모델입력: {image_size}, ratio: {ratio}")
 
             # 텐서로 변환
             img = torch.from_numpy(img).to(self.device).unsqueeze(0).float()
 
-            return img, scale_x, scale_y, original_size
+            # YOLOX는 aspect ratio를 유지하므로 같은 ratio 사용
+            return img, ratio, original_size
 
         except Exception as e:
             logger.error(f"이미지 전처리 중 오류 발생: {e}")
@@ -230,17 +228,11 @@ class YoloxModelManager(BaseModelManager):
                 image_size = (test_size, test_size)  # (H, W)
 
             # 데이터 전처리
-            img_tensor, scale_x, scale_y, original_size = self.preprocess_data(data, image_size)
+            img_tensor, ratio, original_size = self.preprocess_data(data, image_size)
 
             # 모델 추론
             with torch.no_grad():
                 prediction_result = self.model(img_tensor)
-
-                # YOLOX 데모 코드처럼 decoder 적용 (있는 경우)
-                if hasattr(self.model, "head") and hasattr(self.model.head, "decode_outputs"):
-                    prediction_result = self.model.head.decode_outputs(
-                        prediction_result, dtype=prediction_result.type()
-                    )
 
             # 후처리
             num_classes = getattr(self.exp, "num_classes", len(COCO_CLASSES))
@@ -265,12 +257,36 @@ class YoloxModelManager(BaseModelManager):
             output = original_predictions.cpu()
             bboxes = output[:, 0:4].clone()  # 모델 출력 좌표
 
-            # bbox 좌표 변환 (단순 비율 적용)
-            # x1, x2는 가로 스케일로
-            # y1, y2는 세로 스케일로
+            # 디버깅: 변환 전 bbox와 ratio 확인
             if len(bboxes) > 0:
-                bboxes[:, [0, 2]] /= scale_x  # x1, x2
-                bboxes[:, [1, 3]] /= scale_y  # y1, y2
+                logger.info(f"변환 전 bbox 샘플 (640x640 좌표): {bboxes[0].tolist()}")
+                logger.info(f"적용할 ratio: {ratio}")
+                logger.info(f"원본 이미지 크기: {original_size}")
+
+            # bbox 좌표 역변환 (640x640 → 원본 이미지 좌표계)
+            # preproc이 적용한 변환의 역과정:
+            # - 패딩은 좌상단 정렬이므로 무시됨
+            # - ratio로 나누면 원본 좌표로 복원
+            if len(bboxes) > 0:
+                if ratio == 0:
+                    logger.error(f"ERROR: ratio가 0입니다! 원본: {original_size}, 모델입력: {image_size}")
+                    # ratio가 0이면 변환 불가능
+                    return {
+                        "predictions": [],
+                        "image_info": {
+                            "original_size": {"width": original_size[0], "height": original_size[1]},
+                            "model_input_size": {"width": image_size[1], "height": image_size[0]},
+                        },
+                        "error": "Invalid ratio calculation",
+                    }
+                elif ratio < 0.001:
+                    logger.warning(f"WARNING: ratio가 매우 작습니다: {ratio}")
+
+                bboxes /= ratio
+
+                # 변환 후 확인
+                if len(bboxes) > 0:
+                    logger.info(f"변환 후 bbox 샘플 (원본 좌표): {bboxes[0].tolist()}")
 
             cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]
@@ -298,11 +314,20 @@ class YoloxModelManager(BaseModelManager):
                     # 그 외의 경우 클래스 인덱스 표시
                     label = f"class_{cls_idx}"
 
+                # NaN/Infinity 체크 (JSON 변환 오류 방지)
+                score_value = float(score.item())
+                if not all(np.isfinite(v) for v in [score_value, x1, y1, x2, y2]):
+                    logger.warning(
+                        f"Skipping detection with non-finite values: score={score_value}, "
+                        f"bbox=[{x1}, {y1}, {x2}, {y2}]"
+                    )
+                    continue
+
                 predictions.append(
                     {
-                        "score": float(score.item()),
+                        "score": score_value,
                         "label": label,
-                        "box": [x1, y1, x2, y2],  # [x1, y1, x2, y2]
+                        "box": [float(x1), float(y1), float(x2), float(y2)],  # 명시적으로 float 변환
                     }
                 )
 
