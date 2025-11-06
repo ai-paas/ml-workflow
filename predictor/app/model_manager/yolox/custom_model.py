@@ -263,30 +263,49 @@ class YoloxModelManager(BaseModelManager):
                 logger.info(f"적용할 ratio: {ratio}")
                 logger.info(f"원본 이미지 크기: {original_size}")
 
-            # bbox 좌표 역변환 (640x640 → 원본 이미지 좌표계)
-            # preproc이 적용한 변환의 역과정:
-            # - 패딩은 좌상단 정렬이므로 무시됨
-            # - ratio로 나누면 원본 좌표로 복원
+            # bbox 좌표 보정 - 패딩으로 인한 짧은 변의 왜곡 복원
+            # 정사각형으로 만들면서 압축된 짧은 변의 bbox를 원래 비율로 복원
+
             if len(bboxes) > 0:
-                if ratio == 0:
-                    logger.error(f"ERROR: ratio가 0입니다! 원본: {original_size}, 모델입력: {image_size}")
-                    # ratio가 0이면 변환 불가능
-                    return {
-                        "predictions": [],
-                        "image_info": {
-                            "original_size": {"width": original_size[0], "height": original_size[1]},
-                            "model_input_size": {"width": image_size[1], "height": image_size[0]},
-                        },
-                        "error": "Invalid ratio calculation",
-                    }
-                elif ratio < 0.001:
-                    logger.warning(f"WARNING: ratio가 매우 작습니다: {ratio}")
+                # 원본 이미지 크기
+                orig_w, orig_h = original_size
 
-                bboxes /= ratio
+                # 원본 이미지의 가로/세로 비율 계산
+                # 짧은 변 / 긴 변의 비율
+                if orig_w > orig_h:
+                    # 가로가 더 긴 경우 (예: 1920x1080)
+                    aspect_ratio = orig_h / orig_w  # 1080/1920 = 0.5625
+                    is_width_longer = True
+                    logger.info(f"가로가 더 긴 이미지: {orig_w}x{orig_h}, 비율: {aspect_ratio:.4f}")
+                else:
+                    # 세로가 더 긴 경우 (예: 1080x1920)
+                    aspect_ratio = orig_w / orig_h  # 1080/1920 = 0.5625
+                    is_width_longer = False
+                    logger.info(f"세로가 더 긴 이미지: {orig_w}x{orig_h}, 비율: {aspect_ratio:.4f}")
 
-                # 변환 후 확인
+                # 디버깅 정보
+                logger.info(f"변환 전 bbox 샘플: {bboxes[0].tolist() if len(bboxes) > 0 else 'N/A'}")
+
+                # 짧은 변의 bbox 좌표를 1/비율로 복원
+                restoration_factor = 1.0 / aspect_ratio if aspect_ratio > 0 else 1.0
+
+                if is_width_longer:
+                    # 가로가 더 긴 경우: 세로(y) 좌표 복원
+                    bboxes[:, [1, 3]] *= restoration_factor  # y1, y2에 1/비율 적용
+                    logger.info(f"세로(y) 좌표에 {restoration_factor:.4f} 적용")
+                else:
+                    # 세로가 더 긴 경우: 가로(x) 좌표 복원
+                    bboxes[:, [0, 2]] *= restoration_factor  # x1, x2에 1/비율 적용
+                    logger.info(f"가로(x) 좌표에 {restoration_factor:.4f} 적용")
+
+                # 경계값 클리핑 (안전장치)
+                bboxes[:, [0, 2]] = torch.clamp(bboxes[:, [0, 2]], min=0, max=orig_w)  # x1, x2
+                bboxes[:, [1, 3]] = torch.clamp(bboxes[:, [1, 3]], min=0, max=orig_h)  # y1, y2
+
+                # 최종 확인
                 if len(bboxes) > 0:
-                    logger.info(f"변환 후 bbox 샘플 (원본 좌표): {bboxes[0].tolist()}")
+                    logger.info(f"최종 bbox (복원된 좌표): {bboxes[0].tolist()}")
+                    logger.info(f"클리핑 범위: x=[0, {orig_w}], y=[0, {orig_h}]")
 
             cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]

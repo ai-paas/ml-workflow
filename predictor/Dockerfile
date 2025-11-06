@@ -16,6 +16,20 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install --no-cache-dir pipenv
 
 
+# Install dependencies without unattended-upgrades
+RUN apt-get update && apt-get install -y wget \
+    cmake && \
+    wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    rm cuda-keyring_1.1-1_all.deb
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcudnn9-cuda-12 \
+    libcudnn9-dev-cuda-12 \
+    libcusparselt0 \
+    && rm -rf /var/lib/apt/lists/*
+
+
 # Copy only the Pipfile and Pipfile.lock to leverage Docker cache
 COPY predictor/Pipfile predictor/Pipfile.lock ./
 
@@ -25,6 +39,7 @@ RUN pipenv install --deploy --system
 
 # Copy YOLOX folder for installation
 COPY YOLOX ./YOLOX
+RUN cd YOLOX && pip install --no-build-isolation --use-pep517 -v -e .
 
 # Final stage - 실행 환경
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
@@ -67,7 +82,7 @@ COPY ./predictor/ .
 COPY YOLOX ./YOLOX
 
 # YOLOX를 Python 패키지로 설치 (editable install이므로 final stage에서도 필요)
-RUN cd YOLOX && pip install --no-build-isolation --use-pep517 -v -e .
+
 
 # PYTHONPATH 설정 (app 모듈과 YOLOX 모듈 찾기 위해)
 ENV PYTHONPATH=/app
