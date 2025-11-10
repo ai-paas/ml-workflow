@@ -22,7 +22,7 @@ class WorkflowExecutor:
 
     def __init__(self, db: Session):
         self.db = db
-        self.kf_manager = None
+        self.kf_manager = KubeflowManager()
         self.deployed_services = {}  # component_id -> inference_service_name
 
     def execute_workflow(self, workflow: Workflow, parameters: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -40,8 +40,7 @@ class WorkflowExecutor:
         if parameters is None:
             parameters = {}
 
-        # 초기화
-        self.kf_manager = KubeflowManager()
+        # kf_manager는 이미 __init__에서 초기화됨
 
         # MLflow 설정을 parameters에 추가
         parameters["mlflow_tracking_uri"] = settings.MLFLOW_TRACKING_URI
@@ -883,9 +882,7 @@ class WorkflowExecutor:
             삭제 결과 정보
         """
         try:
-            # 초기화
-            if not self.kf_manager:
-                self.kf_manager = KubeflowManager()
+            # kf_manager는 이미 __init__에서 초기화됨
 
             logger.info(f"Creating cleanup pipeline for workflow {workflow_id}")
 
@@ -1077,14 +1074,30 @@ class WorkflowExecutor:
         """
         워크플로우 실행 상태 조회 (DB 기반)
 
-        kserve_deployments 테이블의 정보를 기반으로 상태를 반환합니다.
-        Kubernetes를 직접 조회하지 않습니다.
+        워크플로우의 기본 상태와 배포된 모델들의 상태를 조회합니다.
+        kserve_deployments 테이블의 정보를 기반으로 상태를 반환하며,
+        Kubernetes나 Kubeflow를 직접 조회하지 않습니다.
 
         Args:
-            workflow: 워크플로우
+            workflow (Workflow): 상태를 조회할 워크플로우 객체
 
         Returns:
-            상태 정보
+            Dict[str, Any]: 워크플로우 상태 정보
+                - workflow_id (str): 워크플로우 UUID
+                - status (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
+                - kubeflow_run_id (str, optional): Kubeflow 파이프라인 실행 ID
+                - deployed_models (List[Dict]): 배포된 모델 목록
+                    - 각 항목은 KServeDeploymentService.get_deployed_models()의 반환 형식과 동일
+
+        Process:
+            1. 워크플로우 기본 정보 수집 (id, status, kubeflow_run_id)
+            2. KServeDeploymentService.get_deployed_models()로 배포 정보 조회
+            3. 결과 반환
+
+        Note:
+            - 모든 조회는 DB 기반으로 수행됩니다
+            - kubeflow_run_id는 참조용으로만 포함되며, 실제 파이프라인 상태는 조회하지 않습니다
+            - 배포 상태는 kserve_deployments 테이블의 정보를 기반으로 합니다
         """
         from services.kserve_deployment import KServeDeploymentService
 
@@ -1095,15 +1108,7 @@ class WorkflowExecutor:
             "deployed_models": [],
         }
 
-        # Kubeflow 실행 상태 확인
-        if workflow.kubeflow_run_id and self.kf_manager:
-            try:
-                run = self.kf_manager.kfp_client.get_run(workflow.kubeflow_run_id)
-                status["kubeflow_status"] = run.status
-            except Exception as e:
-                logger.error(f"Failed to get run status: {str(e)}")
-
-        # ✅ DB 기반 배포 상태 조회 (kserve_deployments 테이블)
+        # DB 기반 배포 상태 조회 (kserve_deployments 테이블)
         if self.db:
             try:
                 deployed_models = KServeDeploymentService.get_deployed_models(

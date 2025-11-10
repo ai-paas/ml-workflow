@@ -1489,32 +1489,64 @@ def get_workflow_execution_status(
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **status** (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
-    - **kubeflow_run_id** (str): Kubeflow 실행 ID
-    - **kubeflow_status** (str): Kubeflow 파이프라인 상태
-        - "PENDING": 대기중
-        - "RUNNING": 실행중
-        - "SUCCEEDED": 성공
-        - "FAILED": 실패
-        - "SKIPPED": 건너뛰
-        - "ERROR": 오류
-    - **deployment_status** (List[dict]): 각 모델 배포 상태
-        - component_id (str): 컴포넌트 ID
-        - model_name (str): 모델 이름
-        - status (str): 배포 상태 (PENDING/DEPLOYED/FAILED/DELETED)
-        - service_name (str): KServe 서비스 이름
-        - deployed_at (datetime): 배포 시각
-        - error_message (str): 오류 메시지 (실패 시)
-    - **error** (str): 오류 메시지 (상태 조회 실패 시)
+        - `str(workflow.id)`로 변환된 값
+    - **status** (str): 워크플로우 상태
+        - "DRAFT": 임시저장 상태 (아직 실행되지 않음)
+        - "ACTIVE": 활성 상태 (배포 완료, 실행 가능)
+        - "ERROR": 오류 발생 상태 (실행 실패 또는 배포 오류)
+    - **kubeflow_run_id** (str, optional): Kubeflow 파이프라인 실행 ID
+        - 워크플로우가 실행된 경우에만 포함
+        - 실행 전이면 null
+        - 참조용으로만 포함되며, 실제 파이프라인 상태는 조회하지 않음
+    - **deployed_models** (List[dict]): 배포된 모델 목록
+        - 각 항목은 다음 필드를 포함:
+        - **component_id** (str): 컴포넌트 UUID
+            - 워크플로우 컴포넌트의 고유 ID
+        - **service_name** (str): KServe InferenceService 이름
+            - Kubernetes 리소스 이름 (DNS 1035 규칙 준수)
+        - **service_hostname** (str): KServe 서비스 호스트명
+            - Istio Virtual Service 라우팅에 사용
+            - 형식: `{service_name}.{namespace}.example.com`
+        - **model_name** (str): 컴포넌트 이름
+            - 워크플로우 컴포넌트의 표시명 (사용자가 지정한 이름)
+        - **sanitized_model_name** (str): 정제된 모델 이름
+            - DNS 규칙에 맞게 변환된 모델 이름 (슬래시가 하이픈으로 변경됨)
+            - KServe 엔드포인트에서 실제로 사용되는 이름
+            - `model_name`과는 다를 수 있음 (model_name은 컴포넌트 이름, sanitized_model_name은 실제 배포된 모델 이름)
+        - **model_id** (int, optional): 모델 ID
+            - 컴포넌트에 연결된 모델의 ID
+            - MODEL 타입 컴포넌트인 경우에만 포함
+        - **internal_url** (str, optional): 내부 접근 URL
+            - 클러스터 내부에서 접근 가능한 URL
+            - 형식: `http://{service_name}.{namespace}.svc.cluster.local`
+        - **gateway_url** (str): 게이트웨이 URL
+            - 외부에서 접근 가능한 KServe Gateway 엔드포인트 URL
+        - **status** (str): 배포 상태
+            - 가능한 값:
+                - "DEPLOYING": 배포 중
+                - "DEPLOYED": 배포 완료
+                - "FAILED": 배포 실패
+                - "DELETED": 삭제됨
+        - **deployed_at** (str, optional): 배포 시각
+            - ISO 8601 형식의 문자열
+            - 배포 완료 시 기록됨 (DEPLOYED 상태인 경우)
+        - **error_message** (str, optional): 오류 메시지
+            - 배포 실패 시 오류 내용
+    - **error** (str, optional): 상태 조회 실패 시 오류 메시지
+        - 정상 조회 시에는 포함되지 않음
 
     ## Notes
-    - 워크플로우가 실행되지 않았다면 kubeflow_status는 null
-    - deployment_status는 MODEL 컴포넌트가 있는 경우만 포함
+    - 워크플로우가 실행되지 않았다면 `kubeflow_run_id`는 null
+    - `deployed_models`는 MODEL 타입 컴포넌트가 있는 경우만 포함
+    - 모든 조회는 DB 기반으로 수행되며, Kubernetes나 Kubeflow를 직접 조회하지 않음
+    - 배포 상태는 `kserve_deployments` 테이블의 정보를 기반으로 함
+    - `deployed_models` 조회 실패 시에도 에러를 발생시키지 않고 빈 리스트로 처리됨
 
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
     - 500: 상태 조회 중 오류 발생
+        - 이 경우 `error` 필드가 포함된 응답이 반환될 수 있음
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 

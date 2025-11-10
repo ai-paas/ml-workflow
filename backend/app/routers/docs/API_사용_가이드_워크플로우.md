@@ -239,7 +239,6 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
   - `workflow_id`: 워크플로우 UUID
   - `status`: 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
   - `kubeflow_run_id`: Kubeflow 실행 ID
-  - `kubeflow_status`: 파이프라인 상태 (PENDING/RUNNING/SUCCEEDED/FAILED)
   - `deployment_status`: 각 모델의 배포 상태 리스트
     - `component_id`: 컴포넌트 ID (추론 API에서 사용 가능)
 
