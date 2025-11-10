@@ -144,8 +144,15 @@ class APIClient:
         category: Optional[str] = None,
         page: Optional[int] = None,
         page_size: Optional[int] = None,
-    ) -> List[Dict]:
-        """워크플로우 템플릿 목록 조회"""
+    ) -> Dict:
+        """워크플로우 템플릿 목록 조회
+
+        Returns:
+            {
+                "total": int,
+                "items": List[Dict]  # 템플릿 목록
+            }
+        """
         params = {}
         if category:
             params["category"] = category
@@ -158,6 +165,35 @@ class APIClient:
     def get_workflow_template(self, template_id: str) -> Dict:
         """워크플로우 템플릿 상세 조회"""
         return self._get(f"/api/v1/workflows/templates/{template_id}")
+
+    def create_workflow_template(
+        self,
+        name: str,
+        workflow_definition: Optional[Dict] = None,
+        description: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> Dict:
+        """워크플로우 템플릿 생성
+
+        Args:
+            name: 템플릿 이름 (필수)
+            workflow_definition: 워크플로우 정의 (선택)
+                - components: 컴포넌트 목록 (START, END, MODEL)
+                - connections: 컴포넌트 간 연결 정보
+            description: 템플릿 설명 (선택)
+            category: 템플릿 카테고리 (선택)
+
+        Returns:
+            생성된 템플릿 정보
+        """
+        data = {"name": name}
+        if description:
+            data["description"] = description
+        if category:
+            data["category"] = category
+        if workflow_definition:
+            data["workflow_definition"] = workflow_definition
+        return self._post("/api/v1/workflows/templates", data=data)
 
     def clone_from_template(self, template_id: str, workflow_name: str, service_id: Optional[int] = None) -> Dict:
         """템플릿으로부터 워크플로우 생성"""
@@ -255,7 +291,7 @@ class APIClient:
 
         Args:
             workflow_id: 워크플로우 ID (path parameter)
-            component_id: 컴포넌트 ID (query parameter)
+            component_id: 컴포넌트 ID (path parameter)
             image_path: 이미지 파일 경로
 
         Returns:
@@ -270,17 +306,13 @@ class APIClient:
             files = {"image": ("image.jpg", f, "image/jpeg")}
 
             # multipart/form-data 요청
-            # component_id는 쿼리 파라미터로 전달
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/inference"
+            # component_id는 경로 파라미터로 전달
+            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/models/{component_id}/inference"
             headers = {"Authorization": f"Bearer {self.token}"}
-
-            # 쿼리 파라미터 구성
-            params = {"component_id": component_id}
 
             response = requests.post(
                 url,
                 headers=headers,
-                params=params,
                 files=files,
             )
             response.raise_for_status()

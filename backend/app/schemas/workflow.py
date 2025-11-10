@@ -48,7 +48,6 @@ class ComponentCreateRequest(BaseModel):
 
     name: str
     type: ComponentType
-    config: Optional[dict] = None
     model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
 
 
@@ -80,8 +79,6 @@ class ConnectionCreateRequest(BaseModel):
 
     source_component_type: ComponentType = Field(..., description="소스 컴포넌트 타입")
     target_component_type: ComponentType = Field(..., description="타겟 컴포넌트 타입")
-    connection_type: str = Field("DATA", description="연결 타입")
-    config: Optional[Dict[str, Any]] = None
 
 
 class ConnectionUpdateRequest(BaseModel):
@@ -129,8 +126,6 @@ class WorkflowCreateRequest(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     service_id: Optional[str] = None
-    is_template: bool = Field(False, description="템플릿 여부")
-    template_id: Optional[str] = Field(None, description="템플릿 ID (템플릿으로부터 생성시)")
     workflow_definition: Optional[WorkflowDefinition] = None
 
 
@@ -155,6 +150,16 @@ class WorkflowUpdateRequest(BaseModel):
     category: Optional[str] = None
     status: Optional[WorkflowStatus] = None
     service_id: Optional[str] = None
+    workflow_definition: Optional[WorkflowUpdateDefinition] = None
+
+
+class WorkflowTemplateUpdateRequest(BaseModel):
+    """워크플로우 템플릿 수정 요청 (service_id 제외)"""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[WorkflowStatus] = None
     workflow_definition: Optional[WorkflowUpdateDefinition] = None
 
 
@@ -256,10 +261,15 @@ class WorkflowListSchema(BaseModel):
 
 
 # ============= Template 스키마 =============
-class WorkflowTemplateCreateRequest(WorkflowCreateRequest):
+class WorkflowTemplateCreateRequest(BaseModel):
     """워크플로우 템플릿 생성 요청"""
 
-    is_template: Optional[bool] = Field(default=True, description="템플릿 여부 (기본값: True)")
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    workflow_definition: Optional[WorkflowDefinition] = None
+    # service_id와 template_id는 템플릿에 포함되지 않음
+    # 템플릿은 서비스에 연결되지 않으며, 다른 템플릿으로부터 복사하지 않음
 
 
 class WorkflowTemplateBriefSchema(WorkflowBaseSchema):

@@ -72,13 +72,17 @@ def create_model(
         - HuggingFace 모델인 경우: repository ID (예: "google/owlv2-base-patch16")
         - 커스텀 모델인 경우: 모델 식별자
     - **provider_id** (int, required): 모델 제공자 ID
-        - 1: huggingface
-        - 2: ollama
-        - 3: custom
+        - **중요**: `GET /api/v1/models/providers` API로 제공자 목록을 조회한 후, 해당 제공자의 `id` 값을 사용해야 합니다
+        - 예: `GET /api/v1/models/providers?provider_name=huggingface`로 조회하여 반환된 `id` 값 사용
+        - 하드코딩된 숫자 값(1, 2, 3 등)을 사용하지 마세요
     - **type_id** (int, required): 모델 타입 ID
-        - 예: Object Detection Model, Fine-tuned Model 등
+        - **중요**: `GET /api/v1/models/types` API로 타입 목록을 조회한 후, 해당 타입의 `id` 값을 사용해야 합니다
+        - 예: `GET /api/v1/models/types?type_name=ODM`로 조회하여 반환된 `id` 값 사용
+        - 하드코딩된 숫자 값을 사용하지 마세요
     - **format_id** (int, required): 모델 포맷 ID
-        - 예: transformers, sentence-transformers, gguf, bge-m3 등
+        - **중요**: `GET /api/v1/models/formats` API로 포맷 목록을 조회한 후, 해당 포맷의 `id` 값을 사용해야 합니다
+        - 예: `GET /api/v1/models/formats?format_name=transformers`로 조회하여 반환된 `id` 값 사용
+        - 하드코딩된 숫자 값을 사용하지 마세요
     - **parent_model_id** (int, optional): 부모 모델 ID
         - 내부 시스템에서만 사용하는 파라미터
         - 프론트엔드에서는 전달하지 않아야 함
@@ -133,6 +137,8 @@ def create_model(
     - **updated_at** (datetime): 모델 수정 시각
 
     ## Notes
+    - **ID 값 조회**: `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API(`/providers`, `/types`, `/formats`)
+      를 먼저 호출하여 ID 값을 확인한 후 사용해야 합니다
     - HuggingFace 모델인 경우 provider_id가 huggingface의 ID와 일치해야 합니다
     - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, file이 필요합니다
     - 모델 이름에 "yolo"가 포함되면 자동으로 학습 가능 모델로 설정됩니다

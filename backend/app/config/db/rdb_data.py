@@ -49,7 +49,7 @@ MODEL_FORMAT_DATA_3 = [
 
 MODEL_PROVIDER_DATA = [
     {
-        "name": "Huggingface",
+        "name": "huggingface",
         "description": "huggingface",
     },
     {

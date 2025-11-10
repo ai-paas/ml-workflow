@@ -78,9 +78,8 @@ class WorkflowExecutor:
                 parameters=parameters,
             )
 
-            # 워크플로우 상태 업데이트
+            # 워크플로우 kubeflow_run_id만 업데이트 (상태는 파이프라인 완료 시 END 컴포넌트에서 업데이트)
             workflow.kubeflow_run_id = run_id
-            workflow.status = WorkflowStatus.ACTIVE
 
             # KServe 배포 정보 초기화
             from services.kserve_deployment import KServeDeploymentService
@@ -559,6 +558,30 @@ class WorkflowExecutor:
 
                             if response.status_code == 200:
                                 logger.info("Successfully updated deployment status in DB")
+
+                                # deployment-status 업데이트 성공 후 워크플로우 상태를 ACTIVE로 업데이트
+                                if service_ready and deployment_status == "deployed":
+                                    try:
+                                        workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                        workflow_update_data = {"status": "ACTIVE"}
+                                        workflow_update_response = requests.put(
+                                            workflow_update_url,
+                                            json=workflow_update_data,
+                                            headers=headers,
+                                            timeout=10,
+                                        )
+                                        if workflow_update_response.status_code == 200:
+                                            logger.info(f"Successfully updated workflow {workflow_id} status to ACTIVE")
+                                        else:
+                                            logger.warning(
+                                                f"Failed to update workflow status: "
+                                                f"{workflow_update_response.status_code} \
+                                                - {workflow_update_response.text}"
+                                            )
+                                    except Exception as workflow_update_error:
+                                        logger.error(
+                                            f"Error updating workflow status to ACTIVE: {workflow_update_error}"
+                                        )
                             else:
                                 logger.warning(
                                     f"Failed to update deployment status: {response.status_code} - {response.text}"
@@ -687,9 +710,19 @@ class WorkflowExecutor:
         elif component.type == ComponentType.END:
 
             @dsl.component(base_image="python:3.10-slim", packages_to_install=["requests"])
-            def end_component(workflow_id: str, component_id: str, input_data: str = "{}", config: str = "{}") -> str:
+            def end_component(
+                workflow_id: str,
+                component_id: str,
+                input_data: str = "{}",
+                config: str = "{}",
+                rest_api_url: str = "",
+                restapi_username: str = "",
+                restapi_password: str = "",
+            ) -> str:
                 import json
                 import logging
+
+                import requests
 
                 logging.info(f"Ending workflow {workflow_id}, component {component_id}")
 
@@ -697,6 +730,7 @@ class WorkflowExecutor:
                 config_dict = json.loads(config)
 
                 # 결과 처리 로직
+                # 참고: 워크플로우 상태는 MODEL component에서 배포 완료 시 ACTIVE로 업데이트됨
                 result = {
                     "workflow_id": workflow_id,
                     "component_id": component_id,
@@ -712,6 +746,9 @@ class WorkflowExecutor:
                 component_id=component.id,
                 input_data="{}",  # 이전 태스크 출력 연결 필요
                 config=json.dumps(component.config or {}),
+                rest_api_url=parameters.get("rest_api_url", ""),
+                restapi_username=parameters.get("restapi_username", ""),
+                restapi_password=parameters.get("restapi_password", ""),
             )
 
         return None

@@ -204,11 +204,13 @@ ml_workflow_ui/
 - `authenticate(username, password)`: 로그인 및 토큰 획득
 
 #### 워크플로우 템플릿
-- `get_workflow_templates(category=None)`: 템플릿 목록 조회
-- `clone_from_template(template_id, workflow_name)`: 템플릿으로부터 워크플로우 생성
+- `get_workflow_templates(category=None, page=None, page_size=None)`: 템플릿 목록 조회
+- `get_workflow_template(template_id)`: 템플릿 상세 조회
+- `create_workflow_template(name, workflow_definition=None, description=None, category=None)`: 템플릿 생성
+- `clone_from_template(template_id, workflow_name, service_id=None)`: 템플릿으로부터 워크플로우 생성
 
 #### 워크플로우
-- `get_workflows(is_template=False, status=None)`: 워크플로우 목록 조회
+- `get_workflows(status=None, page=None, page_size=None)`: 워크플로우 목록 조회 (템플릿 제외)
 - `get_workflow(workflow_id)`: 특정 워크플로우 조회
 - `execute_workflow(workflow_id, parameters)`: 워크플로우 실행
 - `get_workflow_status(workflow_id)`: 실행 상태 조회

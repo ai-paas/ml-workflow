@@ -28,56 +28,41 @@ def create_detr_template(api_client: APIClient, model_id: int) -> dict:
     Returns:
         생성된 템플릿 정보
     """
-    template_data = {
-        "name": "DETR Object Detection Template",
-        "description": "facebook/detr-resnet-50 모델을 사용한 Object Detection 워크플로우 템플릿",
-        "category": "Object Detection",
-        "is_template": True,
-        "workflow_definition": {
-            "components": [
-                {
-                    "component_id": "start",
-                    "name": "Start",
-                    "type": "START",
-                    "config": {},
-                },
-                {
-                    "component_id": "detr_model",
-                    "name": "DETR Object Detection",
-                    "type": "MODEL",
-                    "model_id": model_id,
-                    "config": {
-                        "model_name": "facebook/detr-resnet-50",
-                        "task": "object-detection",
-                        "framework": "transformers",
-                    },
-                },
-                {
-                    "component_id": "end",
-                    "name": "End",
-                    "type": "END",
-                    "config": {},
-                },
-            ],
-            "connections": [
-                {
-                    "source_component_id": "start",
-                    "target_component_id": "detr_model",
-                    "connection_type": "DATA",
-                    "config": {},
-                },
-                {
-                    "source_component_id": "detr_model",
-                    "target_component_id": "end",
-                    "connection_type": "DATA",
-                    "config": {},
-                },
-            ],
-        },
+    workflow_definition = {
+        "components": [
+            {
+                "name": "시작 노드",
+                "type": "START",
+            },
+            {
+                "name": "DETR Object Detection",
+                "type": "MODEL",
+                "model_id": model_id,
+            },
+            {
+                "name": "종료 노드",
+                "type": "END",
+            },
+        ],
+        "connections": [
+            {
+                "source_component_type": "START",
+                "target_component_type": "MODEL",
+            },
+            {
+                "source_component_type": "MODEL",
+                "target_component_type": "END",
+            },
+        ],
     }
 
     # 템플릿 생성 API 호출
-    result = api_client._post("/api/v1/workflows/templates", data=template_data)
+    result = api_client.create_workflow_template(
+        name="DETR Object Detection Template",
+        description="facebook/detr-resnet-50 모델을 사용한 Object Detection 워크플로우 템플릿",
+        category="Object Detection",
+        workflow_definition=workflow_definition,
+    )
     return result
 
 

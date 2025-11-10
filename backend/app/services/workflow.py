@@ -13,6 +13,7 @@ from schemas.workflow import (
     WorkflowCreateInternal,
     WorkflowCreateRequest,
     WorkflowDefinition,
+    WorkflowTemplateCreateRequest,
     WorkflowUpdateDefinition,
     WorkflowUpdateInternal,
     WorkflowUpdateRequest,
@@ -33,17 +34,8 @@ class WorkflowService:
         creator_id: int,
         initial_status: WorkflowStatus = WorkflowStatus.DRAFT,
     ) -> Workflow:
-        """새로운 워크플로우 생성"""
+        """새로운 워크플로우 생성 (직접 생성만 지원, 템플릿으로부터 생성은 clone_from_template 사용)"""
         try:
-            # 템플릿으로부터 생성하는 경우
-            if workflow_data.template_id:
-                template = workflow_repository.get_with_relations(db, workflow_data.template_id)
-
-                if not template or not template.is_template:
-                    raise ValueError(f"Template {workflow_data.template_id} not found")
-
-                # 템플릿의 workflow_definition은 사용하지 않음 (components와 connections를 직접 복사)
-
             # workflow_definition은 DB에 저장하지 않고 컴포넌트/연결 생성에만 사용
             workflow_definition_dict = None
             workflow_data_dict = workflow_data.model_dump()
@@ -51,8 +43,11 @@ class WorkflowService:
                 workflow_definition_dict = workflow_data_dict.pop("workflow_definition")
 
             # WorkflowCreateInternal 사용 (status와 creator_id 포함, workflow_definition 제외)
+            # is_template은 항상 False (워크플로우 생성용)
+            # template_id는 None으로 설정 (템플릿으로부터 생성은 clone_from_template 사용)
+            workflow_data_dict["template_id"] = None
             workflow_internal = WorkflowCreateInternal(
-                **workflow_data_dict, status=initial_status, creator_id=creator_id
+                **workflow_data_dict, is_template=False, status=initial_status, creator_id=creator_id
             )
 
             # base의 create 메서드 사용 (DB 작업 포함)
@@ -111,8 +106,8 @@ class WorkflowService:
                 workflow_id=workflow_id,
                 source_component_id=source_component_id,
                 target_component_id=target_component_id,
-                connection_type=conn_data.connection_type,
-                config=conn_data.config,
+                connection_type="DATA",  # 기본값 사용
+                config=None,  # config는 사용하지 않음
             )
 
     @staticmethod
@@ -151,6 +146,10 @@ class WorkflowService:
         try:
             # 업데이트할 필드만 수정
             update_data = workflow_data.dict(exclude_unset=True)
+
+            # 템플릿인 경우 service_id는 수정할 수 없음
+            if workflow.is_template and "service_id" in update_data:
+                update_data.pop("service_id")
 
             # workflow_definition이 업데이트되면 컴포넌트와 연결도 업데이트
             if "workflow_definition" in update_data and update_data["workflow_definition"]:
@@ -231,11 +230,44 @@ class WorkflowService:
             raise
 
     @staticmethod
-    def create_workflow_template(db: Session, template_data: WorkflowCreateRequest, creator_id: int) -> Workflow:
+    def create_workflow_template(
+        db: Session, template_data: WorkflowTemplateCreateRequest, creator_id: int
+    ) -> Workflow:
         """워크플로우 템플릿 생성"""
-        template_data.is_template = True
-        template_data.service_id = None  # 템플릿은 서비스에 직접 연결되지 않음
-        return WorkflowService.create_workflow(db, template_data, creator_id)
+        try:
+            # workflow_definition은 DB에 저장하지 않고 컴포넌트/연결 생성에만 사용
+            workflow_definition_dict = None
+            template_data_dict = template_data.model_dump()
+            if template_data_dict.get("workflow_definition"):
+                workflow_definition_dict = template_data_dict.pop("workflow_definition")
+
+            # 템플릿은 서비스에 직접 연결되지 않음 (service_id와 template_id는 스키마에 포함되지 않음)
+            template_data_dict["service_id"] = None
+            template_data_dict["template_id"] = None
+
+            # WorkflowCreateInternal 사용 (status와 creator_id 포함, workflow_definition 제외)
+            # is_template은 True로 설정
+            template_internal = WorkflowCreateInternal(
+                **template_data_dict, is_template=True, status=WorkflowStatus.DRAFT, creator_id=creator_id
+            )
+
+            # base의 create 메서드 사용 (DB 작업 포함)
+            template = workflow_repository.create(db, obj_in=template_internal)
+
+            # 워크플로우 정의가 있으면 컴포넌트와 연결 생성
+            if workflow_definition_dict:
+                definition = WorkflowDefinition(**workflow_definition_dict)
+                WorkflowService._create_components_and_connections(db, template.id, definition)
+
+            db.commit()
+
+            logger.info(f"Template created successfully: {template.id}")
+            return template
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to create template: {str(e)}")
+            raise
 
     @staticmethod
     def get_workflow_templates(
@@ -268,7 +300,6 @@ class WorkflowService:
             description=f"Created from template: {template.name}",
             category=template.category,
             service_id=service_id,
-            is_template=False,
             template_id=template_id,
             workflow_definition=None,  # workflow_definition은 사용하지 않음
         )
@@ -278,8 +309,10 @@ class WorkflowService:
         workflow_data_dict.pop("workflow_definition", None)
 
         # WorkflowCreateInternal 사용 (status와 creator_id 포함, workflow_definition 제외)
+        # is_template은 False로 설정 (템플릿으로부터 생성된 워크플로우)
+        # 상태는 DRAFT로 시작 (실행 후 파이프라인 완료 시 ACTIVE로 변경됨)
         workflow_internal = WorkflowCreateInternal(
-            **workflow_data_dict, status=WorkflowStatus.ACTIVE, creator_id=creator_id
+            **workflow_data_dict, is_template=False, status=WorkflowStatus.DRAFT, creator_id=creator_id
         )
 
         # base의 create 메서드 사용 (DB 작업 포함)
@@ -294,7 +327,7 @@ class WorkflowService:
                 workflow_id=workflow.id,
                 name=template_component.name,
                 type=template_component.type,
-                config=template_component.config,
+                config=None,  # config는 사용하지 않음
                 model_id=template_component.model_id,
             )
             db.add(new_component)
@@ -312,8 +345,8 @@ class WorkflowService:
                     workflow_id=workflow.id,
                     source_component_id=source_new_id,
                     target_component_id=target_new_id,
-                    connection_type=template_connection.connection_type,
-                    config=template_connection.config,
+                    connection_type="DATA",  # 기본값 사용
+                    config=None,  # config는 사용하지 않음
                 )
                 db.add(new_connection)
 

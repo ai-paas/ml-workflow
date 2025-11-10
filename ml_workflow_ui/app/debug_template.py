@@ -34,8 +34,10 @@ def main():
     # 3. 템플릿 목록 조회
     print("2️⃣ 템플릿 목록 조회...")
     try:
-        templates = client.get_workflow_templates()
-        print(f"✅ API 응답 받음: {len(templates)}개의 템플릿")
+        templates_result = client.get_workflow_templates()
+        templates = templates_result.get("items", []) if isinstance(templates_result, dict) else templates_result
+        total = templates_result.get("total", len(templates)) if isinstance(templates_result, dict) else len(templates)
+        print(f"✅ API 응답 받음: {total}개의 템플릿")
         print()
 
         if not templates:

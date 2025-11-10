@@ -91,7 +91,13 @@ def create_quick_deployment_ui(app_state, tabs=None):
 
             # API 호출 시 자세한 로깅
             logger.info(f"Calling API: {app_state.api_client.base_url}/api/v1/workflows/templates")
-            templates = app_state.api_client.get_workflow_templates(category=None)
+            templates_result = app_state.api_client.get_workflow_templates(category=None)
+
+            # API 응답이 dict인 경우 items 추출
+            if isinstance(templates_result, dict):
+                templates = templates_result.get("items", [])
+            else:
+                templates = templates_result
 
             logger.info(f"Received {len(templates)} templates from API")
 

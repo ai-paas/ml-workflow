@@ -126,7 +126,7 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
             workflow_id=workflow_id,
             name=component_data.name,
             type=ComponentType(component_data.type),
-            config=component_data.config if component_data.config else None,
+            config=None,  # config는 사용하지 않음
             model_id=component_data.model_id,
         )
         db.add(component)
