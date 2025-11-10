@@ -1696,24 +1696,28 @@ async def inference_workflow_model(
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
     - **component_id** (str): 컴포넌트 UUID
-    - **predictions** (List[dict] or dict): 추론 결과
-        - Object Detection의 경우:
-            - boxes (List): 바운딩 박스 좌표 [[x1,y1,x2,y2], ...]
-            - scores (List): 각 객체의 신뢰도 점수
-            - labels (List): 각 객체의 레이블
-            - class_names (List): 클래스 이름 목록
+    - **predictions** (List[dict]): 추론 결과 목록
+        - Object Detection의 경우 각 항목은 다음 필드를 포함:
+            - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
+            - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
+            - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
+                - x1, y1: 좌상단 좌표
+                - x2, y2: 우하단 좌표
     - **image_info** (dict): 이미지 메타데이터
-        - width (int): 이미지 넓이
-        - height (int): 이미지 높이
-        - channels (int): 채널 수
+        - **original_size** (dict): 원본 이미지 크기
+            - width (int): 원본 이미지 넓이
+            - height (int): 원본 이미지 높이
+        - **model_input_size** (dict): 모델 입력 크기
+            - width (int): 모델에 입력된 이미지 넓이
+            - height (int): 모델에 입력된 이미지 높이
     - **model_info** (dict): 모델 정보
         - component_id (str): 컴포넌트 ID
         - service_name (str): KServe 서비스 이름
-        - sanitized_model_name (str): 정제된 모델 이름
-        - model_id (int): 모델 ID
-        - original_model_name (str): 원본 모델 이름
-        - model_type (str): 모델 타입
-        - model_format (str): 모델 포맷
+        - sanitized_model_name (str): 정제된 모델 이름 (DNS 규칙 준수)
+        - model_id (int, optional): 모델 ID
+        - original_model_name (str, optional): 원본 모델 이름
+        - model_type (str, optional): 모델 타입 (예: "ODM")
+        - model_format (str, optional): 모델 포맷 (예: "pytorch")
 
     ## Monitoring
     - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
@@ -2185,15 +2189,79 @@ async def finalize_cleanup(
     """
     워크플로우 정리 완료 처리
 
-    Kubeflow Pipeline cleanup이 완료되었는지 확인하고, 완료되었다면 워크플로우 상태를 업데이트합니다.
+    KServe 리소스 정리가 완료되었는지 확인하고,
+    완료된 경우 워크플로우 상태를 업데이트합니다.
+    워크플로우는 삭제되지 않고 리소스만 정리되며, 정리 후 재실행이 가능합니다.
 
-    Args:
-        workflow_id: 워크플로우 ID
-        run_id: Cleanup pipeline run ID
+    ## Path Parameters
+    - **workflow_id** (str): 정리할 워크플로우 UUID
+        - 워크플로우 목록 조회 API(/workflows)에서 확인 가능
 
-    Returns:
-        - status: "completed" (완료), "in_progress" (진행중), "failed" (실패)
-        - workflow_updated: 워크플로우 상태 업데이트 여부
+    ## Query Parameters
+    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
+        - cleanup API에서 반환된 cleanup_run_id 사용
+        - 형식: Kubeflow Pipeline 실행 UUID
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **run_id** (str): 정리 파이프라인 실행 ID
+    - **status** (str): 정리 상태
+        - "completed": 정리 완료
+            - Pipeline이 성공적으로 완료되어 리소스가 정리됨
+            - 워크플로우 상태가 업데이트됨 (ERROR → DRAFT)
+        - "in_progress": 아직 진행중
+            - Pipeline이 아직 실행 중임
+            - 완료될 때까지 대기 후 재호출 필요
+        - "failed": 정리 실패
+            - Pipeline 실행이 실패했거나 오류 발생
+            - error_message에 상세 오류 정보 포함
+        - "unknown": 상태 확인 불가
+            - Pipeline 상태 조회에 실패한 경우
+            - Kubeflow 연결 문제 또는 run_id 오류 가능
+    - **workflow_updated** (bool): 워크플로우 상태 업데이트 여부
+        - true: 워크플로우 상태가 성공적으로 업데이트됨
+            - ERROR 상태였던 경우 DRAFT로 변경됨
+            - 재실행 가능한 상태로 변경됨
+        - false: 워크플로우 상태가 업데이트되지 않음
+            - Pipeline이 아직 진행중이거나 실패한 경우
+            - 또는 워크플로우가 이미 DRAFT 상태인 경우
+    - **message** (str): 상태 메시지
+        - 정리 완료: "Cleanup completed and workflow state updated"
+        - 진행중: "Cleanup pipeline still in progress"
+        - 실패: "Cleanup pipeline failed with status: {status_value}"
+        - 상태 확인 불가: "Failed to check pipeline status: {error}"
+
+    ## Process
+    1. 워크플로우 존재 여부 확인
+    2. Pipeline 상태 확인 (5초 타임아웃)
+    3. 완료 시:
+       - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
+       - 재실행 가능한 상태로 업데이트
+    4. 진행중: 진행 상태 반환 (재호출 필요)
+    5. 실패: 오류 메시지 반환
+
+    ## Notes
+    - 워크플로우는 삭제되지 않고 리소스만 정리됨
+    - 정리 완료 후 워크플로우를 재실행할 수 있음
+    - Pipeline 상태 확인은 짧은 타임아웃(5초)으로 즉시 확인
+    - Pipeline이 아직 진행중이면 재호출하여 완료 확인 필요
+    - ERROR 상태의 워크플로우는 정리 완료 시 DRAFT로 변경됨
+    - 이미 DRAFT 상태인 워크플로우는 상태 변경 없음
+    - cleanup API 호출 후 이 API를 호출하여 완료 확인 필요
+
+    ## Usage Example
+    1. cleanup API 호출하여 정리 파이프라인 시작
+    2. cleanup_run_id 받기
+    3. 이 API를 호출하여 완료 확인
+    4. status가 "completed"이고 workflow_updated가 true면 정리 완료
+    5. status가 "in_progress"면 잠시 후 재호출
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+        - workflow_id가 존재하지 않거나 삭제된 경우
+    - 500: 정리 처리 중 오류 발생
+        - Pipeline 상태 확인 실패 또는 워크플로우 상태 업데이트 실패
     """
     try:
         # 워크플로우 존재 여부 확인
