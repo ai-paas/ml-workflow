@@ -7,7 +7,7 @@ from typing import Any, Optional
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
 from db.models.model import Model
-from db.models.service import Service, WorkflowComponent
+from db.models.service import WorkflowComponent
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
 from repos.model import (
@@ -137,16 +137,10 @@ class ModelService:
                 }
             )
 
-        # 4. Service에서 참조 확인
-        services = db.query(Service).filter(Service.model_id == model_id).all()
-        if services:
-            references.append(
-                {
-                    "type": "service",
-                    "count": len(services),
-                    "items": [{"id": s.id, "name": s.name} for s in services[:5]],
-                }
-            )
+        # Note: Service는 모델을 직접 참조하지 않습니다.
+        # 모델은 WorkflowComponent를 통해 Workflow에 연결되고,
+        # Workflow가 Service에 연결되는 구조입니다.
+        # 따라서 Service에서의 참조 확인은 WorkflowComponent 확인으로 충분합니다.
 
         return {"has_references": len(references) > 0, "references": references}
 
