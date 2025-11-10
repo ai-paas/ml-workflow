@@ -103,7 +103,6 @@ class WorkflowComponent(BaseModel, TimestampMixin):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     workflow_id: Mapped[str] = mapped_column(String(36), ForeignKey("workflows.id"), nullable=False)
-    component_id: Mapped[str] = mapped_column(String(255), nullable=False)  # 워크플로우 내 고유 ID
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[ComponentType] = mapped_column(Enum(ComponentType), nullable=False)
 

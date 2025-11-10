@@ -18,11 +18,6 @@ class DatasetBaseSchema(TimeStampSchemaMixin):
 class DatasetReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
-    version: int
-    subversion: int
-    train_ratio: float
-    validation_ratio: float
-    test_ratio: float
     dataset_registry: DatasetRegistryReadSchema
 
     class Config:
@@ -50,5 +45,4 @@ class DatasetValidationResponse(BaseModel):
 
     is_valid: bool
     message: str
-    root_dir: Optional[str] = None
     details: Optional[dict] = None

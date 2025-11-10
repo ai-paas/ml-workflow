@@ -24,7 +24,9 @@ from schemas.workflow import (
     WorkflowExecuteResponse,
     WorkflowListSchema,
     WorkflowReadSchema,
+    WorkflowTemplateBriefSchema,
     WorkflowTemplateCreateRequest,
+    WorkflowTemplateListSchema,
     WorkflowTemplateReadSchema,
     WorkflowUpdateRequest,
 )
@@ -46,19 +48,34 @@ router = APIRouter(prefix="/workflows", tags=["Workflows"])
 @router.get("/component-types", response_model=List[ComponentTypeInfo])
 def get_component_types():
     """
-    사용 가능한 컴포넌트 타입 및 component_id 조회
+    사용 가능한 컴포넌트 타입 조회
 
-    워크플로우 템플릿/워크플로우 생성 시 사용할 수 있는 컴포넌트 타입과 component_id를 반환합니다.
+    워크플로우 구성에 사용할 수 있는 컴포넌트 타입 목록을 조회합니다.
+    각 타입별로 고유한 component_id와 설명을 제공하여 워크플로우 정의 시 활용할 수 있습니다.
 
-    **사용 방법:**
-    1. 이 API를 호출하여 사용 가능한 component_id 확인
-    2. 워크플로우 정의 시 확인한 component_id를 명시적으로 입력
+    ## Response (List[ComponentTypeInfo])
+    각 항목은 다음 필드를 포함:
+    - **type** (str): 컴포넌트 타입
+        - "START": 워크플로우 시작점
+        - "END": 워크플로우 종료점
+        - "MODEL": ML 모델 실행 노드
+    - **component_id** (str): 컴포넌트 식별자
+        - 워크플로우 정의 시 사용할 고유 ID
+        - 일반적으로 type과 동일 (예: "START", "END", "MODEL")
+    - **name** (str): 타입 표시명 (한글)
+        - "시작 노드", "종료 노드", "모델 노드" 등
+    - **description** (str): 타입 설명
+        - 각 컴포넌트 타입의 역할과 용도 설명
 
-    **필드 설명:**
-    - `type`: 컴포넌트 타입 (START, END, MODEL)
-    - `component_id`: 해당 타입에서 사용해야 하는 ID (일반적으로 type과 동일)
-    - `name`: 타입의 한글 표시명
-    - `description`: 타입 설명
+    ## Usage Example
+    1. 이 API로 사용 가능한 컴포넌트 타입 확인
+    2. workflow_definition 작성 시 component_id 사용
+    3. 각 컴포넌트 타입에 맞는 설정 적용
+
+    ## Notes
+    - 고정된 타입 목록 반환 (동적 변경 없음)
+    - 워크플로우는 반드시 START로 시작하고 END로 종료
+    - MODEL 타입은 model_id 필수
     """
     return [
         ComponentTypeInfo(
@@ -85,7 +102,7 @@ def get_component_types():
 # ============= Workflow CRUD =============
 
 
-@router.post("", response_model=WorkflowReadSchema, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=WorkflowBaseSchema, status_code=status.HTTP_201_CREATED)
 def create_workflow(
     *,
     db: Session = SessionDepends,
@@ -95,15 +112,66 @@ def create_workflow(
     """
     새로운 워크플로우 생성
 
-    - 직접 생성: workflow_definition 제공
-    - 템플릿으로부터 생성: template_id 제공
+    워크플로우를 새로 생성합니다. 직접 정의하거나 템플릿으로부터 생성할 수 있습니다.
+    생성된 워크플로우는 DRAFT 상태로 시작하며, execute API를 통해 실행할 수 있습니다.
+
+    ## Request Body (WorkflowCreateRequest)
+    - **name** (str, required): 워크플로우 이름
+    - **description** (str, optional): 워크플로우 설명
+    - **category** (str, optional): 카테고리 (분류용)
+    - **service_id** (str, optional): 연결할 서비스 ID
+    - **is_template** (bool, optional): 템플릿 여부 (기본값: false)
+    - **template_id** (str, optional): 복사할 템플릿 ID
+    - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - name (str): 컴포넌트 이름
+            - type (ComponentType): 타입 (START/END/MODEL)
+            - model_id (int, optional): MODEL 타입인 경우 모델 ID
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+            - source_component_type (ComponentType): 소스 컴포넌트 타입
+            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - connection_type (str, optional): 연결 타입 (기본값: "DATA")
+            - config (dict, optional): 연결 설정
+
+    ## Response (WorkflowBaseSchema)
+    - **id** (str): 워크플로우 UUID
+    - **name** (str): 워크플로우 이름
+    - **description** (str): 워크플로우 설명
+    - **category** (str): 워크플로우 카테고리
+    - **status** (str): 워크플로우 상태
+        - "DRAFT": 임시저장 상태 (아직 실행되지 않음)
+        - "ACTIVE": 활성 상태 (배포 완료, 실행 가능)
+        - "ERROR": 오류 발생 상태 (실행 실패 또는 배포 오류)
+    - **service_id** (str): 연결된 서비스 ID
+        - 모니터링 및 서비스 관리용 서비스 ID
+        - null 가능 (서비스 연결 없이도 워크플로우 생성 가능)
+    - **creator_id** (int): 생성자 ID
+        - 워크플로우를 생성한 사용자의 ID
+    - **is_template** (bool): 템플릿 여부
+        - false: 일반 워크플로우
+        - true: 템플릿 (템플릿 조회 API 사용 권장)
+    - **template_id** (str): 원본 템플릿 ID
+        - 템플릿으로부터 생성된 경우 원본 템플릿 ID
+        - 직접 생성한 경우 null
+    - **created_at** (datetime): 워크플로우 생성 시각
+    - **updated_at** (datetime): 워크플로우 수정 시각
+
+    ## Notes
+    - template_id와 workflow_definition 중 하나만 제공
+    - MODEL 컴포넌트는 유효한 model_id 필요
+    - 생성 직후 상태는 DRAFT
+    - 상세 정보(components, connections, creator 등)는 GET /workflows/{workflow_id}로 조회 가능
+
+    ## Errors
+    - 400: 잘못된 요청 (정의 오류 등)
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
     """
     try:
         workflow = WorkflowService.create_workflow(db=db, workflow_data=workflow_data, creator_id=current_user.id)
 
-        # 관계를 다시 로드하여 스키마로 변환
-        workflow = WorkflowService.get_workflow_by_id(db, workflow.id)
-        return WorkflowReadSchema.model_validate(workflow)
+        # 기본 스키마로 변환
+        return WorkflowBaseSchema.model_validate(workflow)
 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -137,11 +205,42 @@ def list_workflows(
     """
     워크플로우 목록 조회 (템플릿 제외)
 
-    - **page**: 페이지 번호
-    - **page_size**: 페이지 사이즈
-    - **creator_id**: 생성자 ID 필터
-    - **service_id**: 서비스 ID 필터
-    - **status**: 워크플로우 상태 필터
+    생성된 워크플로우 목록을 조회합니다. 템플릿은 포함되지 않으며,
+    페이지네이션과 다양한 필터 옵션을 제공합니다.
+
+    ## Query Parameters
+    - **page** (int, optional): 페이지 번호 (1부터 시작)
+    - **page_size** (int, optional): 페이지당 항목 수 (1-1000)
+        - 페이지 파라미터 생략 시 전체 데이터 반환 (최대 10000개)
+    - **creator_id** (int, optional): 특정 사용자가 생성한 워크플로우만 필터
+    - **service_id** (int, optional): 특정 서비스에 연결된 워크플로우만 필터
+    - **status** (str, optional): 워크플로우 상태 필터
+        - "DRAFT": 임시저장 상태
+        - "ACTIVE": 활성 상태 (배포됨)
+        - "ERROR": 오류 상태
+
+    ## Response (WorkflowListSchema)
+    - **total** (int): 필터 조건에 맞는 전체 워크플로우 수
+    - **items** (List[WorkflowBaseSchema]): 워크플로우 목록
+        - id (str): 워크플로우 UUID
+        - name (str): 워크플로우 이름
+        - description (str): 설명
+        - category (str): 카테고리
+        - status (str): 상태 (DRAFT/ACTIVE/ERROR)
+        - service_id (str): 연결된 서비스 ID
+        - creator_id (int): 생성자 ID
+        - is_template (bool): 템플릿 여부 (항상 false)
+        - template_id (str): 원본 템플릿 ID
+        - created_at (datetime): 생성 시각
+        - updated_at (datetime): 수정 시각
+
+    ## Notes
+    - 템플릿을 조회하려면 /workflows/templates API 사용
+    - 페이지네이션 생략 시 최대 10000개까지 반환
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
     """
     from db.models.service import Workflow, WorkflowStatus
 
@@ -197,20 +296,77 @@ def list_workflows(
 # /templates가 {workflow_id}로 잘못 매칭되는 것을 방지합니다.
 
 
-@router.post("/templates", response_model=WorkflowTemplateReadSchema, status_code=status.HTTP_201_CREATED)
+@router.post("/templates", response_model=WorkflowTemplateBriefSchema, status_code=status.HTTP_201_CREATED)
 def create_workflow_template(
     *,
     db: Session = SessionDepends,
     template_data: WorkflowTemplateCreateRequest,
     current_user: UserSchema = Depends(get_current_user),
 ):
-    """워크플로우 템플릿 생성"""
+    """
+    워크플로우 템플릿 생성
+
+    재사용 가능한 워크플로우 템플릿을 생성합니다.
+    템플릿은 다른 사용자들이 복사하여 사용할 수 있는 기본 워크플로우 구조입니다.
+
+    ## Request Body (WorkflowTemplateCreateRequest)
+    - **name** (str, required): 템플릿 이름
+    - **description** (str, optional): 템플릿 설명
+    - **category** (str, optional): 템플릿 카테고리
+    - **service_id** (str, optional): 기본 연결 서비스 ID (null 가능)
+    - **is_template** (bool, optional): 템플릿 여부 (기본값: true, 생략 가능)
+    - **workflow_definition** (WorkflowDefinition, required): 템플릿 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 정의
+            - name (str): 컴포넌트 이름
+            - type (str): 타입 (START/END/MODEL)
+            - model_id (int): MODEL 타입의 모델 ID
+        - connections (List[ConnectionCreateRequest]): 연결 정의
+            - source_component_id (str): 소스 컴포넌트 ID
+            - target_component_id (str): 타겟 컴포넌트 ID
+
+    ## Response (WorkflowTemplateBriefSchema)
+    - **id** (str): 템플릿 UUID
+    - **name** (str): 템플릿 이름
+    - **description** (str): 템플릿 설명
+    - **category** (str): 템플릿 카테고리
+    - **status** (str): 템플릿 상태 (DRAFT)
+    - **service_id** (str): 기본 서비스 ID
+    - **creator_id** (int): 템플릿 생성자 ID
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
+    - **is_template** (bool): 템플릿 여부 (항상 true)
+    - **template_id** (str): 원본 템플릿 ID (null)
+    - **usage_count** (int): 템플릿 사용 횟수
+        - 템플릿을 복사하여 생성된 워크플로우의 총 개수
+        - 동적으로 계산됨 (실시간 반영)
+        - 생성 직후는 0
+    - **created_at** (datetime): 생성 시각
+    - **updated_at** (datetime): 수정 시각
+
+    ## Notes
+    - 템플릿은 실행할 수 없고 복사용만 가능
+    - 모든 사용자가 템플릿을 볼 수 있음
+    - usage_count는 0으로 시작
+    - 상세 정보(components, connections 등)는 GET /workflows/templates/{template_id}로 조회 가능
+
+    ## Errors
+    - 400: 잘못된 워크플로우 정의
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
+    """
     try:
         template = WorkflowService.create_workflow_template(
             db=db, template_data=template_data, creator_id=current_user.id
         )
 
-        result = WorkflowTemplateReadSchema.model_validate(template)
+        result = WorkflowTemplateBriefSchema.model_validate(template)
 
         # 사용 횟수 계산
         usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
@@ -223,7 +379,7 @@ def create_workflow_template(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create template")
 
 
-@router.get("/templates", response_model=List[WorkflowTemplateReadSchema])
+@router.get("/templates", response_model=WorkflowTemplateListSchema)
 def list_workflow_templates(
     *,
     db: Session = SessionDepends,
@@ -243,7 +399,53 @@ def list_workflow_templates(
     category: Optional[str] = Query(None),
     current_user: UserSchema = Depends(get_current_user),
 ):
-    """워크플로우 템플릿 목록 조회"""
+    """
+    워크플로우 템플릿 목록 조회
+
+    사용 가능한 모든 워크플로우 템플릿을 조회합니다.
+    템플릿은 모든 사용자가 확인하고 복사하여 사용할 수 있습니다.
+
+    ## Query Parameters
+    - **page** (int, optional): 페이지 번호 (1부터 시작)
+    - **page_size** (int, optional): 페이지당 항목 수 (1-1000)
+        - 페이지 파라미터 생략 시 전체 데이터 반환
+    - **category** (str, optional): 템플릿 카테고리 필터
+        - 특정 카테고리의 템플릿만 필터링
+
+    ## Response (WorkflowTemplateListSchema)
+    - **total** (int): 필터 조건에 맞는 전체 템플릿 수
+    - **items** (List[WorkflowTemplateBriefSchema]): 템플릿 목록
+        - id (str): 템플릿 UUID
+        - name (str): 템플릿 이름
+        - description (str): 템플릿 설명
+        - category (str): 템플릿 카테고리
+        - status (str): 템플릿 상태 (DRAFT)
+        - service_id (str): 기본 서비스 ID
+        - creator_id (int): 템플릿 생성자 ID
+        - creator (UserSchema): 생성자 정보
+            - id (int): 사용자 ID
+            - username (str): 사용자명
+            - name (str): 사용자 이름
+            - password (str): 비밀번호 (해시된 값)
+            - created_at (datetime): 계정 생성 시각
+            - updated_at (datetime): 계정 정보 수정 시각
+            - created_by (str, optional): 계정 생성자
+            - updated_by (str, optional): 계정 정보 수정자
+        - is_template (bool): 템플릿 여부 (항상 true)
+        - template_id (str): 원본 템플릿 ID (null)
+        - usage_count (int): 해당 템플릿으로 생성된 워크플로우 수
+        - created_at (datetime): 생성 시각
+        - updated_at (datetime): 수정 시각
+
+    ## Notes
+    - 모든 사용자의 템플릿이 표시됨 (creator_id 필터 없음)
+    - usage_count는 동적으로 계산됨
+    - 페이지네이션 생략 시 최대 10000개까지 반환
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
+    """
     from db.models.service import Workflow
 
     # 전체 개수 조회를 위한 쿼리 구성
@@ -258,14 +460,15 @@ def list_workflow_templates(
         )
         results = []
         for template in templates:
-            result = WorkflowTemplateReadSchema.model_validate(template)
+            result = WorkflowTemplateBriefSchema.model_validate(template)
             # 사용 횟수 계산
             usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
             result.usage_count = usage_count
             results.append(result)
-        return results
+        return WorkflowTemplateListSchema(total=len(results), items=results)
 
     # 페이지네이션 적용
+    total_count = count_query.scalar()
     skip = page_size * (page - 1)
 
     templates = WorkflowService.get_workflow_templates(
@@ -274,7 +477,7 @@ def list_workflow_templates(
 
     results = []
     for template in templates:
-        result = WorkflowTemplateReadSchema.model_validate(template)
+        result = WorkflowTemplateBriefSchema.model_validate(template)
 
         # 사용 횟수 계산
         usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
@@ -282,7 +485,7 @@ def list_workflow_templates(
 
         results.append(result)
 
-    return results
+    return WorkflowTemplateListSchema(total=total_count, items=results)
 
 
 @router.get("/templates/{template_id}", response_model=WorkflowTemplateReadSchema)
@@ -292,7 +495,120 @@ def get_workflow_template(
     template_id: str,
     current_user: UserSchema = Depends(get_current_user),
 ):
-    """워크플로우 템플릿 상세 조회"""
+    """
+    워크플로우 템플릿 상세 조회
+
+    특정 템플릿의 상세 정보를 조회합니다.
+    템플릿의 전체 구조와 컴포넌트, 연결 정보를 포함합니다.
+    템플릿은 다른 사용자들이 복사하여 사용할 수 있는 재사용 가능한 워크플로우 구조입니다.
+
+    ## Path Parameters
+    - **template_id** (str): 조회할 템플릿 UUID
+        - 템플릿 목록 조회 API(/workflows/templates)에서 확인 가능
+
+    ## Response (WorkflowTemplateReadSchema)
+    - **id** (str): 템플릿 UUID
+    - **name** (str): 템플릿 이름
+    - **description** (str): 템플릿 설명
+        - 템플릿의 용도와 사용 방법에 대한 설명
+    - **category** (str): 템플릿 카테고리
+        - 템플릿 분류를 위한 카테고리 (예: "Object Detection", "Classification")
+    - **status** (str): 템플릿 상태
+        - "DRAFT": 템플릿은 항상 DRAFT 상태 (실행 불가)
+    - **service_id** (str): 기본 서비스 ID
+        - 템플릿으로부터 워크플로우 생성 시 기본으로 연결될 서비스 ID
+        - null 가능 (서비스 연결 없이 생성 가능)
+    - **creator_id** (int): 템플릿 생성자 ID
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
+    - **is_template** (bool): 템플릿 여부
+        - 항상 true (템플릿 조회 API이므로)
+    - **components** (List[ComponentReadSchema]): 컴포넌트 상세 정보
+        - id (str): 컴포넌트 UUID (workflow_component 테이블의 PK)
+        - workflow_id (str): 소속 워크플로우 ID (템플릿 ID)
+        - component_id (str): 컴포넌트 식별자
+            - 워크플로우 내에서 고유한 식별자 (예: "START", "END", "MODEL-1")
+        - name (str): 컴포넌트 이름
+            - 사용자가 지정한 컴포넌트 표시명
+        - type (ComponentType): 컴포넌트 타입
+            - "START": 워크플로우 시작점
+            - "END": 워크플로우 종료점
+            - "MODEL": ML 모델 실행 노드
+        - model_id (int, optional): 연결된 모델 ID
+            - MODEL 타입인 경우 필수, 다른 타입은 null
+        - model (ModelBriefReadSchema, optional): 모델 상세 정보
+            - MODEL 타입인 경우에만 포함
+            - id (int): 모델 ID
+            - name (str): 모델 이름
+            - description (str): 모델 설명
+            - provider_info (ModelProviderReadSchema): 모델 제공자 정보
+                - id (int): 제공자 ID
+                - name (str): 제공자 이름
+                - description (str): 제공자 설명
+            - type_info (ModelTypeReadSchema): 모델 타입 정보
+                - id (int): 타입 ID
+                - name (str): 타입 이름
+                - description (str): 타입 설명
+            - format_info (ModelFormatReadSchema): 모델 포맷 정보
+                - id (int): 포맷 ID
+                - name (str): 포맷 이름
+                - description (str): 포맷 설명
+            - parent_model_id (int, optional): 부모 모델 ID
+                - 파인튜닝된 모델인 경우 원본 모델 ID
+            - registry (ModelRegistryReadSchema): 모델 레지스트리 정보
+                - id (int): 레지스트리 ID
+                - artifact_path (str): 아티팩트 경로
+                - uri (str): 모델 URI
+                - run_id (str, optional): MLflow 실행 ID
+                - reference_model_id (int): 참조 모델 ID
+                - created_at (datetime): 생성 시각
+                - updated_at (datetime): 수정 시각
+            - created_at (datetime): 모델 생성 시각
+            - updated_at (datetime): 모델 수정 시각
+        - created_at (datetime): 컴포넌트 생성 시각
+        - updated_at (datetime): 컴포넌트 수정 시각
+    - **component_connections** (List[ConnectionReadSchema]): 연결 정보
+        - id (str): 연결 UUID (workflow_component_connection 테이블의 PK)
+        - workflow_id (str): 소속 워크플로우 ID (템플릿 ID)
+        - source_component_id (str): 소스 컴포넌트 ID
+            - workflow_component 테이블의 PK (출발점 컴포넌트)
+        - target_component_id (str): 타겟 컴포넌트 ID
+            - workflow_component 테이블의 PK (도착점 컴포넌트)
+        - source_component (ComponentReadSchema): 소스 컴포넌트 상세 정보
+            - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
+        - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
+            - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
+        - created_at (datetime): 연결 생성 시각
+    - **usage_count** (int): 해당 템플릿으로 생성된 워크플로우 수
+        - 템플릿을 복사하여 생성된 워크플로우의 총 개수
+        - 동적으로 계산됨 (실시간 반영)
+    - **created_at** (datetime): 템플릿 생성 시각
+    - **updated_at** (datetime): 템플릿 수정 시각
+
+    ## Notes
+    - 템플릿은 실행할 수 없고 복사용으로만 사용 가능
+    - 모든 사용자가 템플릿을 조회할 수 있음 (공개)
+    - usage_count는 템플릿 복사 시 자동 증가
+    - 템플릿으로부터 워크플로우 생성 시 /workflows/templates/{template_id}/clone API 사용
+
+    ## Usage Example
+    1. 템플릿 목록에서 원하는 템플릿 ID 확인
+    2. 이 API로 템플릿 상세 정보 조회
+    3. 템플릿 구조 확인 후 clone API로 워크플로우 생성
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 템플릿을 찾을 수 없음
+        - template_id가 존재하지 않거나 삭제된 경우
+    - 500: 서버 내부 오류
+    """
     template = WorkflowService.get_workflow_template_by_id(db=db, template_id=template_id)
 
     if not template:
@@ -316,7 +632,64 @@ def clone_from_template(
     service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
     current_user: UserSchema = Depends(get_current_user),
 ):
-    """템플릿으로부터 워크플로우 생성"""
+    """
+    템플릿으로부터 워크플로우 생성
+
+    기존 템플릿을 복사하여 새로운 워크플로우를 생성합니다.
+    템플릿의 모든 구조가 복사되며, 생성된 워크플로우는 즉시 실행 가능합니다.
+
+    ## Path Parameters
+    - **template_id** (str): 복사할 템플릿 UUID
+
+    ## Query Parameters
+    - **workflow_name** (str, required): 새로 생성할 워크플로우 이름
+    - **service_id** (int, optional): 연결할 서비스 ID
+        - 서비스와 연결시 모니터링 가능
+
+    ## Response (WorkflowReadSchema)
+    - **id** (str): 생성된 워크플로우 UUID
+    - **name** (str): 워크플로우 이름
+    - **description** (str): 워크플로우 설명 (템플릿에서 복사)
+    - **category** (str): 카테고리 (템플릿에서 복사)
+    - **status** (str): 상태 (DRAFT로 시작)
+    - **service_id** (str): 연결된 서비스 ID
+    - **service_name** (str): 연결된 서비스 이름
+    - **creator_id** (int): 생성자 ID (현재 사용자)
+    - **creator** (UserSchema): 생성자 정보 (현재 사용자)
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
+    - **is_template** (bool): 템플릿 여부 (false)
+    - **template_id** (str): 원본 템플릿 ID
+    - **template_name** (str): 원본 템플릿 이름
+    - **kubeflow_run_id** (str): Kubeflow 실행 ID (null)
+    - **components** (List[ComponentReadSchema]): 복사된 컴포넌트
+    - **component_connections** (List[ConnectionReadSchema]): 복사된 연결
+        - id (str): 연결 UUID
+        - workflow_id (str): 소속 워크플로우 ID
+        - source_component_id (str): 소스 컴포넌트 ID
+        - target_component_id (str): 타겟 컴포넌트 ID
+        - source_component (ComponentReadSchema): 소스 컴포넌트 상세
+        - target_component (ComponentReadSchema): 타겟 컴포넌트 상세
+        - created_at (datetime): 생성 시각
+    - **created_at** (datetime): 생성 시각
+    - **updated_at** (datetime): 수정 시각
+
+    ## Notes
+    - 템플릿의 모든 컴포넌트와 연결이 복사됨
+    - 생성된 워크플로우는 템플릿과 독립적으로 동작
+    - template_id가 자동으로 기록됨
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 템플릿을 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
     try:
         workflow = WorkflowService.clone_from_template(
             db=db,
@@ -399,7 +772,144 @@ def delete_workflow_template(
 def get_workflow(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
-    """워크플로우 상세정보 조회"""
+    """
+    워크플로우 상세정보 조회
+
+    특정 워크플로우의 상세 정보를 조회합니다.
+    컴포넌트, 연결, 배포 상태 등 모든 정보를 포함합니다.
+    워크플로우 실행 상태, 배포된 모델 정보, Kubeflow 파이프라인 실행 정보 등을 확인할 수 있습니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 조회할 워크플로우 UUID
+        - 워크플로우 목록 조회 API(/workflows)에서 확인 가능
+
+    ## Response (WorkflowReadSchema)
+    - **id** (str): 워크플로우 UUID
+    - **name** (str): 워크플로우 이름
+    - **description** (str): 워크플로우 설명
+        - 워크플로우의 용도와 목적에 대한 설명
+    - **category** (str): 워크플로우 카테고리
+        - 워크플로우 분류를 위한 카테고리 (예: "Object Detection", "Classification")
+    - **status** (str): 워크플로우 상태
+        - "DRAFT": 임시저장 상태 (아직 실행되지 않음)
+        - "ACTIVE": 활성 상태 (배포 완료, 실행 가능)
+        - "ERROR": 오류 발생 상태 (실행 실패 또는 배포 오류)
+    - **service_id** (str): 연결된 서비스 ID
+        - 모니터링 및 서비스 관리용 서비스 ID
+        - null 가능 (서비스 연결 없이도 워크플로우 생성 가능)
+    - **service_name** (str): 연결된 서비스 이름
+        - service_id로부터 동적으로 조회된 서비스 이름
+        - service_id가 null이면 null
+    - **creator_id** (int): 생성자 ID
+        - 워크플로우를 생성한 사용자의 ID
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
+    - **is_template** (bool): 템플릿 여부
+        - false: 일반 워크플로우
+        - true: 템플릿 (템플릿 조회 API 사용 권장)
+    - **template_id** (str): 원본 템플릿 ID
+        - 템플릿으로부터 생성된 경우 원본 템플릿 ID
+        - 직접 생성한 경우 null
+    - **template_name** (str): 원본 템플릿 이름
+        - template_id로부터 동적으로 조회된 템플릿 이름
+        - template_id가 null이면 null
+    - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
+        - 워크플로우 실행 시 생성된 Kubeflow Pipeline 실행 ID
+        - 실행 전이면 null
+        - Kubeflow UI에서 파이프라인 실행 상태 확인 가능
+    - **components** (List[ComponentReadSchema]): 컴포넌트 목록
+        - id (str): 컴포넌트 UUID (workflow_component 테이블의 PK)
+        - workflow_id (str): 소속 워크플로우 ID
+        - component_id (str): 컴포넌트 식별자
+            - 워크플로우 내에서 고유한 식별자 (예: "START", "END", "MODEL-1")
+        - name (str): 컴포넌트 이름
+            - 사용자가 지정한 컴포넌트 표시명
+        - type (ComponentType): 컴포넌트 타입
+            - "START": 워크플로우 시작점
+            - "END": 워크플로우 종료점
+            - "MODEL": ML 모델 실행 노드
+        - model_id (int, optional): 모델 ID
+            - MODEL 타입인 경우 필수, 다른 타입은 null
+        - model (ModelBriefReadSchema, optional): 모델 상세 정보
+            - MODEL 타입인 경우에만 포함
+            - id (int): 모델 ID
+            - name (str): 모델 이름
+            - description (str): 모델 설명
+            - provider_info (ModelProviderReadSchema): 모델 제공자 정보
+                - id (int): 제공자 ID
+                - name (str): 제공자 이름
+                - description (str): 제공자 설명
+            - type_info (ModelTypeReadSchema): 모델 타입 정보
+                - id (int): 타입 ID
+                - name (str): 타입 이름
+                - description (str): 타입 설명
+            - format_info (ModelFormatReadSchema): 모델 포맷 정보
+                - id (int): 포맷 ID
+                - name (str): 포맷 이름
+                - description (str): 포맷 설명
+            - parent_model_id (int, optional): 부모 모델 ID
+                - 파인튜닝된 모델인 경우 원본 모델 ID
+            - registry (ModelRegistryReadSchema): 모델 레지스트리 정보
+                - id (int): 레지스트리 ID
+                - artifact_path (str): 아티팩트 경로
+                - uri (str): 모델 URI
+                - run_id (str, optional): MLflow 실행 ID
+                - reference_model_id (int): 참조 모델 ID
+                - created_at (datetime): 생성 시각
+                - updated_at (datetime): 수정 시각
+            - created_at (datetime): 모델 생성 시각
+            - updated_at (datetime): 모델 수정 시각
+        - created_at (datetime): 컴포넌트 생성 시각
+        - updated_at (datetime): 컴포넌트 수정 시각
+    - **component_connections** (List[ConnectionReadSchema]): 연결 정보
+        - id (str): 연결 UUID (workflow_component_connection 테이블의 PK)
+        - workflow_id (str): 소속 워크플로우 ID
+        - source_component_id (str): 소스 컴포넌트 ID
+            - workflow_component 테이블의 PK (출발점 컴포넌트)
+        - target_component_id (str): 타겟 컴포넌트 ID
+            - workflow_component 테이블의 PK (도착점 컴포넌트)
+        - source_component (ComponentReadSchema): 소스 컴포넌트 상세 정보
+            - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
+        - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
+            - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
+        - created_at (datetime): 연결 생성 시각
+    - **public_url** (str): KServe 공개 엔드포인트 URL
+        - 배포 후 동적으로 생성되는 공개 접근 URL
+        - 배포 전이면 null
+        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **backend_api_url** (str): 백엔드 API URL
+        - 배포 후 동적으로 생성되는 백엔드 API URL
+        - 배포 전이면 null
+        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **created_at** (datetime): 워크플로우 생성 시각
+    - **updated_at** (datetime): 워크플로우 수정 시각
+
+    ## Notes
+    - public_url과 backend_api_url은 워크플로우 실행 후 배포가 완료되면 동적으로 생성됨
+    - 템플릿인 경우 is_template=true (템플릿 조회 API 사용 권장)
+    - kubeflow_run_id가 있으면 /workflows/{workflow_id}/status로 실행 상태 확인 가능
+    - 배포된 모델 정보는 /workflows/{workflow_id}/models로 확인 가능
+    - 워크플로우 실행은 /workflows/{workflow_id}/execute API 사용
+
+    ## Usage Example
+    1. 워크플로우 목록에서 원하는 워크플로우 ID 확인
+    2. 이 API로 워크플로우 상세 정보 조회
+    3. 상태가 ACTIVE면 execute API로 실행
+    4. 실행 후 status API로 모니터링
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+        - workflow_id가 존재하지 않거나 삭제된 경우
+    - 500: 서버 내부 오류
+    """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
@@ -419,7 +929,34 @@ def update_workflow(
     """
     워크플로우 수정
 
-    workflow_definition이 제공되면 컴포넌트와 연결도 업데이트됨
+    기존 워크플로우의 정보를 수정합니다.
+    workflow_definition이 제공되면 컴포넌트와 연결도 함께 업데이트됩니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 수정할 워크플로우 UUID
+
+    ## Request Body (WorkflowUpdateRequest)
+    - **name** (str, optional): 새 워크플로우 이름
+    - **description** (str, optional): 새 설명
+    - **category** (str, optional): 새 카테고리
+    - **status** (str, optional): 새 상태 (DRAFT/ACTIVE/ERROR)
+    - **service_id** (str, optional): 연결할 서비스 ID
+    - **workflow_definition** (WorkflowDefinition, optional): 새 워크플로우 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+
+    ## Response (WorkflowReadSchema)
+    업데이트된 워크플로우의 전체 정보 (최신 상태)
+
+    ## Notes
+    - 제공된 필드만 업데이트 (부분 업데이트 가능)
+    - workflow_definition 제공 시 기존 컴포넌트/연결은 삭제 후 재생성
+    - 템플릿 수정 시 /workflows/templates/{template_id} API 사용
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
 
@@ -518,13 +1055,37 @@ async def delete_workflow(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
-    워크플로우 삭제 시작
+    워크플로우 삭제 시작 (2단계 프로세스)
 
-    Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제를 시작하고 run_id를 반환합니다.
-    실제 DB 삭제는 /workflows/{workflow_id}/finalize-deletion API를 통해 완료 확인 후 수행됩니다.
+    워크플로우 삭제를 시작합니다. KServe InferenceService를 정리하는
+    Kubeflow Pipeline을 실행하고 cleanup_run_id를 반환합니다.
+    실제 DB 삭제는 finalize-deletion API를 통해 완료 확인 후 수행됩니다.
 
-    Returns:
-        202 Accepted: cleanup_run_id를 포함한 응답
+    ## Path Parameters
+    - **workflow_id** (str): 삭제할 워크플로우 UUID
+
+    ## Response (202 Accepted)
+    - **message** (str): 상태 메시지 "Workflow deletion started"
+    - **workflow_id** (str): 워크플로우 UUID
+    - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
+    - **status** (str): 현재 상태 "cleanup_in_progress"
+    - **next_step** (str): 다음 단계 API 안내
+        - 형식: "Call /workflows/{workflow_id}/finalize-deletion?run_id={cleanup_run_id} to complete deletion"
+
+    ## Deletion Process
+    1. 현재 API 호출: 정리 파이프라인 시작
+    2. Kubeflow Pipeline: KServe InferenceService 삭제
+    3. finalize-deletion API: 완료 확인 및 DB 삭제
+
+    ## Notes
+    - 비동기 프로세스로 진행됨 (202 Accepted)
+    - KServe 리소스 정리에 시간이 걸릴 수 있음
+    - 템플릿은 바로 DB에서 삭제됨 (배포 리소스 없음)
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 정리 파이프라인 시작 실패
     """
     try:
         # 워크플로우 존재 여부 확인
@@ -577,15 +1138,43 @@ async def finalize_workflow_deletion(
     """
     워크플로우 삭제 완료 처리
 
-    Kubeflow Pipeline cleanup이 완료되었는지 확인하고, 완료되었다면 DB에서 워크플로우를 삭제합니다.
+    KServe 리소스 정리가 완료되었는지 확인하고,
+    완료된 경우 DB에서 워크플로우를 삭제합니다.
 
-    Args:
-        workflow_id: 삭제할 워크플로우 ID
-        run_id: Cleanup pipeline run ID
+    ## Path Parameters
+    - **workflow_id** (str): 삭제할 워크플로우 UUID
 
-    Returns:
-        - status: "completed" (완료), "in_progress" (진행중), "failed" (실패)
-        - deleted_from_db: DB 삭제 여부 (completed인 경우에만 true)
+    ## Query Parameters
+    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
+        - delete API에서 반환된 cleanup_run_id 사용
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **run_id** (str): 정리 파이프라인 실행 ID
+    - **status** (str): 삭제 상태
+        - "completed": 삭제 완료
+        - "in_progress": 아직 진행중
+        - "failed": 삭제 실패
+        - "unknown": 상태 확인 불가
+    - **deleted_from_db** (bool): DB에서 삭제 여부
+        - true: 완전히 삭제됨
+        - false: 아직 삭제되지 않음
+    - **message** (str): 상태 메시지
+
+    ## Process
+    1. Pipeline 상태 확인 (5초 타임아웃)
+    2. 완료 시: DB에서 워크플로우 삭제
+    3. 진행중: 진행 상태 반환
+    4. 실패: 오류 메시지 반환
+
+    ## Notes
+    - 이미 삭제된 워크플로우 호출 시 "already deleted" 반환
+    - Pipeline 상태 확인에 실패해도 DB 조회 시도
+    - 삭제는 되돌릴 수 없는 작업
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 삭제 처리 중 오류 발생
     """
     try:
         # 워크플로우 존재 여부 확인
@@ -697,8 +1286,44 @@ async def execute_workflow(
     """
     워크플로우 실행 (KServe 배포 + Kubeflow 파이프라인 실행)
 
-    1. MODEL 컴포넌트들을 KServe로 배포
-    2. 워크플로우를 Kubeflow 파이프라인으로 변환하여 실행
+    워크플로우를 실행하여 ML 모델을 배포합니다.
+    Kubeflow 파이프라인을 통해 KServe InferenceService를 생성하고,
+    모델 서빙 엔드포인트를 활성화합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 실행할 워크플로우 UUID
+
+    ## Request Body (WorkflowExecuteRequest)
+    - **parameters** (Dict[str, Any], optional): 실행 파라미터
+        - 커스텀 설정 값들을 전달할 수 있음
+        - 예: {"gpu_enabled": true, "replicas": 2}
+
+    ## Response (WorkflowExecuteResponse)
+    - **workflow_id** (str): 실행된 워크플로우 UUID
+    - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
+    - **status** (str): 실행 상태
+        - "PENDING": 대기중
+        - "RUNNING": 실행중
+        - "SUCCEEDED": 성공
+        - "FAILED": 실패
+    - **message** (str): 상태 메시지
+
+    ## Process
+    1. MODEL 컴포넌트를 KServe InferenceService로 배포
+    2. 워크플로우를 Kubeflow 파이프라인으로 변환
+    3. 파이프라인 실행 및 모니터링 시작
+    4. KServeDeployment 테이블에 배포 정보 기록
+
+    ## Notes
+    - 워크플로우 상태가 ACTIVE가 아니면 실행 불가
+    - 배포된 모델은 /workflows/{workflow_id}/models로 확인
+    - 실행 상태는 /workflows/{workflow_id}/status로 모니터링
+
+    ## Errors
+    - 400: 워크플로우가 ACTIVE 상태가 아님
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 실행 중 오류 발생
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
@@ -741,7 +1366,40 @@ def get_workflow_execution_status(
     """
     워크플로우 실행 상태 조회
 
-    KServe 배포 상태와 Kubeflow 파이프라인 실행 상태를 조회
+    워크플로우의 실행 상태와 배포된 모델들의 상태를 종합적으로 조회합니다.
+    KServe 배포 상태와 Kubeflow 파이프라인 실행 상태를 모두 포함합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 조회할 워크플로우 UUID
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **status** (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
+    - **kubeflow_run_id** (str): Kubeflow 실행 ID
+    - **kubeflow_status** (str): Kubeflow 파이프라인 상태
+        - "PENDING": 대기중
+        - "RUNNING": 실행중
+        - "SUCCEEDED": 성공
+        - "FAILED": 실패
+        - "SKIPPED": 건너뛰
+        - "ERROR": 오류
+    - **deployment_status** (List[dict]): 각 모델 배포 상태
+        - component_id (str): 컴포넌트 ID
+        - model_name (str): 모델 이름
+        - status (str): 배포 상태 (PENDING/DEPLOYED/FAILED/DELETED)
+        - service_name (str): KServe 서비스 이름
+        - deployed_at (datetime): 배포 시각
+        - error_message (str): 오류 메시지 (실패 시)
+    - **error** (str): 오류 메시지 (상태 조회 실패 시)
+
+    ## Notes
+    - 워크플로우가 실행되지 않았다면 kubeflow_status는 null
+    - deployment_status는 MODEL 컴포넌트가 있는 경우만 포함
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 상태 조회 중 오류 발생
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
@@ -779,7 +1437,42 @@ async def update_component_deployment_status(
 ):
     """
     컴포넌트의 KServe 배포 상태를 업데이트합니다.
-    Kubeflow Pipeline 내에서 배포 완료 후 호출됩니다.
+
+    **중요**: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
+    프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
+
+    Kubeflow Pipeline 실행 중 컴포넌트의 KServe 배포가 완료되면,
+    Pipeline 내부에서 자동으로 이 API를 호출하여 배포 상태를 업데이트합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 워크플로우 ID
+    - **component_id** (str): 컴포넌트 UUID
+
+    ## Request Body
+    - **service_name** (str, required): KServe 서비스 이름
+    - **service_hostname** (str, required): KServe 서비스 호스트명
+    - **model_name** (str, required): 배포된 모델 이름
+    - **status** (str, required): 배포 상태 (예: "ready", "failed")
+    - **internal_url** (str, optional): 내부 서비스 URL
+    - **error_message** (str, optional): 배포 실패 시 에러 메시지
+
+    ## Response
+    - **message** (str): 업데이트 결과 메시지
+    - **deployment_info** (dict): 배포 정보
+        - service_name (str): 서비스 이름
+        - service_hostname (str): 서비스 호스트명
+        - model_name (str): 모델 이름
+        - status (str): 배포 상태
+        - internal_url (str, optional): 내부 서비스 URL
+
+    ## Notes
+    - 이 API는 Kubeflow Pipeline의 컴포넌트 내부에서만 호출됩니다
+    - 프론트엔드나 사용자 애플리케이션에서는 직접 호출하지 않아야 합니다
+    - 배포 상태는 Pipeline 실행 중 자동으로 업데이트됩니다
+
+    ## Errors
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 배포 상태 업데이트 중 서버 내부 오류
     """
     try:
         # 워크플로우 존재 여부 확인
@@ -835,7 +1528,55 @@ async def inference_workflow_model(
     배포된 모델에 추론 요청 (KServe V2 Protocol)
 
     워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
-    추론 요청 시 ServiceMonitoring 테이블에 자동으로 기록됩니다.
+    KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 워크플로우 UUID
+    - **component_id** (str): 컴포넌트 UUID (WorkflowComponent.id)
+
+    ## Request Body (Form Data)
+    - **image** (file, required): 분석할 이미지 파일
+        - 지원 형식: JPEG, PNG, GIF, WebP
+        - Base64로 인코딩되어 서버로 전송
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **component_id** (str): 컴포넌트 UUID
+    - **predictions** (List[dict] or dict): 추론 결과
+        - Object Detection의 경우:
+            - boxes (List): 바운딩 박스 좌표 [[x1,y1,x2,y2], ...]
+            - scores (List): 각 객체의 신뢰도 점수
+            - labels (List): 각 객체의 레이블
+            - class_names (List): 클래스 이름 목록
+    - **image_info** (dict): 이미지 메타데이터
+        - width (int): 이미지 넓이
+        - height (int): 이미지 높이
+        - channels (int): 채널 수
+    - **model_info** (dict): 모델 정보
+        - component_id (str): 컴포넌트 ID
+        - service_name (str): KServe 서비스 이름
+        - sanitized_model_name (str): 정제된 모델 이름
+        - model_id (int): 모델 ID
+        - original_model_name (str): 원본 모델 이름
+        - model_type (str): 모델 타입
+        - model_format (str): 모델 포맷
+
+    ## Monitoring
+    - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
+    - 응답 시간, 성공/실패 여부, 사용자 정보 포함
+    - 서비스와 연결된 경우만 모니터링 데이터 저장
+
+    ## Notes
+    - Istio Gateway를 통해 KServe InferenceService에 접근
+    - V2 프로토콜 엔드포인트: /v2/models/{model_name}/infer
+    - Host 헤더로 Istio 라우팅 제어
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 400: 잘못된 이미지 파일
+    - 404: 워크플로우나 컴포넌트를 찾을 수 없음
+    - 503: 모델 서비스가 준비되지 않음
+    - 504: 추론 요청 타임아웃
     """
     import base64  # noqa: F401, F811
     import time  # noqa: F401, F811
@@ -886,7 +1627,7 @@ async def inference_workflow_model(
     # 컴포넌트의 모델 정보 추가
     component = (
         db.query(WorkflowComponent)
-        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.component_id == component_id)
+        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.id == component_id)
         .first()
     )
 
@@ -1143,7 +1884,48 @@ def get_deployed_models(
     """
     워크플로우에 배포된 모델 목록 조회
 
-    DB의 kserve_deployments 테이블에서 배포된 모델 정보를 조회합니다.
+    워크플로우에서 배포된 모든 ML 모델의 상세 정보를 조회합니다.
+    KServe InferenceService로 배포된 모델들의 엔드포인트와 상태를 포함합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 조회할 워크플로우 UUID
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **backend_api_url** (str): 추론 API URL (첫 번째 모델 기준)
+        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **deployed_models** (List[dict]): 배포된 모델 목록
+        - workflow_id (str): 소속 워크플로우 ID
+        - component_id (str): 컴포넌트 ID
+        - component_name (str): 컴포넌트 이름
+        - model_id (int): 모델 ID
+        - model_name (str): 원본 모델 이름
+        - sanitized_model_name (str): DNS 규칙에 맞게 변환된 모델 이름
+        - service_name (str): KServe 서비스 이름
+        - service_hostname (str): KServe 서비스 호스트명
+        - status (str): 배포 상태
+            - "PENDING": 배포 대기중
+            - "DEPLOYED": 배포 완료
+            - "FAILED": 배포 실패
+            - "DELETED": 삭제됨
+        - internal_url (str): 내부 접근 URL
+        - gateway_url (str): 외부 게이트웨이 URL
+        - deployed_at (datetime): 배포 시각
+        - deleted_at (datetime): 삭제 시각 (삭제된 경우)
+        - error_message (str): 오류 메시지 (실패 시)
+        - created_at (datetime): 레코드 생성 시각
+        - updated_at (datetime): 레코드 업데이트 시각
+    - **total** (int): 배포된 모델 총 개수
+
+    ## Notes
+    - backend_api_url은 첫 번째 배포된 모델 기준으로 생성
+    - 각 모델마다 고유한 service_name과 hostname을 가짐
+    - 배포 상태가 DEPLOYED인 모델만 추론 가능
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
@@ -1179,6 +1961,45 @@ def check_model_status(
 ):
     """
     배포된 모델의 상태 확인 (KServe V2 Protocol)
+
+    특정 모델 컴포넌트의 KServe InferenceService 준비 상태를 확인합니다.
+    V2 프로토콜의 /ready 엔드포인트를 호출하여 상태를 확인합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 워크플로우 UUID
+    - **component_id** (str): 컴포넌트 UUID (WorkflowComponent.id)
+
+    ## Response
+    - **workflow_id** (str): 워크플로우 UUID
+    - **component_id** (str): 컴포넌트 UUID
+    - **ready** (bool): 모델 준비 상태
+        - true: 추론 요청 가능
+        - false: 아직 준비 안 됨
+    - **deployment_info** (dict): 배포 정보
+        - workflow_id (str): 소속 워크플로우 ID
+        - component_id (str): 컴포넌트 ID
+        - service_name (str): KServe 서비스 이름
+        - service_hostname (str): 서비스 호스트명
+        - model_name (str): 모델 이름
+        - sanitized_model_name (str): 정제된 모델 이름
+        - status (str): 배포 상태 (PENDING/DEPLOYED/FAILED/DELETED)
+        - deployed_at (datetime): 배포 시각
+    - **status** (str): 모델 상태
+        - "ready": 사용 가능
+        - "not_ready": 준비 중
+        - "not_deployed": 배포되지 않음
+        - "error": 오류 발생
+    - **error** (str): 오류 메시지 (상태 확인 실패 시)
+
+    ## Notes
+    - KServe V2 Protocol /v2/models/{model_name}/ready 엔드포인트 사용
+    - Istio Gateway를 통해 접근 (Host 헤더 필수)
+    - 서비스가 준비되지 않으면 Connection Error 발생
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우나 컴포넌트를 찾을 수 없음
+    - 500: 상태 확인 중 오류 발생
     """
     import requests  # noqa: F401, F811
 
@@ -1198,7 +2019,7 @@ def check_model_status(
     # 컴포넌트 정보 조회
     component = (
         db.query(WorkflowComponent)
-        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.component_id == component_id)
+        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.id == component_id)
         .first()
     )
 
@@ -1275,13 +2096,40 @@ async def cleanup_workflow_resources(
     """
     워크플로우 리소스 정리 시작
 
-    Kubeflow Pipeline을 통해 배포된 KServe InferenceService들을 삭제하고 run_id를 반환합니다.
-    워크플로우 자체는 유지하되, 배포된 서비스만 정리
+    배포된 KServe InferenceService들을 정리합니다.
+    워크플로우 자체는 유지하면서 배포된 리소스만 제거합니다.
 
-    완료 확인은 /workflows/{workflow_id}/finalize-cleanup API를 사용하세요.
+    ## Path Parameters
+    - **workflow_id** (str): 정리할 워크플로우 UUID
 
-    Returns:
-        202 Accepted: cleanup_run_id를 포함한 응답
+    ## Response (202 Accepted)
+    - **message** (str): 상태 메시지 "Cleanup started"
+    - **workflow_id** (str): 워크플로우 UUID
+    - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
+    - **status** (str): 현재 상태 "cleanup_in_progress"
+    - **next_step** (str): 다음 단계 API 안내
+        - 형식: "Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion"
+
+    ## Use Cases
+    - 비용 절감을 위해 배포된 리소스 정리
+    - 오류 발생 후 재배포 준비
+    - 워크플로우 구조 변경 전 리소스 정리
+
+    ## Process
+    1. KServe InferenceService 삭제 파이프라인 시작
+    2. cleanup_run_id 반환
+    3. finalize-cleanup API로 완료 확인
+    4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
+
+    ## Notes
+    - 워크플로우는 삭제되지 않고 리소스만 정리
+    - 비동기 프로세스 (202 Accepted)
+    - 정리 후 워크플로우 재실행 가능
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 500: 정리 파이프라인 시작 실패
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 

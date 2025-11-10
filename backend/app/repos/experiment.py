@@ -2,6 +2,7 @@ from db.models.experiment import ExperimentModel, Hyperparameter, Hyperparameter
 from repos.base import CRUDBase
 from schemas.experiment import (
     ExperimentBaseSchema,
+    ExperimentUpdateRequest,
     HyperparameterBaseSchema,
     HyperparameterTypeBaseSchema,
     HyperparameterTypeReadSchema,
@@ -9,7 +10,7 @@ from schemas.experiment import (
 from sqlalchemy.orm import Session
 
 
-class ExperimentRepository(CRUDBase[ExperimentModel, ExperimentBaseSchema, ExperimentBaseSchema]):
+class ExperimentRepository(CRUDBase[ExperimentModel, ExperimentBaseSchema, ExperimentUpdateRequest]):
     pass
 
 

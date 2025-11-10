@@ -34,7 +34,7 @@ class KServeDeployment(BaseModel, TimestampMixin):
 
     # 워크플로우 및 컴포넌트 정보
     workflow_id: Mapped[str] = mapped_column(String(36), ForeignKey("workflows.id"), nullable=False)
-    component_id: Mapped[str] = mapped_column(String(255), nullable=False)  # WorkflowComponent.component_id
+    component_id: Mapped[str] = mapped_column(String(255), nullable=False)  # WorkflowComponent.id (UUID)
 
     # KServe 서비스 정보
     service_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)

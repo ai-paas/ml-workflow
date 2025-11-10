@@ -91,7 +91,7 @@ class WorkflowExecutor:
                     KServeDeploymentService.create_deployment(
                         db=self.db,
                         workflow_id=workflow.id,
-                        component_id=component.component_id,
+                        component_id=component.id,
                         model_name=component.name,
                     )
 
@@ -150,7 +150,7 @@ class WorkflowExecutor:
                 )
 
                 if task:
-                    tasks[component.component_id] = task
+                    tasks[component.id] = task
 
                     # 의존성 설정
                     dependencies = self._get_component_dependencies(component, workflow)
@@ -204,7 +204,7 @@ class WorkflowExecutor:
 
             return start_component(
                 workflow_id=str(workflow.id),
-                component_id=component.component_id,
+                component_id=component.id,
                 config=json.dumps(component.config or {}),
             )
 
@@ -665,7 +665,7 @@ class WorkflowExecutor:
 
             return model_deployment_component(
                 workflow_id=str(workflow.id),
-                component_id=component.component_id,
+                component_id=component.id,
                 model_name=sanitized_model_name,
                 model_uri=model_uri,
                 run_id=run_id,
@@ -709,7 +709,7 @@ class WorkflowExecutor:
 
             return end_component(
                 workflow_id=str(workflow.id),
-                component_id=component.component_id,
+                component_id=component.id,
                 input_data="{}",  # 이전 태스크 출력 연결 필요
                 config=json.dumps(component.config or {}),
             )
@@ -747,10 +747,10 @@ class WorkflowExecutor:
         # 컴포넌트 연결 정보에서 의존성 찾기
         for connection in workflow.component_connections:
             if connection.target_component_id == component.id:
-                # 소스 컴포넌트의 component_id 찾기
+                # 소스 컴포넌트의 id 찾기
                 for comp in workflow.components:
                     if comp.id == connection.source_component_id:
-                        dependencies.append(comp.component_id)
+                        dependencies.append(comp.id)
                         break
 
         return dependencies

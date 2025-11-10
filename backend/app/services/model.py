@@ -39,7 +39,7 @@ from transformers import (
     Owlv2Processor,
     Owlv2TextModel,
 )
-from utils.model_registry import ModelLoader, ModelRegistry
+from utils.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -90,18 +90,6 @@ class ModelService:
 
     def update(self, db: Session, db_obj, obj_in):
         return model_repository.update(db, db_obj=db_obj, obj_in=obj_in)
-
-    def validate(self, model_format_id: int, model_uri: str) -> str:
-        # TODO: model_format_id로부터 get 하도록 변경
-        if model_format_id == 1:
-            pipeline = ModelLoader.load_transformers(model_uri)
-            messages = [
-                {"role": "user", "content": "Who are you?"},
-            ]
-            result = pipeline(messages, max_length=1024)
-        else:
-            result = ""
-        return result
 
     @staticmethod
     def check_model_references(db: Session, model_id: int) -> dict:
@@ -252,16 +240,11 @@ class ModelService:
             db.rollback()
             raise RuntimeError(f"모델 삭제 중 오류 발생: {str(e)}")
 
-    @staticmethod
-    def load_transformers(model_uri: str):
-        loaded_pipe = ModelLoader.load_transformers(model_uri)
-        return loaded_pipe
-
 
 class HuggingFaceModelService:
     def create(self, db: Session, *, model_schema: ModelBaseSchema):
         # model_format_id = model_schema.format_id
-        repo_id = model_schema.name
+        repo_id = model_schema.repo_id
         # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # if model_format_id == transformers_db_obj.id:  # transformers
         save_dir = self.load_and_save_transformers(repo_id)
@@ -390,14 +373,26 @@ class ModelProviderService:
     def get_by_name(db: Session, name: str) -> Optional[ModelProviderReadSchema]:
         return model_provider_repository.get_by_name(db, name)
 
+    @staticmethod
+    def get_all(db: Session) -> list[ModelProviderReadSchema]:
+        return model_provider_repository.get_multi(db, skip=0, limit=10000)
+
 
 class ModelTypeService:
     @staticmethod
     def get_by_name(db: Session, name: str) -> Optional[ModelTypeReadSchema]:
         return model_type_repository.get_by_name(db, name)
 
+    @staticmethod
+    def get_all(db: Session) -> list[ModelTypeReadSchema]:
+        return model_type_repository.get_multi(db, skip=0, limit=10000)
+
 
 class ModelFormatService:
     @staticmethod
     def get_by_name(db: Session, name: str) -> Optional[ModelFormatReadSchema]:
         return model_format_repository.get_by_name(db, name)
+
+    @staticmethod
+    def get_all(db: Session) -> list[ModelFormatReadSchema]:
+        return model_format_repository.get_multi(db, skip=0, limit=10000)

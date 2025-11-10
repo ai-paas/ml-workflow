@@ -190,24 +190,6 @@ class ModelRegistry:
         return True
 
 
-class ModelLoader:
-    @staticmethod
-    def load_transformers(model_uri: str):
-        return mlflow.transformers.load_model(model_uri)
-
-    @staticmethod
-    def load_sentence_transformers(model_uri: str):
-        return mlflow.sentence_transformers.load_model(model_uri)
-
-    @staticmethod
-    def load_pyfunc(model_uri: str):
-        return mlflow.pyfunc.load_model(model_uri)
-
-    @staticmethod
-    def load_pytorch(model_uri: str):
-        return mlflow.pyfunc.load_model(model_uri)  # YOLOX는 pyfunc로 저장되므로 pyfunc로 로드
-
-
 class PyfuncModelWrapper(PythonModel):
     def __init__(self, model):
         self.model = model

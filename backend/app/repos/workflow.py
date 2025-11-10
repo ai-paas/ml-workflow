@@ -124,7 +124,6 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
         """워크플로우 컴포넌트 생성 - base의 create 활용 가능하지만 특별한 로직 있어 유지"""
         component = WorkflowComponent(
             workflow_id=workflow_id,
-            component_id=component_data.component_id,
             name=component_data.name,
             type=ComponentType(component_data.type),
             config=component_data.config if component_data.config else None,
@@ -157,7 +156,7 @@ class ComponentConnectionRepository(CRUDBase[ComponentConnection, ConnectionCrea
         connection_type: str = "DATA",
         config: Optional[dict] = None,
     ) -> ComponentConnection:
-        """컴포넌트 연결 생성 - 특별한 파라미터 처리로 인해 유지"""
+        """컴포넌트 연결 생성"""
         connection = ComponentConnection(
             workflow_id=workflow_id,
             source_component_id=source_component_id,

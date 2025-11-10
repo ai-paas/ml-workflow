@@ -35,9 +35,36 @@ def create_service(
     """
     새로운 서비스 생성
 
-    - **name**: 서비스 이름 (필수, 고유값)
-    - **description**: 서비스 설명 (선택)
-    - **tags**: 서비스 태그 리스트 (선택)
+    서비스는 워크플로우를 그룹화하고 모니터링하는 최상위 단위입니다.
+    하나의 서비스에 여러 워크플로우를 연결하여 통합 관리할 수 있습니다.
+
+    ## Request Body (ServiceCreateRequest)
+    - **name** (str, required): 서비스 이름 (1-255자, 고유값)
+    - **description** (str, optional): 서비스에 대한 상세 설명
+    - **tags** (List[str], optional): 서비스 분류/검색용 태그 리스트
+
+    ## Response (ServiceBriefSchema)
+    - **id** (str): 서비스 고유 ID (UUID)
+    - **name** (str): 서비스 이름
+    - **description** (str): 서비스 설명
+    - **tags** (List[str]): 서비스 태그 목록
+    - **creator_id** (int): 서비스 생성자 ID
+    - **created_at** (datetime): 생성 시각
+    - **updated_at** (datetime): 최종 수정 시각
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - email (str): 이메일
+        - is_active (bool): 활성화 상태
+        - is_superuser (bool): 관리자 여부
+        - created_at (datetime): 계정 생성일
+        - updated_at (datetime): 계정 수정일
+    - **workflow_count** (int): 연결된 워크플로우 수 (생성 직후는 0)
+
+    ## Errors
+    - 400: 이미 존재하는 서비스 이름이거나 유효하지 않은 요청
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
     """
     try:
         service = AppServiceService.create_service(db=db, service_data=service_data, creator_id=current_user.id)
@@ -83,11 +110,47 @@ def list_services(
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    서비스 목록 조회 (대표정보)
+    서비스 목록 조회
 
-    - **page**: 페이지 번호
-    - **page_size**: 페이지 사이즈
-    - **creator_id**: 생성자 ID 필터
+    등록된 서비스들의 목록을 페이지네이션하여 조회합니다.
+    각 서비스의 기본 정보와 연결된 워크플로우 수를 함께 제공합니다.
+
+    ## Query Parameters
+    - **page** (int, optional): 페이지 번호 (1부터 시작)
+        - 생략 시: 전체 데이터 조회
+        - 최소값: 1
+    - **page_size** (int, optional): 페이지당 항목 수
+        - 생략 시: 전체 데이터 조회
+        - 범위: 1-1000
+    - **creator_id** (int, optional): 특정 사용자가 생성한 서비스만 필터링
+
+    ## Response (ServiceListResponse)
+    - **total** (int): 조건에 맞는 전체 서비스 수
+    - **items** (List[ServiceBriefSchema]): 서비스 목록
+        - id (str): 서비스 고유 ID (UUID)
+        - name (str): 서비스 이름
+        - description (str): 서비스 설명
+        - tags (List[str]): 서비스 태그 목록
+        - creator_id (int): 생성자 ID
+        - created_at (datetime): 생성 시각
+        - updated_at (datetime): 최종 수정 시각
+        - creator (UserSchema): 생성자 상세 정보
+            - id (int): 사용자 ID
+            - username (str): 사용자명
+            - email (str): 이메일
+            - is_active (bool): 계정 활성화 상태
+            - is_superuser (bool): 관리자 권한 여부
+            - created_at (datetime): 계정 생성일
+            - updated_at (datetime): 계정 수정일
+        - workflow_count (int): 해당 서비스에 연결된 워크플로우 개수
+
+    ## Notes
+    - page와 page_size를 모두 생략하면 전체 데이터를 조회 (최대 10000개)
+    - 페이지네이션 사용 시 total은 필터 조건에 맞는 전체 개수를 반환
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
     """
     from db.models.service import Service
 
@@ -148,7 +211,64 @@ def get_service_detail(
     """
     서비스 상세정보 조회
 
-    연결된 워크플로우, 모델정보, 모니터링 정보를 모두 포함
+    특정 서비스의 상세 정보를 조회합니다.
+    연결된 모든 워크플로우 정보와 최근 1시간의 모니터링 메트릭을 포함합니다.
+
+    ## Path Parameters
+    - **service_id** (str): 조회할 서비스의 고유 ID (UUID)
+
+    ## Response (ServiceDetailSchema)
+    - **id** (str): 서비스 고유 ID (UUID)
+    - **name** (str): 서비스 이름
+    - **description** (str): 서비스 설명
+    - **tags** (List[str]): 서비스 태그 목록
+    - **creator_id** (int): 생성자 ID
+    - **created_at** (datetime): 생성 시각
+    - **updated_at** (datetime): 최종 수정 시각
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - email (str): 이메일
+        - is_active (bool): 활성화 상태
+        - is_superuser (bool): 관리자 여부
+        - created_at (datetime): 계정 생성일
+        - updated_at (datetime): 계정 수정일
+    - **workflows** (List[WorkflowBaseSchema]): 연결된 워크플로우 목록
+        - id (str): 워크플로우 ID (UUID)
+        - name (str): 워크플로우 이름
+        - description (str): 워크플로우 설명
+        - status (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
+        - is_template (bool): 템플릿 여부
+        - template_id (str): 원본 템플릿 ID (템플릿에서 생성된 경우)
+        - category (str): 워크플로우 카테고리
+        - tags (List[str]): 워크플로우 태그
+        - workflow_definition (dict): 워크플로우 정의 (nodes, edges 포함)
+        - service_id (str): 연결된 서비스 ID
+        - creator_id (int): 생성자 ID
+        - kubeflow_run_id (str): Kubeflow 실행 ID
+        - created_at (datetime): 생성 시각
+        - updated_at (datetime): 수정 시각
+    - **monitoring_data** (ServiceMonitoringData): 모니터링 데이터
+        - total_metrics (MonitoringMetrics): 전체 서비스 메트릭
+            - message_count (int): 최근 1시간 총 메시지 수
+            - active_users (int): 최근 1시간 활성 사용자 수
+            - token_usage (int): 최근 1시간 토큰 사용량
+            - avg_interaction_count (float): 최근 1시간 평균 사용자 상호작용 수
+            - response_time_ms (float): 평균 응답 시간(ms)
+            - error_count (int): 최근 1시간 오류 수
+            - success_rate (float): 최근 1시간 성공률(%)
+        - workflow_metrics (List[WorkflowMonitoring]): 워크플로우별 메트릭
+            - workflow_id (str): 워크플로우 ID
+            - workflow_name (str): 워크플로우 이름
+            - metrics (MonitoringMetrics): 해당 워크플로우의 메트릭
+            - last_updated (datetime): 마지막 업데이트 시각
+        - period_start (datetime): 집계 시작 시간
+        - period_end (datetime): 집계 종료 시간
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 서비스를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     service = AppServiceService.get_service_by_id(db, service_id)
 
@@ -183,9 +303,48 @@ def update_service(
     """
     서비스 정보 수정
 
-    - **name**: 서비스 이름
-    - **description**: 서비스 설명
-    - **tags**: 서비스 태그
+    기존 서비스의 정보를 부분적으로 또는 전체적으로 수정합니다.
+    제공된 필드만 업데이트되며, 생략된 필드는 기존 값이 유지됩니다.
+
+    ## Path Parameters
+    - **service_id** (str): 수정할 서비스의 고유 ID (UUID)
+
+    ## Request Body (ServiceUpdateRequest)
+    - **name** (str, optional): 새로운 서비스 이름 (1-255자)
+        - 다른 서비스와 중복 불가
+    - **description** (str, optional): 새로운 서비스 설명
+        - null 값으로 설명 제거 가능
+    - **tags** (List[str], optional): 새로운 태그 목록
+        - 기존 태그를 완전히 대체
+        - 빈 리스트로 모든 태그 제거 가능
+
+    ## Response (ServiceBriefSchema)
+    - **id** (str): 서비스 고유 ID (UUID)
+    - **name** (str): 수정된 서비스 이름
+    - **description** (str): 수정된 서비스 설명
+    - **tags** (List[str]): 수정된 태그 목록
+    - **creator_id** (int): 생성자 ID (변경 불가)
+    - **created_at** (datetime): 생성 시각 (변경 불가)
+    - **updated_at** (datetime): 수정 시각 (현재 시각으로 자동 갱신)
+    - **creator** (UserSchema): 생성자 정보
+        - id (int): 사용자 ID
+        - username (str): 사용자명
+        - email (str): 이메일
+        - is_active (bool): 활성화 상태
+        - is_superuser (bool): 관리자 여부
+        - created_at (datetime): 계정 생성일
+        - updated_at (datetime): 계정 수정일
+    - **workflow_count** (int): 연결된 워크플로우 수
+
+    ## Notes
+    - 서비스 이름 변경 시 중복 검사 수행
+    - 연결된 워크플로우는 영향받지 않음
+
+    ## Errors
+    - 400: 중복된 서비스 이름 또는 유효하지 않은 요청
+    - 401: 인증되지 않은 사용자
+    - 404: 서비스를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     service = AppServiceService.update_service(db=db, service_id=service_id, service_data=service_data)
 
@@ -212,7 +371,28 @@ def delete_service(
     """
     서비스 삭제
 
-    연결된 워크플로우가 있는 경우 연결만 해제되고 워크플로우는 삭제되지 않음
+    서비스를 삭제합니다. 연결된 워크플로우가 있는 경우 연결만 해제되며,
+    워크플로우 자체는 삭제되지 않고 독립적으로 유지됩니다.
+
+    ## Path Parameters
+    - **service_id** (str): 삭제할 서비스의 고유 ID (UUID)
+
+    ## Response
+    - **Status Code**: 204 No Content (성공 시 응답 본문 없음)
+
+    ## Side Effects
+    - 서비스와 연결된 모든 워크플로우의 service_id가 null로 설정됨
+    - 서비스 관련 모니터링 데이터는 보존됨 (향후 분석용)
+    - 서비스 정보는 데이터베이스에서 완전히 삭제됨
+
+    ## Notes
+    - 삭제는 되돌릴 수 없는 작업입니다
+    - 워크플로우를 삭제하려면 별도로 워크플로우 삭제 API를 호출해야 함
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 서비스를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     success = AppServiceService.delete_service(db, service_id)
 

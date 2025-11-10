@@ -8,7 +8,8 @@ from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 
 class ModelBaseSchema(TimeStampSchemaMixin):
     name: str
-    description: str
+    description: str | None = None
+    repo_id: str
     provider_id: int
     type_id: int
     format_id: int
@@ -16,6 +17,9 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     learning_enable_yn: bool
     version: int
     subversion: int
+    task: str | None = None
+    parameter: str | None = None
+    sample_code: str | None = None
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):
@@ -88,12 +92,16 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
 class ModelBriefReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
-    description: str
+    description: str | None = None
+    repo_id: str
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema
     parent_model_id: int | None = None
     registry: ModelRegistryReadSchema
+    task: str | None = None
+    parameter: str | None = None
+    sample_code: str | None = None
 
     class Config:
         from_attributes = True
@@ -102,12 +110,16 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
 class ModelReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
-    description: str
+    description: str | None = None
+    repo_id: str
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema
     parent_model_id: int | None = None
     registry: ModelRegistryReadSchema
+    task: str | None = None
+    parameter: str | None = None
+    sample_code: str | None = None
 
     parent_model: Optional[ModelReadParentSchema]
     child_models: Optional[list[ModelReadChildSchema]]

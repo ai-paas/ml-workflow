@@ -78,7 +78,6 @@ class Settings(BaseSettings):
     )
 
     # 기타 설정
-    USER_MODELS: dict[str, dict] = Field(default_factory=dict, description="사용자 정의 모델 설정")
 
     @field_validator("MLFLOW_S3_BUCKET")
     @classmethod
@@ -105,13 +104,6 @@ class Settings(BaseSettings):
     def get_db_uri(self) -> str:
         """Environment variables로부터 DB 정보를 받아와 URI를 반환."""
         return f"{self.DB_TYPE}://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
-
-    @property
-    def user_models(self) -> dict[str, dict]:
-        return self.USER_MODELS
-
-    def add_user_model(self, key: str, value: Any):
-        self.USER_MODELS[key] = value
 
 
 @lru_cache

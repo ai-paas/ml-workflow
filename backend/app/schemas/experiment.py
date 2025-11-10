@@ -48,13 +48,16 @@ class ExperimentReadSchema(TimeStampSchemaMixin):
 
 
 class ExperimentUpdateRequest(BaseModel):
+    """
+    실험 수정 요청 스키마
+
+    학습이 진행 중이거나 완료된 실험에서는 name과 description만 수정 가능합니다.
+    다른 필드들(model_id, dataset_id, hyperparameters 등)은 학습 결과에 영향을 주므로
+    수정할 수 없습니다.
+    """
+
     name: Optional[str] = None
     description: Optional[str] = None
-    reference_model_id: Optional[int] = None
-    dataset_id: Optional[int] = None
-    kubeflow_run_id: Optional[str] = None
-    mlflow_run_id: Optional[str] = None
-    status: Optional[str] = None
 
 
 class HyperparameterTypeBaseSchema(BaseModel):

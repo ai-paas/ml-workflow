@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from config.settings import get_settings
 from pydantic import BaseModel, Field, computed_field, model_serializer
@@ -10,6 +10,9 @@ from schemas.base import TimeStampSchemaMixin
 from schemas.kserve_deployment import KServeDeploymentReadSchema
 from schemas.model import ModelBriefReadSchema
 from schemas.user import UserSchema
+
+if TYPE_CHECKING:
+    from db.models.service import ComponentConnection
 
 
 class WorkflowStatus(str, Enum):
@@ -43,11 +46,6 @@ class ComponentTypeInfo(BaseModel):
 class ComponentCreateRequest(BaseModel):
     """컴포넌트 생성 요청"""
 
-    component_id: str = Field(
-        ...,
-        description="워크플로우 내 고유 ID \
-(START, END, MODEL 등 - /component-types API로 확인 가능)",
-    )
     name: str
     type: ComponentType
     config: Optional[dict] = None
@@ -55,11 +53,11 @@ class ComponentCreateRequest(BaseModel):
 
 
 class ComponentUpdateRequest(BaseModel):
-    """컴포넌트 수정 요청"""
+    """컴포넌트 수정 요청 (config 제외)"""
 
-    name: Optional[str] = None
-    config: Optional[dict] = None
-    model_id: Optional[int] = None
+    name: str
+    type: ComponentType
+    model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
 
 
 class ComponentReadSchema(TimeStampSchemaMixin):
@@ -67,10 +65,8 @@ class ComponentReadSchema(TimeStampSchemaMixin):
 
     id: str
     workflow_id: str
-    component_id: str
     name: str
     type: ComponentType
-    config: Optional[Dict[str, Any]] = None
     model_id: Optional[int] = None
     model: Optional[ModelBriefReadSchema] = None
 
@@ -82,10 +78,17 @@ class ComponentReadSchema(TimeStampSchemaMixin):
 class ConnectionCreateRequest(BaseModel):
     """컴포넌트 연결 생성 요청"""
 
-    source_component_id: str = Field(..., description="소스 컴포넌트 ID")
-    target_component_id: str = Field(..., description="타겟 컴포넌트 ID")
+    source_component_type: ComponentType = Field(..., description="소스 컴포넌트 타입")
+    target_component_type: ComponentType = Field(..., description="타겟 컴포넌트 타입")
     connection_type: str = Field("DATA", description="연결 타입")
     config: Optional[Dict[str, Any]] = None
+
+
+class ConnectionUpdateRequest(BaseModel):
+    """컴포넌트 연결 수정 요청 (connection_type, config 제외)"""
+
+    source_component_type: ComponentType = Field(..., description="소스 컴포넌트 타입")
+    target_component_type: ComponentType = Field(..., description="타겟 컴포넌트 타입")
 
 
 class ConnectionReadSchema(BaseModel):
@@ -97,8 +100,6 @@ class ConnectionReadSchema(BaseModel):
     target_component_id: str
     source_component: ComponentReadSchema
     target_component: ComponentReadSchema
-    connection_type: str
-    config: Optional[Dict[str, Any]] = None
     created_at: datetime
 
     class Config:
@@ -111,6 +112,13 @@ class WorkflowDefinition(BaseModel):
 
     components: List[ComponentCreateRequest]
     connections: List[ConnectionCreateRequest]
+
+
+class WorkflowUpdateDefinition(BaseModel):
+    """워크플로우 수정 정의 (components의 config, connections의 connection_type/config 제외)"""
+
+    components: List[ComponentUpdateRequest]
+    connections: List[ConnectionUpdateRequest]
 
 
 # ============= Workflow 스키마 =============
@@ -147,7 +155,7 @@ class WorkflowUpdateRequest(BaseModel):
     category: Optional[str] = None
     status: Optional[WorkflowStatus] = None
     service_id: Optional[str] = None
-    workflow_definition: Optional[WorkflowDefinition] = None
+    workflow_definition: Optional[WorkflowUpdateDefinition] = None
 
 
 class WorkflowUpdateInternal(BaseModel):
@@ -251,11 +259,28 @@ class WorkflowListSchema(BaseModel):
 class WorkflowTemplateCreateRequest(WorkflowCreateRequest):
     """워크플로우 템플릿 생성 요청"""
 
-    is_template: bool = Field(True, description="템플릿 여부 (항상 True)")
+    is_template: Optional[bool] = Field(default=True, description="템플릿 여부 (기본값: True)")
+
+
+class WorkflowTemplateBriefSchema(WorkflowBaseSchema):
+    """워크플로우 템플릿 목록 조회용 간략 정보"""
+
+    creator: UserSchema
+    usage_count: int = Field(0, description="템플릿 사용 횟수")
+
+    class Config:
+        from_attributes = True
+
+
+class WorkflowTemplateListSchema(BaseModel):
+    """워크플로우 템플릿 목록 조회 응답"""
+
+    total: int
+    items: List[WorkflowTemplateBriefSchema]
 
 
 class WorkflowTemplateReadSchema(WorkflowReadSchema):
-    """워크플로우 템플릿 조회 응답"""
+    """워크플로우 템플릿 상세 조회 응답"""
 
     usage_count: int = Field(0, description="템플릿 사용 횟수")
 

@@ -10,7 +10,8 @@ class Model(BaseModel, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
-    description: Mapped[str] = mapped_column(String(500), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    repo_id: Mapped[str] = mapped_column(String(500), nullable=False)
     provider_id: Mapped[int] = mapped_column(ForeignKey("model_provider.id"))
     type_id: Mapped[int] = mapped_column(ForeignKey("model_type.id"))
     format_id: Mapped[int] = mapped_column(ForeignKey("model_format.id"))
@@ -20,6 +21,9 @@ class Model(BaseModel, TimestampMixin):
     inference_image_registry_id: Mapped[int] = mapped_column(ForeignKey("inference_image_registry.id"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     subversion: Mapped[int] = mapped_column(Integer, nullable=False)
+    task: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    parameter: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    sample_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     provider_info: Mapped["ModelProvider"] = relationship("ModelProvider")
     type_info: Mapped["ModelType"] = relationship("ModelType")

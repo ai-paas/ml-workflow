@@ -147,7 +147,7 @@ class KServeDeploymentService:
                     db.query(WorkflowComponent)
                     .filter(
                         WorkflowComponent.workflow_id == workflow_id,
-                        WorkflowComponent.component_id == deployment.component_id,
+                        WorkflowComponent.id == deployment.component_id,
                     )
                     .first()
                 )
