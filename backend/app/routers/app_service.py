@@ -54,11 +54,12 @@ def create_service(
     - **creator** (UserSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
-        - email (str): 이메일
-        - is_active (bool): 활성화 상태
-        - is_superuser (bool): 관리자 여부
-        - created_at (datetime): 계정 생성일
-        - updated_at (datetime): 계정 수정일
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
     - **workflow_count** (int): 연결된 워크플로우 수 (생성 직후는 0)
 
     ## Errors
@@ -137,11 +138,12 @@ def list_services(
         - creator (UserSchema): 생성자 상세 정보
             - id (int): 사용자 ID
             - username (str): 사용자명
-            - email (str): 이메일
-            - is_active (bool): 계정 활성화 상태
-            - is_superuser (bool): 관리자 권한 여부
-            - created_at (datetime): 계정 생성일
-            - updated_at (datetime): 계정 수정일
+            - name (str): 사용자 이름
+            - password (str): 비밀번호 (해시된 값)
+            - created_at (datetime): 계정 생성 시각
+            - updated_at (datetime): 계정 정보 수정 시각
+            - created_by (str, optional): 계정 생성자
+            - updated_by (str, optional): 계정 정보 수정자
         - workflow_count (int): 해당 서비스에 연결된 워크플로우 개수
 
     ## Notes
@@ -228,11 +230,12 @@ def get_service_detail(
     - **creator** (UserSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
-        - email (str): 이메일
-        - is_active (bool): 활성화 상태
-        - is_superuser (bool): 관리자 여부
-        - created_at (datetime): 계정 생성일
-        - updated_at (datetime): 계정 수정일
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
     - **workflows** (List[WorkflowBaseSchema]): 연결된 워크플로우 목록
         - id (str): 워크플로우 ID (UUID)
         - name (str): 워크플로우 이름
@@ -329,11 +332,12 @@ def update_service(
     - **creator** (UserSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
-        - email (str): 이메일
-        - is_active (bool): 활성화 상태
-        - is_superuser (bool): 관리자 여부
-        - created_at (datetime): 계정 생성일
-        - updated_at (datetime): 계정 수정일
+        - name (str): 사용자 이름
+        - password (str): 비밀번호 (해시된 값)
+        - created_at (datetime): 계정 생성 시각
+        - updated_at (datetime): 계정 정보 수정 시각
+        - created_by (str, optional): 계정 생성자
+        - updated_by (str, optional): 계정 정보 수정자
     - **workflow_count** (int): 연결된 워크플로우 수
 
     ## Notes
