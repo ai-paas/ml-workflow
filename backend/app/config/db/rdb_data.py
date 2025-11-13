@@ -47,6 +47,13 @@ MODEL_FORMAT_DATA_3 = [
     },
 ]
 
+MODEL_FORMAT_DATA_4 = [
+    {
+        "name": "gguf",
+        "description": "GGUF format for Ollama",
+    },
+]
+
 MODEL_PROVIDER_DATA = [
     {
         "name": "huggingface",
@@ -58,6 +65,13 @@ MODEL_PROVIDER_DATA = [
     },
 ]
 
+MODEL_PROVIDER_DATA_2 = [
+    {
+        "name": "ollama",
+        "description": "Ollama",
+    },
+]
+
 MODEL_TYPE_DATA = [
     {
         "name": "ODM",
@@ -66,6 +80,13 @@ MODEL_TYPE_DATA = [
     {
         "name": "Fine-Tuned",
         "description": "Fine-Tuned Model",
+    },
+]
+
+MODEL_TYPE_DATA_2 = [
+    {
+        "name": "LLM",
+        "description": "Large Language Model",
     },
 ]
 

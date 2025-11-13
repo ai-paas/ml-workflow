@@ -13,7 +13,7 @@ from core.kubeflow.workflow_executor import WorkflowExecutor
 from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
 from db.models.model import Model
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from repos.workflow import workflow_repository
 from schemas.user import UserSchema
 from schemas.workflow import (
@@ -1668,14 +1668,16 @@ async def inference_workflow_model(
     db: Session = SessionDepends,
     workflow_id: str,
     component_id: str,
-    image: UploadFile = File(...),
+    image: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    배포된 모델에 추론 요청 (KServe V2 Protocol)
+    배포된 모델에 추론 요청
 
     워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
-    KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
+    - KServe 모델: KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
+    - Ollama 모델: Ollama 채팅 API(/api/chat)를 사용하며, LLM 모델을 지원합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 워크플로우 UUID
@@ -1689,35 +1691,41 @@ async def inference_workflow_model(
              - 배포된 모델만 조회 가능 (DEPLOYED 상태)
 
     ## Request Body (Form Data)
-    - **image** (file, required): 분석할 이미지 파일
+    - **image** (file, optional): 분석할 이미지 파일
+        - KServe 모델인 경우 필수
+        - Ollama 모델인 경우 선택 (텍스트와 함께 사용 가능)
         - 지원 형식: JPEG, PNG, GIF, WebP
         - Base64로 인코딩되어 서버로 전송
+    - **text** (str, optional): 텍스트 입력
+        - Ollama 모델인 경우 필수 (image가 없는 경우)
+        - KServe 모델인 경우 사용하지 않음
 
-    ## Response
+    ## Response (통일된 형식)
     - **workflow_id** (str): 워크플로우 UUID
     - **component_id** (str): 컴포넌트 UUID
-    - **predictions** (List[dict]): 추론 결과 목록
-        - Object Detection의 경우 각 항목은 다음 필드를 포함:
-            - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
-            - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
-            - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
-                - x1, y1: 좌상단 좌표
-                - x2, y2: 우하단 좌표
-    - **image_info** (dict): 이미지 메타데이터
-        - **original_size** (dict): 원본 이미지 크기
-            - width (int): 원본 이미지 넓이
-            - height (int): 원본 이미지 높이
-        - **model_input_size** (dict): 모델 입력 크기
-            - width (int): 모델에 입력된 이미지 넓이
-            - height (int): 모델에 입력된 이미지 높이
     - **model_info** (dict): 모델 정보
         - component_id (str): 컴포넌트 ID
-        - service_name (str): KServe 서비스 이름
+        - service_name (str): 서비스 이름
         - sanitized_model_name (str): 정제된 모델 이름 (DNS 규칙 준수)
         - model_id (int, optional): 모델 ID
         - original_model_name (str, optional): 원본 모델 이름
-        - model_type (str, optional): 모델 타입 (예: "ODM")
-        - model_format (str, optional): 모델 포맷 (예: "pytorch")
+        - model_type (str, optional): 모델 타입 (예: "ODM", "LLM")
+        - model_format (str, optional): 모델 포맷 (예: "pytorch", "gguf")
+    - **result** (dict): 추론 결과
+        - **model_type** (str): 모델 타입 ("KServe" 또는 "Ollama")
+        - KServe 모델인 경우:
+            - **predictions** (List[dict]): 추론 결과 목록
+                - 각 항목은 다음 필드를 포함:
+                    - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
+                    - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
+                    - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
+            - **image_info** (dict, optional): 이미지 메타데이터
+                - **original_size** (dict): 원본 이미지 크기
+                - **model_input_size** (dict): 모델 입력 크기
+        - Ollama 모델인 경우:
+            - **response** (str): LLM 응답 텍스트
+            - **full_response** (dict, optional): Ollama API 전체 응답
+    - **raw_response** (dict, optional): 원본 응답 (예상치 못한 형식인 경우에만 포함)
 
     ## Monitoring
     - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
@@ -1725,13 +1733,23 @@ async def inference_workflow_model(
     - 서비스와 연결된 경우만 모니터링 데이터 저장
 
     ## Notes
+    ### KServe 모델
     - Istio Gateway를 통해 KServe InferenceService에 접근
     - V2 프로토콜 엔드포인트: /v2/models/{model_name}/infer
     - Host 헤더로 Istio 라우팅 제어
 
+    ### Ollama 모델
+    - internal_url을 통해 Ollama 서비스에 직접 접근 (예: http://localhost:11434)
+    - 채팅 API 엔드포인트: /api/chat
+    - model 필드에 repo_id 사용 (예: "gemma3", "ahmgam/medllama3-v20")
+    - 이미지는 base64로 인코딩되어 메시지에 포함됨
+
     ## Errors
+    - 400: 잘못된 요청
+        - Ollama 모델인 경우: text 인자가 없으면 에러
+        - KServe 모델인 경우: image 인자가 없으면 에러
+        - 잘못된 이미지 파일
     - 401: 인증되지 않은 사용자
-    - 400: 잘못된 이미지 파일
     - 404: 워크플로우나 컴포넌트를 찾을 수 없음
     - 503: 모델 서비스가 준비되지 않음
     - 504: 추론 요청 타임아웃
@@ -1765,14 +1783,6 @@ async def inference_workflow_model(
             detail=error_msg,
         )
 
-    # 이미지 읽기 및 base64 인코딩
-    try:
-        image_bytes = await image.read()
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-    except Exception as e:
-        logger.error(f"Error reading image: {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to read image file")
-
     # 배포 정보에서 필요한 값들 추출
     infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"  # settings에서 가져오기
     service_hostname = deployment.service_hostname
@@ -1789,6 +1799,9 @@ async def inference_workflow_model(
         .first()
     )
 
+    is_ollama_model = False
+    model_repo_id = None
+
     if component and component.model_id:
         model = db.query(Model).filter(Model.id == component.model_id).first()
         if model:
@@ -1800,27 +1813,117 @@ async def inference_workflow_model(
                     "model_format": model.format_info.name if model.format_info else None,
                 }
             )
+            # Ollama 모델 확인 (provider가 ollama이고 format이 gguf인 경우)
+            if hasattr(model, "provider_info") and model.provider_info and model.provider_info.name.lower() == "ollama":
+                if hasattr(model, "format_info") and model.format_info and model.format_info.name.lower() == "gguf":
+                    is_ollama_model = True
+                    model_repo_id = model.repo_id
 
-    # KServe V2 Protocol 형식으로 요청 데이터 구성
-    payload = {"image": image_base64}
+    # 입력 검증: 모델 타입에 따라 필수 인자 확인
+    if is_ollama_model:
+        # Ollama 모델인 경우: text 필수 (image는 선택)
+        if not text and not image:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ollama model requires either 'text' or 'image' parameter",
+            )
+    else:
+        # KServe 모델인 경우: image 필수
+        if not image:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="KServe model requires 'image' parameter",
+            )
 
-    # V2 프로토콜 요청 형식
-    data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+    # 이미지 읽기 및 base64 인코딩 (image가 제공된 경우)
+    image_base64 = None
+    if image:
+        try:
+            image_bytes = await image.read()
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Error reading image: {e}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to read image file")
 
-    # 헤더 설정 (Istio Virtual Service routing을 위한 Host 헤더)
-    headers = {"Content-Type": "application/json", "Host": service_hostname}  # Istio가 라우팅하는데 사용
+    # Ollama 모델인 경우와 KServe 모델인 경우 분기 처리
+    if is_ollama_model:
+        # Ollama 모델: /api/chat 엔드포인트 사용
+        if not deployment.internal_url:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Internal URL not available for Ollama model deployment",
+            )
 
-    # Kubeflow 인증이 필요한 경우
-    kf_manager = KubeflowManager()
-    cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+        # internal_url 사용 (예: http://localhost:11434)
+        ollama_url = deployment.internal_url.rstrip("/")
+        url = f"{ollama_url}/api/chat"
+
+        # Ollama 채팅 API 형식으로 요청 데이터 구성
+        # 텍스트와 이미지를 모두 지원 (단, 모델이 vision을 지원하는 경우에만 이미지 사용)
+        # Ollama API는 content가 문자열이어야 하고, images는 별도 필드로 전달
+
+        # 텍스트가 없으면 에러 (이미 검증했지만 안전을 위해)
+        if not text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Ollama model requires 'text' parameter",
+            )
+
+        # 메시지 구성
+        message = {
+            "role": "user",
+            "content": text,  # content는 항상 문자열 (텍스트 필수)
+        }
+
+        # 이미지가 있고 모델이 vision을 지원하는 경우에만 images 필드 추가
+        # 주의: 모든 모델이 이미지를 지원하는 것은 아니므로,
+        # vision 모델이 아닌 경우 이미지를 보내면 에러가 발생할 수 있음
+        # 현재는 텍스트만 있는 모델을 가정하므로 이미지는 무시
+        # TODO: 모델 정보에서 vision 지원 여부를 확인하여 조건부로 images 추가
+        if image_base64:
+            logger.warning(
+                f"Image provided but model {model_repo_id} may not support vision. "
+                "Sending text only. If this is a vision model, update the code to include images field."
+            )
+            # Vision 모델이 아닌 경우 이미지를 보내지 않음
+            # Vision 모델인 경우 아래 주석을 해제하고 사용
+            # message["images"] = [image_base64]  # base64 문자열 배열
+
+        data = {
+            "model": model_repo_id,  # repo_id 사용
+            "messages": [message],
+            "stream": False,
+        }
+
+        headers = {"Content-Type": "application/json"}
+        kf_manager = KubeflowManager()
+        cookies = (
+            kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+        )  # Ollama는 인증 불필요
+
+        logger.info(f"Sending Ollama inference request to {url} with model {model_repo_id}")
+    else:
+        # KServe V2 Protocol 형식으로 요청 데이터 구성
+        payload = {"image": image_base64}
+
+        # V2 프로토콜 요청 형식
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+
+        # 헤더 설정 (Istio Virtual Service routing을 위한 Host 헤더)
+        headers = {"Content-Type": "application/json", "Host": service_hostname}  # Istio가 라우팅하는데 사용
+
+        # Kubeflow 인증이 필요한 경우
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        # V2 프로토콜 엔드포인트로 요청 (Istio Gateway 경유)
+        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+
+        logger.info(f"Sending KServe inference request to {url}")
 
     response_time_ms = 0.0
 
     try:
-        # V2 프로토콜 엔드포인트로 요청 (Istio Gateway 경유)
-        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
-
-        logger.info(f"Sending inference request to {url}")
 
         response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
         response.raise_for_status()
@@ -1830,103 +1933,136 @@ async def inference_workflow_model(
 
         result = response.json()
 
-        # V2 프로토콜 응답 파싱
-        outputs = result.get("outputs", [])
-        if outputs and len(outputs) > 0:
-            prediction_data = outputs[0].get("data", [])
-            if prediction_data and len(prediction_data) > 0:
-                # 첫 번째 출력 데이터 반환
-                response_data = prediction_data[0]
-
-                # JSON 문자열인 경우 파싱
-                if isinstance(response_data, str):
-                    try:
-                        response_data = json.loads(response_data)
-                    except Exception:
-                        pass
-
-                # response_data가 dict이고 predictions와 image_info를 포함하는 경우
-                if isinstance(response_data, dict):
-                    predictions = response_data.get("predictions", response_data)
-                    image_info = response_data.get("image_info", {})
-
-                    logger.info(f"Parsed predictions with image_info: {image_info}")
-
-                    # 모니터링 데이터 기록 (성공)
-                    if service_id:
-                        try:
-                            ServiceMonitoringService.record_inference_request(
-                                db=db,
-                                service_id=service_id,
-                                workflow_id=workflow_id,
-                                user_id=current_user.id,
-                                response_time_ms=response_time_ms,
-                                is_success=True,
-                                is_object_detection=True,  # 현재는 Object Detection만 지원
-                            )
-                            db.commit()
-                        except Exception as e:
-                            logger.error(f"Failed to record monitoring data: {e}")
-                            # 모니터링 실패해도 추론 결과는 반환
-                            db.rollback()
-
-                    return {
-                        "workflow_id": workflow_id,
-                        "component_id": component_id,
-                        "predictions": predictions,
-                        "image_info": image_info,
-                        "model_info": model_info,
-                    }
-                else:
-                    # 하위 호환성: response_data가 dict가 아닌 경우
-                    # 모니터링 데이터 기록 (성공)
-                    if service_id:
-                        try:
-                            ServiceMonitoringService.record_inference_request(
-                                db=db,
-                                service_id=service_id,
-                                workflow_id=workflow_id,
-                                user_id=current_user.id,
-                                response_time_ms=response_time_ms,
-                                is_success=True,
-                                is_object_detection=True,
-                            )
-                            db.commit()
-                        except Exception as e:
-                            logger.error(f"Failed to record monitoring data: {e}")
-                            db.rollback()
-
-                    return {
-                        "workflow_id": workflow_id,
-                        "component_id": component_id,
-                        "predictions": response_data,
-                        "model_info": model_info,
-                    }
-
-        # 예상치 못한 응답 형식
-        # 모니터링 데이터 기록 (성공 - 응답은 받았지만 형식이 예상과 다름)
-        if service_id:
-            try:
-                ServiceMonitoringService.record_inference_request(
-                    db=db,
-                    service_id=service_id,
-                    workflow_id=workflow_id,
-                    user_id=current_user.id,
-                    response_time_ms=response_time_ms,
-                    is_success=True,
-                    is_object_detection=True,
-                )
-                db.commit()
-            except Exception as e:
-                logger.error(f"Failed to record monitoring data: {e}")
-                db.rollback()
-
-        return {
+        # 통일된 응답 형식으로 변환
+        unified_result = {
             "workflow_id": workflow_id,
             "component_id": component_id,
-            "raw_response": result,
             "model_info": model_info,
+            "result": {
+                "model_type": "Ollama" if is_ollama_model else "KServe",
+            },
         }
+
+        # Ollama 모델과 KServe 모델의 응답 처리 분기
+        if is_ollama_model:
+            # Ollama 채팅 API 응답 처리
+            # Ollama 응답 형식:
+            # {"model": "...", "created_at": "...", "message": {"role": "assistant",
+            # "content": "..."}, "done": true}
+            ollama_message = result.get("message", {})
+            ollama_content = ollama_message.get("content", "") if isinstance(ollama_message, dict) else ""
+
+            unified_result["result"]["response"] = ollama_content
+            unified_result["result"]["full_response"] = result
+
+            # 모니터링 데이터 기록 (성공)
+            if service_id:
+                try:
+                    ServiceMonitoringService.record_inference_request(
+                        db=db,
+                        service_id=service_id,
+                        workflow_id=workflow_id,
+                        user_id=current_user.id,
+                        response_time_ms=response_time_ms,
+                        is_success=True,
+                        is_object_detection=False,  # Ollama는 LLM이므로 Object Detection이 아님
+                    )
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to record monitoring data: {e}")
+                    db.rollback()
+
+            return unified_result
+        else:
+            # KServe V2 프로토콜 응답 파싱
+            outputs = result.get("outputs", [])
+            if outputs and len(outputs) > 0:
+                prediction_data = outputs[0].get("data", [])
+                if prediction_data and len(prediction_data) > 0:
+                    # 첫 번째 출력 데이터 반환
+                    response_data = prediction_data[0]
+
+                    # JSON 문자열인 경우 파싱
+                    if isinstance(response_data, str):
+                        try:
+                            response_data = json.loads(response_data)
+                        except Exception:
+                            pass
+
+                    # response_data가 dict이고 predictions와 image_info를 포함하는 경우
+                    if isinstance(response_data, dict):
+                        predictions = response_data.get("predictions", response_data)
+                        image_info = response_data.get("image_info", {})
+
+                        logger.info(f"Parsed predictions with image_info: {image_info}")
+
+                        unified_result["result"]["predictions"] = predictions
+                        if image_info:
+                            unified_result["result"]["image_info"] = image_info
+
+                        # 모니터링 데이터 기록 (성공)
+                        if service_id:
+                            try:
+                                ServiceMonitoringService.record_inference_request(
+                                    db=db,
+                                    service_id=service_id,
+                                    workflow_id=workflow_id,
+                                    user_id=current_user.id,
+                                    response_time_ms=response_time_ms,
+                                    is_success=True,
+                                    is_object_detection=True,  # 현재는 Object Detection만 지원
+                                )
+                                db.commit()
+                            except Exception as e:
+                                logger.error(f"Failed to record monitoring data: {e}")
+                                # 모니터링 실패해도 추론 결과는 반환
+                                db.rollback()
+
+                        return unified_result
+                    else:
+                        # 하위 호환성: response_data가 dict가 아닌 경우
+                        unified_result["result"]["predictions"] = response_data
+
+                        # 모니터링 데이터 기록 (성공)
+                        if service_id:
+                            try:
+                                ServiceMonitoringService.record_inference_request(
+                                    db=db,
+                                    service_id=service_id,
+                                    workflow_id=workflow_id,
+                                    user_id=current_user.id,
+                                    response_time_ms=response_time_ms,
+                                    is_success=True,
+                                    is_object_detection=True,
+                                )
+                                db.commit()
+                            except Exception as e:
+                                logger.error(f"Failed to record monitoring data: {e}")
+                                db.rollback()
+
+                        return unified_result
+
+            # 예상치 못한 응답 형식
+            unified_result["raw_response"] = result
+
+            # 모니터링 데이터 기록 (성공 - 응답은 받았지만 형식이 예상과 다름)
+            if service_id:
+                try:
+                    ServiceMonitoringService.record_inference_request(
+                        db=db,
+                        service_id=service_id,
+                        workflow_id=workflow_id,
+                        user_id=current_user.id,
+                        response_time_ms=response_time_ms,
+                        is_success=True,
+                        is_object_detection=True,
+                    )
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to record monitoring data: {e}")
+                    db.rollback()
+
+            return unified_result
 
     except requests.exceptions.HTTPError as http_err:
         # 응답 시간 계산
@@ -1945,7 +2081,7 @@ async def inference_workflow_model(
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
                     is_success=False,
-                    is_object_detection=True,
+                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
                 )
                 db.commit()
             except Exception as e:
@@ -1971,7 +2107,7 @@ async def inference_workflow_model(
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
                     is_success=False,
-                    is_object_detection=True,
+                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
                 )
                 db.commit()
             except Exception as e:
@@ -1998,7 +2134,7 @@ async def inference_workflow_model(
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
                     is_success=False,
-                    is_object_detection=True,
+                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
                 )
                 db.commit()
             except Exception as e:
@@ -2022,7 +2158,7 @@ async def inference_workflow_model(
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
                     is_success=False,
-                    is_object_detection=True,
+                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
                 )
                 db.commit()
             except Exception as mon_error:

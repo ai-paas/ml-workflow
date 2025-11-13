@@ -181,16 +181,53 @@ def create_model(
     )
     custom_model_provider = ModelProviderService.get_by_name(db, "custom")
     huggingface_model_provider = ModelProviderService.get_by_name(db, "huggingface")
+    ollama_model_provider = ModelProviderService.get_by_name(db, "ollama")
+    gguf_format = ModelFormatService.get_by_name(db, "gguf")
+
     try:
-        if provider_id == huggingface_model_provider.id:  # HuggingFace
-            result = HuggingFaceModelService().create(db, model_schema=model)
+        # Ollama + GGUF인 경우: 단순히 meta 정보만 DB에 등록
+        if (
+            ollama_model_provider
+            and gguf_format
+            and provider_id == ollama_model_provider.id
+            and format_id == gguf_format.id
+        ):
+            if not repo_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for Ollama models"
+                )
+
+            # 모델과 레지스트리 생성 (MLflow 없이)
+            from repos.model import model_registry_repository, model_repository
+            from schemas.model import ModelRegistryBaseSchema
+
+            model_obj = model_repository.create(db, obj_in=model)
+            model_id = model_obj.id
+
+            # ModelRegistry 생성 (uri는 repo_id 사용)
+            model_registry_repository.create(
+                db,
+                obj_in=ModelRegistryBaseSchema(
+                    artifact_path="",  # Ollama는 artifact_path 불필요
+                    uri=repo_id,  # repo_id를 uri로 사용 (예: ahmgam/medllama3-v20)
+                    reference_model_id=model_id,
+                    run_id=None,  # MLflow run_id 없음
+                ),
+            )
+            db.commit()
+            return model_repository.get(db, model_id)
+        elif provider_id == huggingface_model_provider.id:  # HuggingFace
+            return HuggingFaceModelService().create(db, model_schema=model)
         elif provider_id == custom_model_provider.id:  # Custom
-            result = CustomModelService().create(
+            return CustomModelService().create(
                 db, model_schema=model, model_registry_schema=model_registry_schema, file=file
             )
         else:
-            print("Error has been occured!")
-        return result
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported provider_id: {provider_id}"
+            )
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         raise e

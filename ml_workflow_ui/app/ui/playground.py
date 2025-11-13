@@ -3,6 +3,8 @@
 import base64
 import io
 import logging
+import os
+import tempfile
 from typing import List, Optional
 
 import gradio as gr
@@ -142,13 +144,21 @@ def create_playground_ui(app_state):
         with gr.Column(scale=1):
             gr.Markdown(
                 """### 3️⃣ 추론 실행
-            이미지를 업로드한 후 추론을 실행하세요."""
+            모델 타입에 따라 이미지 또는 텍스트를 입력하세요."""
             )
 
             image_input = gr.Image(
-                label="이미지 업로드",
+                label="이미지 업로드 (KServe 모델용)",
                 type="filepath",
                 height=300,
+                visible=True,
+            )
+
+            text_input = gr.Textbox(
+                label="텍스트 입력 (Ollama 모델용)",
+                placeholder="텍스트를 입력하세요...",
+                lines=5,
+                visible=False,
             )
 
             run_inference_btn = gr.Button("추론 실행 🚀", variant="primary", size="lg")
@@ -158,9 +168,16 @@ def create_playground_ui(app_state):
             inference_status = gr.Textbox(label="실행 상태", interactive=False)
 
             inference_output_image = gr.Image(
-                label="결과 이미지",
+                label="결과 이미지 (KServe 모델용)",
                 type="numpy",
                 height=400,
+                visible=True,
+            )
+
+            inference_output_text = gr.Textbox(
+                label="LLM 응답 (Ollama 모델용)",
+                lines=10,
+                visible=False,
             )
 
             inference_output_json = gr.JSON(label="상세 결과 (JSON)")
@@ -399,10 +416,17 @@ def create_playground_ui(app_state):
                 "",
             )
 
-    def on_model_selected(component_id: Optional[str], models_list: list):
-        """모델 선택 시 상세 정보 표시"""
+    def on_model_selected(component_id: Optional[str], models_list: list, workflow_id: str):
+        """모델 선택 시 상세 정보 표시 및 입력 필드 업데이트"""
         if not component_id or not models_list:
-            return "모델을 선택하면 상세 정보가 표시됩니다.", component_id or ""
+            return (
+                "모델을 선택하면 상세 정보가 표시됩니다.",
+                component_id or "",
+                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+            )
 
         # 선택된 모델 찾기
         selected = None
@@ -412,7 +436,32 @@ def create_playground_ui(app_state):
                 break
 
         if not selected:
-            return "모델 정보를 찾을 수 없습니다.", ""
+            return (
+                "모델 정보를 찾을 수 없습니다.",
+                "",
+                gr.update(visible=True),
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+            )
+
+        # 워크플로우에서 모델 타입 확인
+        is_ollama_model = False
+        if workflow_id and app_state.api_client:
+            try:
+                workflow_info = app_state.api_client.get_workflow(workflow_id)
+                components = workflow_info.get("components", [])
+                for comp in components:
+                    if comp.get("id") == component_id:
+                        model_info = comp.get("model")
+                        if model_info:
+                            model_format = model_info.get("format_info", {}).get("name", "").lower()
+                            provider_name = model_info.get("provider_info", {}).get("name", "").lower()
+                            if provider_name == "ollama" and model_format == "gguf":
+                                is_ollama_model = True
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to check model type: {e}")
 
         # 모델 상세 정보
         model_info = f"""
@@ -431,29 +480,82 @@ def create_playground_ui(app_state):
 **📅 배포 시간:** {selected.get('deployed_at', 'N/A')}
         """
 
-        return model_info, component_id
+        # 모델 타입에 따라 입력 필드 표시/숨김
+        if is_ollama_model:
+            return (
+                model_info,
+                component_id,
+                gr.update(visible=False),  # image_input 숨김
+                gr.update(visible=True),  # text_input 표시
+                gr.update(visible=False),  # inference_output_image 숨김
+                gr.update(visible=True),  # inference_output_text 표시
+            )
+        else:
+            return (
+                model_info,
+                component_id,
+                gr.update(visible=True),  # image_input 표시
+                gr.update(visible=False),  # text_input 숨김
+                gr.update(visible=True),  # inference_output_image 표시
+                gr.update(visible=False),  # inference_output_text 숨김
+            )
 
     def run_inference(
         workflow_id: str,
         component_id: str,
         image_path: Optional[str],
+        text: Optional[str],
     ):
         """추론 실행"""
         if not app_state.api_client:
-            return "❌ 로그인이 필요합니다.", None, None
+            return "❌ 로그인이 필요합니다.", None, None, None
 
         if not workflow_id or not component_id:
-            return "❌ 워크플로우 ID와 Component ID를 입력해주세요.", None, None
+            return "❌ 워크플로우 ID와 Component ID를 입력해주세요.", None, None, None
 
-        if not image_path:
-            return "❌ 이미지를 업로드해주세요.", None, None
+        # 모델 타입 확인
+        is_ollama_model = False
+        try:
+            workflow_info = app_state.api_client.get_workflow(workflow_id)
+            components = workflow_info.get("components", [])
+            for comp in components:
+                if comp.get("id") == component_id:
+                    model_info = comp.get("model")
+                    if model_info:
+                        model_format = model_info.get("format_info", {}).get("name", "").lower()
+                        provider_name = model_info.get("provider_info", {}).get("name", "").lower()
+                        if provider_name == "ollama" and model_format == "gguf":
+                            is_ollama_model = True
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to check model type: {e}")
+
+        # 입력 검증
+        if is_ollama_model:
+            if not text:
+                return "❌ Ollama 모델은 텍스트 입력이 필요합니다.", None, None, None
+        else:
+            if not image_path:
+                return "❌ KServe 모델은 이미지 업로드가 필요합니다.", None, None, None
 
         try:
+            # 이미지가 있는 경우 먼저 메모리로 로드 (파일이 닫히는 것을 방지)
+            loaded_image = None
+            if image_path:
+                try:
+                    loaded_image = Image.open(image_path)
+                    # 이미지를 메모리에 복사 (파일 핸들 닫힘 방지)
+                    loaded_image.load()
+                except Exception as e:
+                    logger.error(f"Failed to load image: {e}")
+                    return f"❌ 이미지 로드 실패: {str(e)}", None, None, None
+
             # 추론 요청
             result = app_state.api_client.inference(
                 workflow_id=workflow_id,
                 component_id=component_id,
                 image_path=image_path,
+                text=text,
             )
 
             status_msg = (
@@ -462,62 +564,95 @@ def create_playground_ui(app_state):
                 f"- Component: {result.get('component_id')}"
             )
 
-            # 결과 이미지 처리
-            predictions = result.get("predictions")
-            image_info = result.get("image_info", {})
+            # 통일된 응답 형식 처리
+            result_data = result.get("result", {})
+            model_type = result_data.get("model_type", "KServe")
+
             result_image = None
+            result_text = None
 
-            if predictions:
-                if isinstance(predictions, list):
-                    # 리스트 형태의 predictions (bbox, label, score 포함)
-                    logger.info(f"Predictions is a list with {len(predictions)} items")
-                    logger.info(f"Image info: {image_info}")
-                    try:
-                        # 원본 이미지에 predictions 그리기 (image_info 전달)
-                        result_image = draw_predictions_on_image(image_path, predictions, image_info)
-                        logger.info(f"Successfully drew {len(predictions)} predictions on image")
+            if model_type == "Ollama":
+                # Ollama 모델 응답 처리
+                result_text = result_data.get("response", "")
+                status_msg += "\n- 모델 타입: LLM (Ollama)"
+            else:
+                # KServe 모델 응답 처리
+                predictions = result_data.get("predictions")
+                image_info = result_data.get("image_info", {})
 
-                        # 상태 메시지에 감지된 객체 수 추가
-                        status_msg += f"\n- 감지된 객체: {len(predictions)}개"
-                    except Exception as e:
-                        logger.error(f"Failed to draw predictions: {e}")
-                        # 에러 발생 시 원본 이미지 표시
+                if predictions:
+                    if isinstance(predictions, list):
+                        # 리스트 형태의 predictions (bbox, label, score 포함)
+                        logger.info(f"Predictions is a list with {len(predictions)} items")
+                        logger.info(f"Image info: {image_info}")
                         try:
-                            image = Image.open(image_path)
-                            result_image = np.array(image)
-                        except Exception:
-                            pass
+                            # 로드된 이미지가 있으면 사용, 없으면 경로로 다시 로드
+                            if loaded_image:
+                                # 이미지를 임시 파일로 저장하여 draw_predictions_on_image 함수에 전달
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                                    loaded_image.save(tmp_file.name, format="JPEG")
+                                    tmp_path = tmp_file.name
 
-                elif isinstance(predictions, str):
-                    # Base64 인코딩된 이미지 문자열인 경우
-                    try:
-                        image_bytes = base64.b64decode(predictions)
-                        image = Image.open(io.BytesIO(image_bytes))
-                        result_image = np.array(image)
-                        logger.info("Successfully decoded base64 image")
-                    except Exception as e:
-                        logger.error(f"Failed to decode base64 image: {e}")
-                        pred_len = len(predictions) if isinstance(predictions, str) else "N/A"
-                        logger.debug(f"predictions type: {type(predictions)}, length: {pred_len}")
+                                try:
+                                    # 원본 이미지에 predictions 그리기 (image_info 전달)
+                                    result_image = draw_predictions_on_image(tmp_path, predictions, image_info)
+                                    logger.info(f"Successfully drew {len(predictions)} predictions on image")
+                                finally:
+                                    # 임시 파일 삭제
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
+                            else:
+                                # 이미지가 없는 경우 경로로 다시 시도
+                                result_image = draw_predictions_on_image(image_path, predictions, image_info)
+                                logger.info(f"Successfully drew {len(predictions)} predictions on image")
 
-                elif isinstance(predictions, dict):
-                    # JSON 객체인 경우 (바운딩 박스, 점수 등)
-                    logger.info(f"Predictions is a dict: {predictions.keys()}")
-                    # 이미지 데이터가 dict 안에 있을 수 있음
-                    if "image" in predictions and isinstance(predictions["image"], str):
+                            # 상태 메시지에 감지된 객체 수 추가
+                            status_msg += f"\n- 감지된 객체: {len(predictions)}개"
+                        except Exception as e:
+                            logger.error(f"Failed to draw predictions: {e}", exc_info=True)
+                            # 에러 발생 시 원본 이미지 표시
+                            try:
+                                if loaded_image:
+                                    result_image = np.array(loaded_image)
+                                else:
+                                    image = Image.open(image_path)
+                                    result_image = np.array(image)
+                            except Exception as img_err:
+                                logger.error(f"Failed to load image for fallback: {img_err}")
+                                pass
+
+                    elif isinstance(predictions, str):
+                        # Base64 인코딩된 이미지 문자열인 경우
                         try:
-                            image_bytes = base64.b64decode(predictions["image"])
+                            image_bytes = base64.b64decode(predictions)
                             image = Image.open(io.BytesIO(image_bytes))
                             result_image = np.array(image)
-                            logger.info("Successfully decoded image from predictions dict")
+                            logger.info("Successfully decoded base64 image")
                         except Exception as e:
-                            logger.error(f"Failed to decode image from dict: {e}")
+                            logger.error(f"Failed to decode base64 image: {e}")
 
-            return status_msg, result_image, result
+                    elif isinstance(predictions, dict):
+                        # JSON 객체인 경우 (바운딩 박스, 점수 등)
+                        logger.info(f"Predictions is a dict: {predictions.keys()}")
+                        # 이미지 데이터가 dict 안에 있을 수 있음
+                        if "image" in predictions and isinstance(predictions["image"], str):
+                            try:
+                                image_bytes = base64.b64decode(predictions["image"])
+                                image = Image.open(io.BytesIO(image_bytes))
+                                result_image = np.array(image)
+                                logger.info("Successfully decoded image from predictions dict")
+                            except Exception as e:
+                                logger.error(f"Failed to decode image from dict: {e}")
+
+                status_msg += "\n- 모델 타입: Object Detection (KServe)"
+
+            return status_msg, result_image, result_text, result
 
         except Exception as e:
             logger.error(f"Inference failed: {e}")
-            return f"❌ 추론 실패: {str(e)}", None, None
+            return f"❌ 추론 실패: {str(e)}", None, None, None
 
     # 이벤트 핸들러 연결
     refresh_workflows_btn.click(
@@ -552,14 +687,21 @@ def create_playground_ui(app_state):
 
     model_dropdown.change(
         fn=on_model_selected,
-        inputs=[model_dropdown, deployed_models_state],
-        outputs=[model_info_display, selected_component_id_state],
+        inputs=[model_dropdown, deployed_models_state, selected_workflow_id_state],
+        outputs=[
+            model_info_display,
+            selected_component_id_state,
+            image_input,
+            text_input,
+            inference_output_image,
+            inference_output_text,
+        ],
     )
 
     run_inference_btn.click(
         fn=run_inference,
-        inputs=[selected_workflow_id_state, selected_component_id_state, image_input],
-        outputs=[inference_status, inference_output_image, inference_output_json],
+        inputs=[selected_workflow_id_state, selected_component_id_state, image_input, text_input],
+        outputs=[inference_status, inference_output_image, inference_output_text, inference_output_json],
     )
 
     # 페이지 로드를 위한 함수와 출력 컴포넌트 반환

@@ -218,9 +218,23 @@ class WorkflowExecutor:
                 from db.models.model import Model
 
                 model = db.query(Model).filter(Model.id == component.model_id).first()
-                if model and hasattr(model, "registry") and model.registry:
-                    model_uri = model.registry.uri or ""
-                    run_id = model.registry.run_id or ""
+                if model:
+                    # Ollama 모델 감지 (provider가 ollama이고 format이 gguf인 경우)
+                    if (
+                        hasattr(model, "provider_info")
+                        and model.provider_info
+                        and model.provider_info.name.lower() == "ollama"
+                    ):
+                        if (
+                            hasattr(model, "format_info")
+                            and model.format_info
+                            and model.format_info.name.lower() == "gguf"
+                        ):
+                            framework = "ollama"
+
+                    if hasattr(model, "registry") and model.registry:
+                        model_uri = model.registry.uri or ""
+                        run_id = model.registry.run_id or ""
 
                     # framework 정보 추론
                     if hasattr(model, "format_info") and model.format_info:
@@ -266,6 +280,7 @@ class WorkflowExecutor:
                 infer_image_url: str,
                 config: str = "{}",
                 gpu_enabled: bool = False,
+                repo_id: str = "",
             ) -> str:
                 import json
                 import logging
@@ -331,6 +346,316 @@ class WorkflowExecutor:
                 logger.info(f"Generated service name: {service_name} (length: {len(service_name)})")
 
                 try:
+                    # Ollama 모델인 경우 Kubernetes 리소스 직접 생성
+                    if framework == "ollama":
+                        # Ollama 모델 이름은 repo_id 사용 (model 등록 시 사용한 repo_id)
+                        # repo_id가 없으면 pipeline 실패
+                        if not repo_id or repo_id == "":
+                            error_msg = "repo_id is required for Ollama model deployment"
+                            logger.error(error_msg)
+                            raise ValueError(error_msg)
+
+                        ollama_model_name = repo_id
+
+                        logger.info(f"Deploying Ollama model: {ollama_model_name} using Kubernetes resources")
+
+                        # Kubernetes API 클라이언트
+                        apps_v1 = client.AppsV1Api()
+                        core_v1 = client.CoreV1Api()
+
+                        # PVC 이름 생성
+                        pvc_name = f"{service_name}-pvc"
+
+                        # 1. PVC 생성
+                        pvc = client.V1PersistentVolumeClaim(
+                            metadata=client.V1ObjectMeta(
+                                name=pvc_name,
+                                namespace=namespace,
+                                labels={
+                                    "workflow-id": workflow_id,
+                                    "component-id": component_id,
+                                    "app": service_name,
+                                },
+                            ),
+                            spec=client.V1PersistentVolumeClaimSpec(
+                                access_modes=["ReadWriteOnce"],
+                                resources=client.V1ResourceRequirements(requests={"storage": "30Gi"}),
+                            ),
+                        )
+
+                        try:
+                            core_v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
+                            logger.info(f"Created PVC: {pvc_name}")
+                        except Exception as e:
+                            # PVC가 이미 존재하는 경우 무시
+                            if "already exists" not in str(e).lower():
+                                logger.warning(f"PVC creation failed (may already exist): {e}")
+
+                        # Ollama용 리소스 설정
+                        ollama_resources = client.V1ResourceRequirements(
+                            requests={
+                                "memory": "8Gi",
+                                "cpu": "2",
+                            },
+                            limits={
+                                "memory": "16Gi",
+                                "cpu": "6",
+                            },
+                        )
+
+                        if gpu_enabled:
+                            ollama_resources.requests["nvidia.com/gpu"] = "1"
+                            ollama_resources.limits["nvidia.com/gpu"] = "1"
+
+                        # 2. Deployment 생성
+                        deployment = client.V1Deployment(
+                            metadata=client.V1ObjectMeta(
+                                name=service_name,
+                                namespace=namespace,
+                                labels={
+                                    "workflow-id": workflow_id,
+                                    "component-id": component_id,
+                                    "app": service_name,
+                                },
+                            ),
+                            spec=client.V1DeploymentSpec(
+                                replicas=1,
+                                selector=client.V1LabelSelector(
+                                    match_labels={
+                                        "app": service_name,
+                                    }
+                                ),
+                                template=client.V1PodTemplateSpec(
+                                    metadata=client.V1ObjectMeta(
+                                        labels={
+                                            "app": service_name,
+                                            "workflow-id": workflow_id,
+                                            "component-id": component_id,
+                                        },
+                                    ),
+                                    spec=client.V1PodSpec(
+                                        containers=[
+                                            client.V1Container(
+                                                name="ollama",
+                                                image="ollama/ollama:latest",
+                                                command=["/bin/sh", "-c"],
+                                                args=[
+                                                    (
+                                                        f"ollama serve & SERVE_PID=$! && "
+                                                        f"sleep 10 && ollama pull {ollama_model_name} && "
+                                                        f"wait $SERVE_PID"
+                                                    )
+                                                ],
+                                                ports=[
+                                                    client.V1ContainerPort(
+                                                        container_port=11434, name="http", protocol="TCP"
+                                                    )
+                                                ],
+                                                resources=ollama_resources,
+                                                env=[
+                                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
+                                                    client.V1EnvVar(name="COMPONENT_ID", value=component_id),
+                                                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                                                ],
+                                                volume_mounts=[
+                                                    client.V1VolumeMount(name="model-data", mount_path="/root/.ollama")
+                                                ],
+                                                readiness_probe=client.V1Probe(
+                                                    http_get=client.V1HTTPGetAction(path="/api/tags", port=11434),
+                                                    initial_delay_seconds=30,
+                                                    period_seconds=10,
+                                                ),
+                                            )
+                                        ],
+                                        volumes=[
+                                            client.V1Volume(
+                                                name="model-data",
+                                                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                                                    claim_name=pvc_name
+                                                ),
+                                            )
+                                        ],
+                                    ),
+                                ),
+                            ),
+                        )
+
+                        # Deployment 생성
+                        apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
+                        logger.info(f"Created Deployment: {service_name}")
+
+                        # 3. Service 생성 (ClusterIP 타입)
+                        service = client.V1Service(
+                            metadata=client.V1ObjectMeta(
+                                name=service_name,
+                                namespace=namespace,
+                                labels={
+                                    "workflow-id": workflow_id,
+                                    "component-id": component_id,
+                                    "app": service_name,
+                                },
+                            ),
+                            spec=client.V1ServiceSpec(
+                                type="ClusterIP",
+                                selector={"app": service_name},
+                                ports=[
+                                    client.V1ServicePort(
+                                        port=11434,
+                                        target_port=11434,
+                                        name="http",
+                                        protocol="TCP",
+                                    )
+                                ],
+                            ),
+                        )
+
+                        # Service 생성
+                        created_service = core_v1.create_namespaced_service(namespace=namespace, body=service)
+                        logger.info(f"Created Service: {service_name}")
+
+                        # Service의 실제 정보 가져오기
+                        service_cluster_ip = created_service.spec.cluster_ip
+                        service_port = created_service.spec.ports[0].port
+
+                        # Ollama는 KServe를 사용하지 않으므로 service_hostname 불필요
+                        # internal_url만 실제 ClusterIP:Port로 사용
+                        service_hostname = ""  # Ollama는 사용하지 않음
+                        internal_url = f"http://{service_cluster_ip}:{service_port}"
+
+                        logger.info(f"Service ClusterIP: {service_cluster_ip}, Port: {service_port}")
+                        logger.info(f"Internal URL: {internal_url}")
+
+                        # Deployment가 준비될 때까지 대기 (최대 10분)
+                        max_wait = 600  # 10분
+                        wait_interval = 15  # 15초 간격
+                        elapsed = 0
+                        deployment_ready = False
+
+                        while elapsed < max_wait:
+                            try:
+                                deployment_status = apps_v1.read_namespaced_deployment_status(
+                                    name=service_name, namespace=namespace
+                                )
+
+                                if (
+                                    deployment_status.status.ready_replicas
+                                    and deployment_status.status.ready_replicas >= 1
+                                ):
+                                    logger.info(f"Deployment {service_name} is ready")
+                                    deployment_ready = True
+                                    break
+
+                                time.sleep(wait_interval)
+                                elapsed += wait_interval
+
+                            except Exception as e:
+                                logger.warning(f"Error checking deployment status: {e}")
+                                time.sleep(wait_interval)
+                                elapsed += wait_interval
+
+                        if not deployment_ready:
+                            logger.warning(f"Deployment {service_name} not ready after {max_wait} seconds")
+
+                        # 배포 상태 결정
+                        deployment_status = "deployed" if deployment_ready else "deploying"
+
+                        # DB 업데이트를 위해 Backend API 호출
+                        try:
+                            import requests
+
+                            if not rest_api_url:
+                                logger.warning("REST_API_URL not provided, skipping DB update")
+                            else:
+                                # 토큰 발급
+                                auth_token = None
+                                if restapi_username and restapi_password:
+                                    try:
+                                        token_response = requests.post(
+                                            f"{rest_api_url}/api/v1/authentications/token",
+                                            data={"username": restapi_username, "password": restapi_password},
+                                            timeout=10,
+                                        )
+                                        if token_response.status_code == 200:
+                                            auth_token = token_response.json().get("access_token")
+                                            logger.info("Successfully obtained authentication token")
+                                        else:
+                                            logger.warning(f"Failed to get auth token: {token_response.status_code}")
+                                    except Exception as token_error:
+                                        logger.warning(f"Failed to obtain auth token: {token_error}")
+
+                                update_url = (
+                                    f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
+                                    f"components/{component_id}/deployment-status"
+                                )
+
+                                update_payload = {
+                                    "service_name": service_name,
+                                    "service_hostname": service_hostname,  # Ollama는 빈 문자열이지만 형식 유지
+                                    "model_name": ollama_model_name,
+                                    "status": deployment_status,
+                                    "internal_url": internal_url,
+                                    "error_message": None,
+                                }
+
+                                headers = {"Content-Type": "application/json"}
+                                if auth_token:
+                                    headers["Authorization"] = f"Bearer {auth_token}"
+
+                                logger.info("Updating Ollama deployment status via API: %s", update_url)
+                                response = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
+
+                                if response.status_code == 200:
+                                    logger.info("Successfully updated Ollama deployment status in DB")
+
+                                    # deployment-status 업데이트 성공 후 워크플로우 상태를 ACTIVE로 업데이트
+                                    if deployment_ready and deployment_status == "deployed":
+                                        try:
+                                            workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                            workflow_update_data = {"status": "ACTIVE"}
+                                            workflow_update_response = requests.put(
+                                                workflow_update_url,
+                                                json=workflow_update_data,
+                                                headers=headers,
+                                                timeout=10,
+                                            )
+                                            if workflow_update_response.status_code == 200:
+                                                logger.info(
+                                                    f"Successfully updated workflow {workflow_id} status to ACTIVE"
+                                                )
+                                            else:
+                                                status_code = workflow_update_response.status_code
+                                                status_text = workflow_update_response.text
+                                                logger.warning(
+                                                    f"Failed to update workflow status: "
+                                                    f"{status_code} - {status_text}"
+                                                )
+                                        except Exception as workflow_update_error:
+                                            logger.error(
+                                                f"Error updating workflow status to ACTIVE: {workflow_update_error}"
+                                            )
+                                else:
+                                    status_code = response.status_code
+                                    status_text = response.text
+                                    logger.warning(
+                                        f"Failed to update Ollama deployment status: " f"{status_code} - {status_text}"
+                                    )
+
+                        except Exception as e:
+                            logger.error(f"Error updating Ollama deployment status in DB: {e}")
+                            # DB 업데이트 실패해도 배포 자체는 성공이므로 계속 진행
+
+                        # 배포 상태 업데이트를 위한 정보 반환
+                        return json.dumps(
+                            {
+                                "service_name": service_name,
+                                "service_hostname": service_hostname,
+                                "model_name": ollama_model_name,
+                                "status": deployment_status,
+                                "internal_url": internal_url,
+                            }
+                        )
+
+                    # 기존 MLflow 모델 배포 방식
                     # 컨테이너 args 구성
                     container_args = [
                         f"--model_name={model_name}",
@@ -685,6 +1010,9 @@ class WorkflowExecutor:
             # model_name에 슬래시(/)가 있으면 하이픈(-)으로 변경 (Kubernetes 리소스 이름 규칙)
             sanitized_model_name = model.name.replace("/", "-") if model else "model"
 
+            # repo_id 추출 (Ollama 모델용)
+            repo_id_value = model.repo_id if model and model.repo_id else ""
+
             return model_deployment_component(
                 workflow_id=str(workflow.id),
                 component_id=component.id,
@@ -703,6 +1031,7 @@ class WorkflowExecutor:
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
                 gpu_enabled=component.config.get("gpu_enabled", False) if component.config else False,
+                repo_id=repo_id_value,
             )
 
         # END 컴포넌트
@@ -987,69 +1316,173 @@ class WorkflowExecutor:
                 # Kubernetes 설정
                 k8s_config.load_incluster_config()
 
-                # Custom Object API 사용
-                api = client.CustomObjectsApi()
                 namespace = "kubeflow-user-example-com"
-
-                logger.info(f"Querying InferenceServices for workflow: {workflow_id}")
-
-                # Label selector로 InferenceService 조회
                 label_selector = f"workflow-id={workflow_id}"
-
-                result = api.list_namespaced_custom_object(
-                    group="serving.kserve.io",
-                    version="v1beta1",
-                    namespace=namespace,
-                    plural="inferenceservices",
-                    label_selector=label_selector,
-                )
-
-                services = result.get("items", [])
-                logger.info(f"Found {len(services)} InferenceServices for workflow {workflow_id}")
 
                 deleted_count = 0
                 failed_count = 0
+                total_count = 0
 
-                # CustomObjectsApi로 각 서비스 삭제
-                for service in services:
-                    service_name = service.get("metadata", {}).get("name")
-                    if service_name:
+                # 1. KServe InferenceService 삭제
+                try:
+                    api = client.CustomObjectsApi()
+                    logger.info(f"Querying InferenceServices for workflow: {workflow_id}")
+
+                    result = api.list_namespaced_custom_object(
+                        group="serving.kserve.io",
+                        version="v1beta1",
+                        namespace=namespace,
+                        plural="inferenceservices",
+                        label_selector=label_selector,
+                    )
+
+                    services = result.get("items", [])
+                    logger.info(f"Found {len(services)} InferenceServices for workflow {workflow_id}")
+                    total_count += len(services)
+
+                    # CustomObjectsApi로 각 서비스 삭제
+                    for service in services:
+                        service_name = service.get("metadata", {}).get("name")
+                        if service_name:
+                            try:
+                                logger.info(f"Deleting InferenceService: {service_name} in namespace: {namespace}")
+
+                                # InferenceService 삭제
+                                api.delete_namespaced_custom_object(
+                                    group="serving.kserve.io",
+                                    version="v1beta1",
+                                    namespace=namespace,
+                                    plural="inferenceservices",
+                                    name=service_name,
+                                )
+
+                                deleted_count += 1
+                                logger.info(f"Successfully deleted InferenceService: {service_name}")
+
+                            except client.exceptions.ApiException as e:
+                                if e.status == 404:
+                                    logger.warning(f"InferenceService not found: {service_name}")
+                                    # 404는 이미 없는 것이므로 failed에 카운트하지 않음
+                                else:
+                                    logger.error(
+                                        f"Failed to delete InferenceService {service_name}: {e.status} - {e.reason}"
+                                    )
+                                    failed_count += 1
+                            except Exception as e:
+                                logger.error(f"Unexpected error deleting InferenceService {service_name}: {e}")
+                                failed_count += 1
+                        else:
+                            logger.warning("Service name not found in service metadata")
+                            failed_count += 1
+                except Exception as e:
+                    logger.warning(f"Error cleaning up InferenceServices: {e}")
+
+                # 2. Ollama 리소스 삭제 (Deployment, Service, PVC)
+                try:
+                    apps_v1 = client.AppsV1Api()
+                    core_v1 = client.CoreV1Api()
+
+                    # Deployment 삭제
+                    logger.info(f"Querying Deployments for workflow: {workflow_id}")
+                    deployments = apps_v1.list_namespaced_deployment(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    deployment_items = deployments.items
+                    logger.info(f"Found {len(deployment_items)} Deployments for workflow {workflow_id}")
+                    total_count += len(deployment_items)
+
+                    for deployment in deployment_items:
+                        deployment_name = deployment.metadata.name
                         try:
-                            logger.info(f"Deleting InferenceService: {service_name} in namespace: {namespace}")
-
-                            # InferenceService 삭제
-                            api.delete_namespaced_custom_object(
-                                group="serving.kserve.io",
-                                version="v1beta1",
+                            logger.info(f"Deleting Deployment: {deployment_name} in namespace: {namespace}")
+                            apps_v1.delete_namespaced_deployment(
+                                name=deployment_name,
                                 namespace=namespace,
-                                plural="inferenceservices",
-                                name=service_name,
                             )
-
                             deleted_count += 1
-                            logger.info(f"Successfully deleted InferenceService: {service_name}")
-
+                            logger.info(f"Successfully deleted Deployment: {deployment_name}")
                         except client.exceptions.ApiException as e:
                             if e.status == 404:
-                                logger.warning(f"InferenceService not found: {service_name}")
-                                # 404는 이미 없는 것이므로 failed에 카운트하지 않음
+                                logger.warning(f"Deployment not found: {deployment_name}")
                             else:
-                                logger.error(
-                                    f"Failed to delete InferenceService {service_name}: {e.status} - {e.reason}"
-                                )
+                                logger.error(f"Failed to delete Deployment {deployment_name}: {e.status} - {e.reason}")
                                 failed_count += 1
                         except Exception as e:
-                            logger.error(f"Unexpected error deleting InferenceService {service_name}: {e}")
+                            logger.error(f"Unexpected error deleting Deployment {deployment_name}: {e}")
                             failed_count += 1
-                    else:
-                        logger.warning("Service name not found in service metadata")
-                        failed_count += 1
+
+                    # Service 삭제
+                    logger.info(f"Querying Services for workflow: {workflow_id}")
+                    services = core_v1.list_namespaced_service(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    service_items = services.items
+                    logger.info(f"Found {len(service_items)} Services for workflow {workflow_id}")
+                    total_count += len(service_items)
+
+                    for service in service_items:
+                        service_name = service.metadata.name
+                        try:
+                            logger.info(f"Deleting Service: {service_name} in namespace: {namespace}")
+                            core_v1.delete_namespaced_service(
+                                name=service_name,
+                                namespace=namespace,
+                            )
+                            deleted_count += 1
+                            logger.info(f"Successfully deleted Service: {service_name}")
+                        except client.exceptions.ApiException as e:
+                            if e.status == 404:
+                                logger.warning(f"Service not found: {service_name}")
+                            else:
+                                logger.error(f"Failed to delete Service {service_name}: {e.status} - {e.reason}")
+                                failed_count += 1
+                        except Exception as e:
+                            logger.error(f"Unexpected error deleting Service {service_name}: {e}")
+                            failed_count += 1
+
+                    # PVC 삭제
+                    logger.info(f"Querying PVCs for workflow: {workflow_id}")
+                    pvcs = core_v1.list_namespaced_persistent_volume_claim(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    pvc_items = pvcs.items
+                    logger.info(f"Found {len(pvc_items)} PVCs for workflow {workflow_id}")
+                    total_count += len(pvc_items)
+
+                    for pvc in pvc_items:
+                        pvc_name = pvc.metadata.name
+                        try:
+                            logger.info(f"Deleting PVC: {pvc_name} in namespace: {namespace}")
+                            core_v1.delete_namespaced_persistent_volume_claim(
+                                name=pvc_name,
+                                namespace=namespace,
+                            )
+                            deleted_count += 1
+                            logger.info(f"Successfully deleted PVC: {pvc_name}")
+                        except client.exceptions.ApiException as e:
+                            if e.status == 404:
+                                logger.warning(f"PVC not found: {pvc_name}")
+                            else:
+                                logger.error(f"Failed to delete PVC {pvc_name}: {e.status} - {e.reason}")
+                                failed_count += 1
+                        except Exception as e:
+                            logger.error(f"Unexpected error deleting PVC {pvc_name}: {e}")
+                            failed_count += 1
+
+                except Exception as e:
+                    logger.warning(f"Error cleaning up Ollama resources: {e}")
 
                 result_data = {
                     "workflow_id": workflow_id,
                     "deleted": deleted_count,
                     "failed": failed_count,
-                    "total": len(services),
+                    "total": total_count,
                     "status": "completed",
                 }
 

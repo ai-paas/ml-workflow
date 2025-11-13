@@ -285,35 +285,65 @@ class APIClient:
         self,
         workflow_id: str,
         component_id: str,
-        image_path: str,
+        image_path: Optional[str] = None,
+        text: Optional[str] = None,
     ) -> Dict:
         """배포된 모델에 추론 요청
 
         Args:
             workflow_id: 워크플로우 ID (path parameter)
             component_id: 컴포넌트 ID (path parameter)
-            image_path: 이미지 파일 경로
+            image_path: 이미지 파일 경로 (KServe 모델인 경우 필수)
+            text: 텍스트 입력 (Ollama 모델인 경우 필수)
 
         Returns:
             {
                 "workflow_id": str,
                 "component_id": str,
-                "predictions": str | dict,  # base64 문자열 또는 JSON 객체
-                "model_info": dict
+                "model_info": dict,
+                "result": {
+                    "model_type": "KServe" | "Ollama",
+                    "predictions": List[dict] | None,  # KServe 모델인 경우
+                    "image_info": dict | None,  # KServe 모델인 경우
+                    "response": str | None,  # Ollama 모델인 경우
+                    "full_response": dict | None  # Ollama 모델인 경우
+                },
+                "raw_response": dict | None  # 예상치 못한 형식인 경우
             }
         """
-        with open(image_path, "rb") as f:
-            files = {"image": ("image.jpg", f, "image/jpeg")}
+        url = f"{self.base_url}/api/v1/workflows/{workflow_id}/models/{component_id}/inference"
+        headers = {"Authorization": f"Bearer {self.token}"}
 
-            # multipart/form-data 요청
-            # component_id는 경로 파라미터로 전달
-            url = f"{self.base_url}/api/v1/workflows/{workflow_id}/models/{component_id}/inference"
-            headers = {"Authorization": f"Bearer {self.token}"}
+        # multipart/form-data 요청
+        files = {}
+        data = {}
+
+        if image_path:
+            # 파일을 열어둔 상태로 requests.post() 호출
+            with open(image_path, "rb") as f:
+                files["image"] = ("image.jpg", f, "image/jpeg")
+
+                if text:
+                    data["text"] = text
+
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    files=files if files else None,
+                    data=data if data else None,
+                )
+                response.raise_for_status()
+                return response.json()
+        else:
+            # 이미지가 없는 경우 (Ollama 모델)
+            if text:
+                data["text"] = text
 
             response = requests.post(
                 url,
                 headers=headers,
-                files=files,
+                files=files if files else None,
+                data=data if data else None,
             )
             response.raise_for_status()
             return response.json()
