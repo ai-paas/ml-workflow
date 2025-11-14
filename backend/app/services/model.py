@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
-from db.models.model import Model
+from db.models.model import Model, ModelProvider, ModelType
 from db.models.service import WorkflowComponent
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
@@ -17,6 +17,7 @@ from repos.model import (
     model_repository,
     model_type_repository,
 )
+from repos.model_base_deployment import model_base_deployment_repository
 from schemas.model import (
     ModelBaseSchema,
     ModelFormatReadSchema,
@@ -27,6 +28,7 @@ from schemas.model import (
     ModelRegistryRequestSchema,
     ModelTypeReadSchema,
 )
+from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
 from transformers import (
     AutoConfig,
@@ -168,10 +170,37 @@ class ModelService:
                     + "\n\n참조하는 항목을 먼저 삭제하거나 수정해주세요."
                 )
 
-            # 3. MLflow 정보 미리 저장 (DB 삭제 전에 필요)
-            run_id = model_obj.registry.run_id if model_obj.registry else None
-            artifact_path = model_obj.registry.artifact_path if model_obj.registry else None
-            s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "") if artifact_path else None
+            # 3. 모델 타입과 provider 확인 (명시적으로 조회)
+
+            model_type = db.query(ModelType).filter(ModelType.id == model_obj.type_id).first()
+            model_provider = db.query(ModelProvider).filter(ModelProvider.id == model_obj.provider_id).first()
+
+            model_type_name = model_type.name if model_type else None
+            model_provider_name = model_provider.name if model_provider else None
+
+            is_ollama_embedding = model_type_name == "Embedding" and model_provider_name == "ollama"
+            is_ollama = model_provider_name == "ollama"
+
+            # 3-1. model_base_deployments 레코드 삭제 (외래키 제약 조건 때문에 먼저 삭제 필요)
+            # cleanup_model_deployment가 파이프라인 완료 후 DB 레코드를 삭제함
+            if is_ollama_embedding:
+                try:
+                    cleanup_result = ModelBaseDeploymentService.cleanup_model_deployment(db, model_id)
+                    logger.info(f"Kubernetes resources cleanup result for Ollama Embedding model: {cleanup_result}")
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to cleanup Kubernetes resources for model {model_id}: {cleanup_error}")
+                    # cleanup 실패 시 모델 삭제 중단 (외래키 제약 조건 위반 방지)
+                    raise RuntimeError(f"모델 기본 배포 정보 정리 실패: {str(cleanup_error)}")
+
+            # 3-2. MLflow 정보 미리 저장 (Ollama provider가 아닌 경우에만 필요)
+            run_id = None
+            artifact_path = None
+            s3_artifact_path = None
+
+            if not is_ollama:
+                run_id = model_obj.registry.run_id if model_obj.registry else None
+                artifact_path = model_obj.registry.artifact_path if model_obj.registry else None
+                s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "") if artifact_path else None
 
             # 4. 트랜잭션 시작 - MLflow/S3 삭제 후 DB 커밋
             try:
@@ -183,35 +212,36 @@ class ModelService:
                 # Model 삭제 (아직 커밋 안됨)
                 model_repository.delete(db, pk=model_id)
 
-                # 4-2. MLflow/S3 삭제 시도
-                mlflow_deleted = False
+                # 4-2. MLflow/S3 삭제 시도 (Ollama provider가 아닌 경우에만)
+                if not is_ollama:
+                    mlflow_deleted = False
 
-                # MLflow artifacts 삭제
-                if run_id:
-                    try:
-                        ModelRegistry().delete_run_artifacts(run_id)
-                        mlflow_deleted = True
-                    except Exception as mlflow_error:
-                        # MLflow 삭제 실패시 DB 롤백
-                        db.rollback()
-                        raise RuntimeError(f"MLflow 아티팩트 삭제 실패 (DB 변경사항 롤백됨): {str(mlflow_error)}")
-
-                # S3 폴더 삭제
-                if s3_artifact_path:
-                    try:
-                        MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
-                    except Exception as s3_error:
-                        # S3 삭제 실패 처리
-                        # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
-                        if mlflow_deleted:
-                            import warnings
-
-                            warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
-                            # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
-                        else:
-                            # MLflow도 삭제 안됐고 S3도 실패면 롤백
+                    # MLflow artifacts 삭제
+                    if run_id:
+                        try:
+                            ModelRegistry().delete_run_artifacts(run_id)
+                            mlflow_deleted = True
+                        except Exception as mlflow_error:
+                            # MLflow 삭제 실패시 DB 롤백
                             db.rollback()
-                            raise RuntimeError(f"S3 폴더 삭제 실패 (DB 변경사항 롤백됨): {str(s3_error)}")
+                            raise RuntimeError(f"MLflow 아티팩트 삭제 실패 (DB 변경사항 롤백됨): {str(mlflow_error)}")
+
+                    # S3 폴더 삭제
+                    if s3_artifact_path:
+                        try:
+                            MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
+                        except Exception as s3_error:
+                            # S3 삭제 실패 처리
+                            # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
+                            if mlflow_deleted:
+                                import warnings
+
+                                warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
+                                # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
+                            else:
+                                # MLflow도 삭제 안됐고 S3도 실패면 롤백
+                                db.rollback()
+                                raise RuntimeError(f"S3 폴더 삭제 실패 (DB 변경사항 롤백됨): {str(s3_error)}")
 
                 # 4-3. 모든 삭제가 성공하면 DB 커밋
                 db.commit()

@@ -90,6 +90,13 @@ MODEL_TYPE_DATA_2 = [
     },
 ]
 
+MODEL_TYPE_DATA_3 = [
+    {
+        "name": "Embedding",
+        "description": "Embedding Model",
+    },
+]
+
 HYPERPARAMETER_TYPE_DATA = [
     {
         "param_name": "epochs",

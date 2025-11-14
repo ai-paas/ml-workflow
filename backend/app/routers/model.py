@@ -5,8 +5,10 @@ from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
 from config.settings import get_settings
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from db.models.model_base_deployment import BaseDeploymentStatus
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.security import APIKeyHeader
+from repos.model_base_deployment import model_base_deployment_repository
 from schemas.model import (
     ModelBaseSchema,
     ModelBriefReadSchema,
@@ -25,6 +27,7 @@ from services.model import (
     ModelService,
     ModelTypeService,
 )
+from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -183,6 +186,7 @@ def create_model(
     huggingface_model_provider = ModelProviderService.get_by_name(db, "huggingface")
     ollama_model_provider = ModelProviderService.get_by_name(db, "ollama")
     gguf_format = ModelFormatService.get_by_name(db, "gguf")
+    embedding_type = ModelTypeService.get_by_name(db, "Embedding")
 
     try:
         # Ollama + GGUF인 경우: 단순히 meta 정보만 DB에 등록
@@ -215,6 +219,24 @@ def create_model(
                 ),
             )
             db.commit()
+
+            # Embedding 타입이고 Ollama인 경우 자동 배포
+            if embedding_type and type_id == embedding_type.id:
+                logger.info(f"Auto-deploying Ollama embedding model: {model_id} (repo_id: {repo_id})")
+                try:
+                    sanitized_model_name = name.replace("/", "-")
+                    ModelBaseDeploymentService.deploy_ollama_embedding_model(
+                        db=db,
+                        model_id=model_id,
+                        model_name=sanitized_model_name,
+                        repo_id=repo_id,
+                        gpu_enabled=False,  # 기본값, 필요시 파라미터로 받을 수 있음
+                    )
+                    logger.info(f"Successfully initiated deployment for embedding model: {model_id}")
+                except Exception as deploy_error:
+                    logger.error(f"Failed to deploy embedding model {model_id}: {deploy_error}")
+                    # 배포 실패해도 모델 등록은 성공으로 처리 (비동기 배포이므로)
+
             return model_repository.get(db, model_id)
         elif provider_id == huggingface_model_provider.id:  # HuggingFace
             return HuggingFaceModelService().create(db, model_schema=model)
@@ -555,3 +577,89 @@ def delete_model(model_id: int, db: Session = SessionDepends, current_user: User
     except Exception as e:
         # 예상치 못한 에러
         raise HTTPException(status_code=500, detail=f"모델 삭제 중 오류가 발생했습니다: {str(e)}")
+
+
+@router.put("/base-deployments/{model_id}/status")
+def update_model_base_deployment_status(
+    *,
+    db: Session = SessionDepends,
+    model_id: int,
+    service_name: str = Body(...),
+    service_hostname: str = Body(...),
+    internal_url: Optional[str] = Body(None),
+    status: str = Body(...),
+    error_message: Optional[str] = Body(None),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 기본 배포 상태 업데이트 (백엔드 서버 내부 전용 API)
+
+    **⚠️ 경고: 이 API는 백엔드 서버 내부에서만 사용하는 내부 API입니다.**
+    **프론트엔드나 외부 클라이언트에서 직접 호출해서는 안 됩니다.**
+
+    Kubeflow 파이프라인 컴포넌트에서 배포 상태를 업데이트하기 위한 엔드포인트입니다.
+    파이프라인 컴포넌트 내부에서 인증 토큰을 발급받아 사용합니다.
+
+    ## 사용 목적
+    - Kubeflow 파이프라인 컴포넌트에서 모델 배포 상태를 DB에 업데이트하기 위해 사용
+    - 백엔드 서버 내부 시스템 간 통신용으로만 사용
+
+    ## Path Parameters
+    - **model_id** (int): 모델 ID
+
+    ## Request Body
+    - **service_name** (str): 서비스 이름
+    - **service_hostname** (str): 서비스 호스트명
+    - **internal_url** (str, optional): 내부 접근 URL
+    - **status** (str): 배포 상태 ("deployed", "deploying", "failed")
+    - **error_message** (str, optional): 오류 메시지 (실패 시)
+
+    ## Response
+    - **success** (bool): 업데이트 성공 여부
+    - **message** (str): 결과 메시지
+
+    ## Notes
+    - **내부 API**: 백엔드 서버 내부에서만 사용하는 API입니다
+    - **호출 주체**: Kubeflow 파이프라인 컴포넌트에서만 호출됩니다
+    - **인증**: 인증 토큰이 필요하며, 파이프라인 컴포넌트에서 자동으로 발급받아 사용합니다
+    - **프론트엔드 사용 금지**: 프론트엔드나 외부 클라이언트에서 직접 호출하지 마세요
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 배포 정보를 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
+    logger.info(f"Updating deployment status for model_id: {model_id}, status: {status}")
+    try:
+        # 배포 정보 조회
+        deployment = model_base_deployment_repository.get_by_model_id(db, model_id)
+        if not deployment:
+            raise HTTPException(status_code=404, detail=f"Deployment not found for model_id: {model_id}")
+
+        # 상태 문자열을 BaseDeploymentStatus로 변환
+        status_map = {
+            "deployed": BaseDeploymentStatus.DEPLOYED,
+            "deploying": BaseDeploymentStatus.DEPLOYING,
+            "failed": BaseDeploymentStatus.FAILED,
+        }
+
+        deployment_status = status_map.get(status.lower())
+        if not deployment_status:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+        # 배포 정보 업데이트
+        deployment.service_name = service_name
+        deployment.service_hostname = service_hostname
+        if internal_url:
+            deployment.internal_url = internal_url
+
+        # 상태 업데이트
+        model_base_deployment_repository.update_status(db, deployment, deployment_status, error_message=error_message)
+
+        return {"success": True, "message": "Deployment status updated successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update deployment status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to update deployment status: {str(e)}")

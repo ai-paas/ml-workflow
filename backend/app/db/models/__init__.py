@@ -1,6 +1,7 @@
 from .base import Base
 from .dataset import Dataset, DatasetRegistry
 from .experiment import ExperimentModel, Hyperparameter, HyperparameterType
+from .kserve_deployment import KServeDeployment
 from .model import (
     InferenceImageRegistry,
     Model,
@@ -10,6 +11,7 @@ from .model import (
     ModelType,
     TrainImageRegistry,
 )
+from .model_base_deployment import ModelBaseDeployment
 from .service import (
     ComponentConnection,
     ComponentType,

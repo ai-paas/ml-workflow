@@ -28,6 +28,7 @@ torch = "==2.4.1"
 torchvision = "==0.19.1"
 python-jose = "==3.3.0"
 fastapi-cli = "==0.0.5"
+pymilvus = {extras = ["model"], version = "==2.4.4"}
 
 [dev-packages]
 pre-commit = "*"
