@@ -3,6 +3,11 @@ url = "https://pypi.org/simple"
 verify_ssl = true
 name = "pypi"
 
+[[source]]
+url = "https://pypi.surromind.ai/simple"
+verify_ssl = true
+name = "surromind"
+
 [packages]
 pydantic-settings = "*"
 pillow = "==10.4.0"
@@ -29,6 +34,8 @@ torchvision = "==0.19.1"
 python-jose = "==3.3.0"
 fastapi-cli = "==0.0.5"
 pymilvus = {extras = ["model"], version = "==2.4.4"}
+langchain = "==0.2.11"
+surrochat = {version = "==0.0.10", index = "surromind"}
 
 [dev-packages]
 pre-commit = "*"

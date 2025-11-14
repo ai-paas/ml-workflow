@@ -464,12 +464,26 @@ def read_models(
         examples=[1, 2, 3],
         ge=1,
     ),
+    model_type_id: Optional[int] = Query(
+        default=None,
+        description="모델 타입 ID로 필터링",
+    ),
+    model_provider_id: Optional[int] = Query(
+        default=None,
+        description="모델 제공자 ID로 필터링",
+    ),
+    model_format_id: Optional[int] = Query(
+        default=None,
+        description="모델 포맷 ID로 필터링",
+    ),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     모델 목록 조회
 
     등록된 모델들의 목록을 페이지네이션하여 조회합니다.
+    model_type_id, model_provider_id, model_format_id를 사용하여 필터링할 수 있습니다.
+    특히 embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작)
@@ -478,6 +492,13 @@ def read_models(
     - **page_size** (int, optional): 페이지당 항목 수
         - 생략 시: 전체 데이터 조회
         - 범위: 1-1000
+    - **model_type_id** (int, optional): 모델 타입 ID로 필터링
+        - 예: Embedding 모델만 조회하려면 Embedding 타입의 ID 사용
+        - `GET /api/v1/models/types` API로 타입 목록 조회 가능
+    - **model_provider_id** (int, optional): 모델 제공자 ID로 필터링
+        - `GET /api/v1/models/providers` API로 제공자 목록 조회 가능
+    - **model_format_id** (int, optional): 모델 포맷 ID로 필터링
+        - `GET /api/v1/models/formats` API로 포맷 목록 조회 가능
 
     ## Response (List[ModelBriefReadSchema])
     - **items** (List[ModelBriefReadSchema]): 모델 목록
@@ -517,21 +538,36 @@ def read_models(
     - page와 page_size를 모두 생략하면 전체 데이터를 조회 (최대 10000개)
     - page와 page_size 중 하나라도 생략하면 전체 데이터를 조회합니다
     - 페이지네이션 사용 시 page와 page_size를 모두 제공해야 합니다
+    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id)는 함께 사용할 수 있습니다
+    - Embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요
 
     ## Errors
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
-    # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
-    if page is None or page_size is None:
-        models = ModelService().get_multi(db, skip=0, limit=10000)
-        return models
+    # 필터링 조건 구성
+    filters = {}
+    if model_type_id is not None:
+        filters["type_id"] = model_type_id
+    if model_provider_id is not None:
+        filters["provider_id"] = model_provider_id
+    if model_format_id is not None:
+        filters["format_id"] = model_format_id
 
-    # 페이지네이션 적용
-    skip = page_size * (page - 1)
-
-    models = ModelService().get_multi(db, skip=skip, limit=page_size)
-    return models
+    # 필터가 있는 경우 filter 메서드 사용, 없는 경우 get_multi 사용
+    if filters:
+        # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
+        if page is None or page_size is None:
+            return ModelService().filter_all(db, filters=filters)
+        # 페이지네이션 적용
+        skip = page_size * (page - 1)
+        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size)
+    else:
+        # 필터가 없는 경우 기존 로직 사용
+        if page is None or page_size is None:
+            return ModelService().get_multi(db, skip=0, limit=10000)
+        skip = page_size * (page - 1)
+        return ModelService().get_multi(db, skip=skip, limit=page_size)
 
 
 @router.delete("/{model_id}")

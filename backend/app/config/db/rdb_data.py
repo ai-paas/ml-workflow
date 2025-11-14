@@ -134,3 +134,28 @@ HYPERPARAMETER_TYPE_DATA = [
         "default_value": "1",
     },
 ]
+
+CHUNK_TYPE_DATA = [
+    {
+        "name": "RecursiveCharacterSplitter",
+        "description": None,
+    },
+]
+
+LANGUAGE_DATA = [
+    {
+        "name": "KO",
+        "description": "한국어",
+    },
+    {
+        "name": "EN",
+        "description": "영어",
+    },
+]
+
+SEARCH_METHOD_DATA = [
+    {
+        "name": "vector",
+        "description": "vector search",
+    },
+]

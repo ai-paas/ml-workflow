@@ -93,6 +93,52 @@ class ModelService:
     def update(self, db: Session, db_obj, obj_in):
         return model_repository.update(db, db_obj=db_obj, obj_in=obj_in)
 
+    def filter(
+        self,
+        db: Session,
+        filters: dict[str, Any],
+        skip: int = 0,
+        limit: int = 100,
+    ) -> list[ModelReadSchema]:
+        """
+        필터 조건에 따라 모델 목록을 조회합니다.
+
+        Args:
+            db: 데이터베이스 세션
+            filters: 필터 조건 딕셔너리
+                - type_id: 모델 타입 ID
+                - provider_id: 모델 제공자 ID
+                - format_id: 모델 포맷 ID
+            skip: 건너뛸 레코드 수
+            limit: 반환할 최대 레코드 수
+
+        Returns:
+            필터링된 모델 목록 (ModelReadSchema)
+        """
+        models = model_repository.filter(db, filters)
+        # 페이지네이션 적용
+        paginated_models = models[skip : skip + limit]
+        return [self.get(db, model.id) for model in paginated_models]
+
+    def filter_all(self, db: Session, filters: dict[str, Any], max_limit: int = 10000) -> list[ModelReadSchema]:
+        """
+        필터 조건에 따라 모든 모델 목록을 조회합니다 (페이지네이션 없음).
+
+        Args:
+            db: 데이터베이스 세션
+            filters: 필터 조건 딕셔너리
+                - type_id: 모델 타입 ID
+                - provider_id: 모델 제공자 ID
+                - format_id: 모델 포맷 ID
+            max_limit: 최대 반환 레코드 수 (기본값: 10000)
+
+        Returns:
+            필터링된 모델 목록 (ModelReadSchema)
+        """
+        models = model_repository.filter(db, filters)
+        limited_models = models[:max_limit]
+        return [self.get(db, model.id) for model in limited_models]
+
     @staticmethod
     def check_model_references(db: Session, model_id: int) -> dict:
         """

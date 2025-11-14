@@ -77,6 +77,14 @@ class Settings(BaseSettings):
 (외부 접근용)",
     )
 
+    # Milvus 설정
+    MILVUS_DB_HOST: str = Field(..., description="Milvus 데이터베이스 호스트")
+    MILVUS_DB_PORT: str = Field(..., description="Milvus 데이터베이스 포트")
+    MILVUS_DB_USERNAME: str = Field(..., description="Milvus 데이터베이스 사용자명")
+    MILVUS_DB_PASSWORD: str = Field(..., description="Milvus 데이터베이스 비밀번호")
+    MILVUS_DB_NAME: str = Field(..., description="Milvus 데이터베이스 이름")
+    MILVUS_ADMIN_PORT: str = Field(default="8000", description="Milvus Admin 포트")
+
     # 기타 설정
 
     @field_validator("MLFLOW_S3_BUCKET")

@@ -3,13 +3,16 @@ import traceback
 
 from config.settings import get_settings
 from db.models.experiment import HyperparameterType
+from db.models.knowledge_base import ChunkType, Language, SearchMethod
 from db.models.model import ModelFormat, ModelProvider, ModelType
 from db.models.user import UserModel
 from sqlalchemy import create_engine, insert
 from sqlalchemy.orm import sessionmaker
 
 from .rdb_data import (
+    CHUNK_TYPE_DATA,
     HYPERPARAMETER_TYPE_DATA,
+    LANGUAGE_DATA,
     MODEL_FORMAT_DATA,
     MODEL_FORMAT_DATA_2,
     MODEL_FORMAT_DATA_3,
@@ -19,6 +22,7 @@ from .rdb_data import (
     MODEL_TYPE_DATA,
     MODEL_TYPE_DATA_2,
     MODEL_TYPE_DATA_3,
+    SEARCH_METHOD_DATA,
     USER_DATA,
 )
 
@@ -135,6 +139,36 @@ def initialize_hyperparameter_type(db) -> None:
     print(f"HyperparameterType 테이블에 {len(HYPERPARAMETER_TYPE_DATA)}개 데이터 삽입 완료")
 
 
+def initialize_chunk_type(db) -> None:
+    """
+    청크 타입 데이터를 초기화합니다.
+    Args:
+        db: DB 세션
+    """
+    db.execute(insert(ChunkType.__table__).values(CHUNK_TYPE_DATA))
+    print(f"ChunkType 테이블에 {len(CHUNK_TYPE_DATA)}개 데이터 삽입 완료")
+
+
+def initialize_language(db) -> None:
+    """
+    언어 데이터를 초기화합니다.
+    Args:
+        db: DB 세션
+    """
+    db.execute(insert(Language.__table__).values(LANGUAGE_DATA))
+    print(f"Language 테이블에 {len(LANGUAGE_DATA)}개 데이터 삽입 완료")
+
+
+def initialize_search_method(db) -> None:
+    """
+    검색 방법 데이터를 초기화합니다.
+    Args:
+        db: DB 세션
+    """
+    db.execute(insert(SearchMethod.__table__).values(SEARCH_METHOD_DATA))
+    print(f"SearchMethod 테이블에 {len(SEARCH_METHOD_DATA)}개 데이터 삽입 완료")
+
+
 def initialize_v1(db) -> None:
     """
     v1 버전의 모든 기본 데이터를 초기화합니다.
@@ -160,9 +194,9 @@ def main():
     parser.add_argument(
         "--version",
         "-v",
-        choices=["v1", "v2", "v3", "v4", "v5", "v6", "all"],
+        choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7", "all"],
         default="all",
-        help="초기화할 데이터 버전을 선택합니다 (v1, v2, v3, v4, v5, v6, all)",
+        help="초기화할 데이터 버전을 선택합니다 (v1, v2, v3, v4, v5, v6, v7, all)",
     )
 
     args = parser.parse_args()
@@ -202,6 +236,13 @@ def main():
             print("V6 데이터 초기화 중...")
             add_model_type_3(db)
             print("V6 데이터 초기화 완료")
+
+        if args.version in ["v7", "all"]:
+            print("V7 데이터 초기화 중...")
+            initialize_chunk_type(db)
+            initialize_language(db)
+            initialize_search_method(db)
+            print("V7 데이터 초기화 완료")
 
         db.commit()
         print("데이터 초기화가 완료되었습니다.")
