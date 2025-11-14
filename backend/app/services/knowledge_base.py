@@ -25,6 +25,7 @@ from schemas.knowledge_base import (
     KnowledgeBaseFileCreateSchema,
     KnowledgeBaseReadSchema,
     KnowledgeBaseSearchRecordCreateSchema,
+    KnowledgeBaseSearchRecordReadSchema,
     KnowledgeBaseSearchRequestSchema,
     KnowledgeBaseSearchResponseSchema,
     KnowledgeBaseUpdateSchema,
@@ -662,3 +663,26 @@ class KnowledgeBaseService:
             db.rollback()
             logger.error(f"Knowledge Base 검색 중 오류 발생: {str(e)}", exc_info=True)
             raise
+
+    @staticmethod
+    def get_search_records(db: Session, knowledge_base_id: int) -> list[KnowledgeBaseSearchRecordReadSchema]:
+        """Knowledge Base 검색 기록 조회
+
+        Args:
+            db: 데이터베이스 세션
+            knowledge_base_id: Knowledge Base ID
+
+        Returns:
+            검색 기록 목록
+
+        Raises:
+            ValueError: Knowledge Base를 찾을 수 없을 때
+        """
+        # Knowledge Base 존재 여부 확인
+        kb = knowledge_base_repository.get(db, knowledge_base_id)
+        if not kb:
+            raise ValueError(f"Knowledge Base not found: {knowledge_base_id}")
+
+        # 검색 기록 조회
+        records = knowledge_base_search_record_repository.get_by_knowledge_base_id(db, knowledge_base_id)
+        return [KnowledgeBaseSearchRecordReadSchema.model_validate(record) for record in records]

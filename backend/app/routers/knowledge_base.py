@@ -8,6 +8,7 @@ from schemas.knowledge_base import (
     KnowledgeBaseBriefReadSchema,
     KnowledgeBaseCreateSchema,
     KnowledgeBaseReadSchema,
+    KnowledgeBaseSearchRecordReadSchema,
     KnowledgeBaseSearchRequestSchema,
     KnowledgeBaseSearchResponseSchema,
     KnowledgeBaseUpdateSchema,
@@ -446,4 +447,42 @@ def search_knowledge_base(
         logger.error(f"Knowledge Base 검색 중 오류 발생: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"검색 중 오류가 발생했습니다: {str(e)}"
+        )
+
+
+@router.get("/{knowledge_base_id}/search-records", response_model=list[KnowledgeBaseSearchRecordReadSchema])
+def get_knowledge_base_search_records(
+    knowledge_base_id: int,
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    Knowledge Base 검색 기록 조회
+
+    특정 Knowledge Base에 대한 검색 기록을 조회합니다.
+
+    ## Path Parameters
+    - **knowledge_base_id** (int): 조회할 Knowledge Base ID
+
+    ## Response (List[KnowledgeBaseSearchRecordReadSchema])
+    - **id** (int): 검색 기록 ID
+    - **knowledge_base_id** (int): Knowledge Base ID
+    - **source** (str): Collection 이름
+    - **text** (str): 검색 쿼리 텍스트
+    - **created_at** (datetime): 검색 기록 생성 시간
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: Knowledge Base를 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
+    try:
+        return KnowledgeBaseService.get_search_records(db, knowledge_base_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Knowledge Base 검색 기록 조회 중 오류 발생: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"검색 기록 조회 중 오류가 발생했습니다: {str(e)}",
         )
