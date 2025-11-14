@@ -39,6 +39,103 @@ from utils.vector_database import MilvusManager, MilvusSearchManager
 
 logger = logging.getLogger(__name__)
 
+# 상수 정의
+MAX_FILE_SIZE_MB = 100  # 최대 파일 크기 (MB)
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+
+def _validate_deployment(deployment) -> None:
+    """배포 정보 검증 헬퍼 함수
+
+    Args:
+        deployment: ModelBaseDeployment 객체
+
+    Raises:
+        ValueError: 배포 정보가 유효하지 않은 경우
+    """
+    if not deployment:
+        raise ValueError("Deployment not found")
+
+    if deployment.status != BaseDeploymentStatus.DEPLOYED:
+        raise ValueError(f"Deployment is not ready. Status: {deployment.status}")
+
+    if not deployment.internal_url:
+        raise ValueError("Internal URL not available")
+
+    if not deployment.model_name:
+        raise ValueError("Model name not available")
+
+
+def _get_embedding_dimension(entities: list[dict]) -> int:
+    """임베딩 엔티티에서 벡터 차원을 추출
+
+    Args:
+        entities: Milvus 엔티티 리스트
+
+    Returns:
+        int: 임베딩 벡터의 차원
+
+    Raises:
+        ValueError: 엔티티가 비어있거나 벡터를 찾을 수 없는 경우
+    """
+    if not entities:
+        raise ValueError("Entities list is empty")
+
+    first_entity = entities[0]
+    dense_vector = first_entity.get("dense_vector")
+
+    if not dense_vector:
+        raise ValueError("Dense vector not found in entity")
+
+    return len(dense_vector)
+
+
+def _parse_search_result(data) -> dict:
+    """Milvus 검색 결과를 파싱하여 표준 형식으로 변환
+
+    Args:
+        data: Milvus 검색 결과 객체
+
+    Returns:
+        dict: 파싱된 결과 (text, score, chunk_id 포함)
+    """
+    score = getattr(data, "score", None)
+
+    # text 접근: Milvus Hit 객체의 경우 entity 속성 사용
+    text = ""
+    if hasattr(data, "entity"):
+        entity_data = data.entity
+        if isinstance(entity_data, dict):
+            text = entity_data.get("text", "")
+        elif hasattr(entity_data, "text"):
+            text = getattr(entity_data, "text", "")
+        elif hasattr(entity_data, "get") and callable(getattr(entity_data, "get")):
+            try:
+                text = entity_data.get("text", "")
+            except TypeError:
+                text = ""
+    elif isinstance(data, dict):
+        text = data.get("text", "")
+    elif hasattr(data, "text"):
+        text = getattr(data, "text", "")
+
+    # Milvus의 id가 chunk_id
+    chunk_id = -1
+    if hasattr(data, "id"):
+        chunk_id = data.id
+    elif hasattr(data, "entity"):
+        entity_data = data.entity
+        if isinstance(entity_data, dict):
+            chunk_id = entity_data.get("id", -1)
+        elif hasattr(entity_data, "id"):
+            chunk_id = getattr(entity_data, "id", -1)
+
+    return {
+        "text": text,
+        "score": float(score) if score is not None else 0.0,
+        "chunk_id": chunk_id,
+    }
+
 
 class ChunkTypeService:
     @staticmethod
@@ -103,24 +200,18 @@ class KnowledgeBaseService:
 
             # 2. 배포 정보 조회 및 검증
             deployment = model_base_deployment_repository.get_by_model_id(db, obj_in.embedding_model_id)
-            if not deployment:
-                raise ValueError(f"Deployment not found for model_id: {obj_in.embedding_model_id}")
-
-            if deployment.status != BaseDeploymentStatus.DEPLOYED:
-                raise ValueError(f"Deployment is not ready. Status: {deployment.status}")
-
-            if not deployment.internal_url:
-                raise ValueError(f"Internal URL not available for model_id: {obj_in.embedding_model_id}")
-
-            if not deployment.model_name:
-                raise ValueError(f"Model name not available for model_id: {obj_in.embedding_model_id}")
+            _validate_deployment(deployment)
 
             # 3. Collection 이름 생성 (고유해야 함)
             collection_name = f"kb_{uuid.uuid4().hex[:16]}"
 
-            # 4. 파일을 청크로 분할
+            # 4. 파일 크기 검증
             file.file.seek(0)
             file_data = file.file.read()
+            if len(file_data) > MAX_FILE_SIZE_BYTES:
+                raise ValueError(f"파일 크기가 너무 큽니다. 최대 크기: {MAX_FILE_SIZE_MB}MB")
+
+            # 5. 파일을 청크로 분할
             documents: list[Document] = file_load_and_split(
                 file_data=file_data,
                 filename=file.filename,
@@ -128,35 +219,43 @@ class KnowledgeBaseService:
                 overlap=obj_in.chunk_overlap,
             )
 
-            # 5. 청크 텍스트 추출
+            # 6. 청크 텍스트 추출
             chunk_texts = [doc.page_content for doc in documents]
             if not chunk_texts:
                 raise ValueError("파일에서 청크를 생성할 수 없습니다.")
 
-            # 6. 임베딩 생성 및 Milvus 엔티티 생성
+            # 7. 임베딩 생성 및 Milvus 엔티티 생성
             entities = create_milvus_entities(
                 internal_url=deployment.internal_url,
                 model_name=deployment.model_name,
                 texts=chunk_texts,
             )
 
-            # 7. Milvus Collection 생성 (임베딩 차원 확인 필요)
-            # 모델의 임베딩 차원을 확인해야 하지만, 일단 기본값 사용
-            # TODO: 모델에서 임베딩 차원 정보를 가져오도록 수정 필요
-            embedding_dimension = 1024  # 기본값, 실제로는 모델에서 가져와야 함
+            # 8. 임베딩 차원 동적 감지
+            embedding_dimension = _get_embedding_dimension(entities)
+
+            # 9. Milvus Collection 생성
             MilvusManager.create_collection(name=collection_name, dimension=embedding_dimension)
 
-            # 8. Partition 이름 생성 (파일별로 고유)
+            # 10. Partition 이름 생성 (파일별로 고유)
             partition_name = f"file_{uuid.uuid4().hex[:16]}"
 
-            # 9. Milvus에 문서 삽입
-            MilvusManager.embed_documents(
-                collection_name=collection_name,
-                entities=entities,
-                partition_name=partition_name,
-            )
+            # 11. Milvus에 문서 삽입
+            try:
+                MilvusManager.embed_documents(
+                    collection_name=collection_name,
+                    entities=entities,
+                    partition_name=partition_name,
+                )
+            except Exception as milvus_error:
+                # Milvus 작업 실패 시 Collection 삭제 시도
+                try:
+                    MilvusManager.drop_collection(collection_name)
+                except Exception:
+                    pass  # Collection 삭제 실패는 무시
+                raise ValueError(f"Milvus에 문서 삽입 실패: {str(milvus_error)}")
 
-            # 10. Knowledge Base 생성
+            # 12. Knowledge Base 생성
 
             kb_obj = knowledge_base_repository.create(
                 db,
@@ -176,7 +275,7 @@ class KnowledgeBaseService:
             )
             kb_id = kb_obj.id
 
-            # 11. Knowledge Base File 생성
+            # 13. Knowledge Base File 생성
             knowledge_base_file_repository.create(
                 db,
                 obj_in=KnowledgeBaseFileCreateSchema(
@@ -226,21 +325,15 @@ class KnowledgeBaseService:
 
             # 2. 배포 정보 조회 및 검증
             deployment = model_base_deployment_repository.get_by_model_id(db, kb.embedding_model_id)
-            if not deployment:
-                raise ValueError(f"Deployment not found for model_id: {kb.embedding_model_id}")
+            _validate_deployment(deployment)
 
-            if deployment.status != BaseDeploymentStatus.DEPLOYED:
-                raise ValueError(f"Deployment is not ready. Status: {deployment.status}")
-
-            if not deployment.internal_url:
-                raise ValueError(f"Internal URL not available for model_id: {kb.embedding_model_id}")
-
-            if not deployment.model_name:
-                raise ValueError(f"Model name not available for model_id: {kb.embedding_model_id}")
-
-            # 3. 파일을 청크로 분할
+            # 3. 파일 크기 검증
             file.file.seek(0)
             file_data = file.file.read()
+            if len(file_data) > MAX_FILE_SIZE_BYTES:
+                raise ValueError(f"파일 크기가 너무 큽니다. 최대 크기: {MAX_FILE_SIZE_MB}MB")
+
+            # 4. 파일을 청크로 분할
             documents: list[Document] = file_load_and_split(
                 file_data=file_data,
                 filename=file.filename,
@@ -248,29 +341,32 @@ class KnowledgeBaseService:
                 overlap=kb.chunk_overlap,
             )
 
-            # 4. 청크 텍스트 추출
+            # 5. 청크 텍스트 추출
             chunk_texts = [doc.page_content for doc in documents]
             if not chunk_texts:
                 raise ValueError("파일에서 청크를 생성할 수 없습니다.")
 
-            # 5. 임베딩 생성 및 Milvus 엔티티 생성
+            # 6. 임베딩 생성 및 Milvus 엔티티 생성
             entities = create_milvus_entities(
                 internal_url=deployment.internal_url,
                 model_name=deployment.model_name,
                 texts=chunk_texts,
             )
 
-            # 6. Partition 이름 생성 (파일별로 고유)
+            # 7. Partition 이름 생성 (파일별로 고유)
             partition_name = f"file_{uuid.uuid4().hex[:16]}"
 
-            # 7. Milvus에 문서 삽입 (기존 Collection에 Partition으로 추가)
-            MilvusManager.embed_documents(
-                collection_name=kb.collection_name,
-                entities=entities,
-                partition_name=partition_name,
-            )
+            # 8. Milvus에 문서 삽입 (기존 Collection에 Partition으로 추가)
+            try:
+                MilvusManager.embed_documents(
+                    collection_name=kb.collection_name,
+                    entities=entities,
+                    partition_name=partition_name,
+                )
+            except Exception as milvus_error:
+                raise ValueError(f"Milvus에 문서 삽입 실패: {str(milvus_error)}")
 
-            # 8. Knowledge Base File 생성
+            # 9. Knowledge Base File 생성
             knowledge_base_file_repository.create(
                 db,
                 obj_in=KnowledgeBaseFileCreateSchema(
@@ -450,17 +546,7 @@ class KnowledgeBaseService:
 
             # 2. 배포 정보 조회 및 검증
             deployment = model_base_deployment_repository.get_by_model_id(db, kb.embedding_model_id)
-            if not deployment:
-                raise ValueError(f"Deployment not found for model_id: {kb.embedding_model_id}")
-
-            if deployment.status != BaseDeploymentStatus.DEPLOYED:
-                raise ValueError(f"Deployment is not ready. Status: {deployment.status}")
-
-            if not deployment.internal_url:
-                raise ValueError(f"Internal URL not available for model_id: {kb.embedding_model_id}")
-
-            if not deployment.model_name:
-                raise ValueError(f"Model name not available for model_id: {kb.embedding_model_id}")
+            _validate_deployment(deployment)
 
             # 3. Search Method 조회
             search_method = search_method_repository.get(db, kb.search_method_id)
@@ -501,48 +587,11 @@ class KnowledgeBaseService:
                 search_result = search_results[0]
 
                 for data in search_result:
-                    score = getattr(data, "score", None)
+                    parsed_result = _parse_search_result(data)
+                    results.append(parsed_result)
 
-                    # text 접근: Milvus Hit 객체의 경우 entity 속성 사용
-                    text = ""
-                    if hasattr(data, "entity"):
-                        entity_data = data.entity
-                        if isinstance(entity_data, dict):
-                            text = entity_data.get("text", "")
-                        elif hasattr(entity_data, "text"):
-                            text = getattr(entity_data, "text", "")
-                        elif hasattr(entity_data, "get") and callable(getattr(entity_data, "get")):
-                            try:
-                                text = entity_data.get("text", "")
-                            except TypeError:
-                                text = ""
-                    elif isinstance(data, dict):
-                        text = data.get("text", "")
-                    elif hasattr(data, "text"):
-                        text = getattr(data, "text", "")
-
-                    # Milvus의 id가 chunk_id
-                    chunk_id = -1
-                    if hasattr(data, "id"):
-                        chunk_id = data.id
-                    elif hasattr(data, "entity"):
-                        entity_data = data.entity
-                        if isinstance(entity_data, dict):
-                            chunk_id = entity_data.get("id", -1)
-                        elif hasattr(entity_data, "id"):
-                            chunk_id = getattr(entity_data, "id", -1)
-
-                    # 검색 테스트에서는 top_k만큼의 결과를 전부 보여줌
-                    results.append(
-                        {
-                            "text": text,
-                            "score": float(score) if score is not None else 0.0,
-                            "chunk_id": chunk_id,
-                        }
-                    )
-
-                    if chunk_id != -1:
-                        chunk_ids.append(chunk_id)
+                    if parsed_result["chunk_id"] != -1:
+                        chunk_ids.append(parsed_result["chunk_id"])
 
             # 8. chunk_id로 파티션 정보 조회 (Milvus의 query API 사용)
             partition_names = set()

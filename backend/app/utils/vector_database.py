@@ -1,27 +1,61 @@
+import logging
 from typing import Any
 
 import numpy as np
 from config.settings import get_settings
 from pymilvus import AnnSearchRequest, Collection, DataType, MilvusClient, WeightedRanker, connections
 
+logger = logging.getLogger(__name__)
+
 settings = get_settings()
 
 
 class Client:
     _instance = None
+    _connection_alias = "default"
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(Client, cls).__new__(cls)
+            # MilvusClient 생성
             cls._instance.client = MilvusClient(
                 uri=f"http://{settings.MILVUS_DB_HOST}:{settings.MILVUS_DB_PORT}",
                 token=f"{settings.MILVUS_DB_USERNAME}:{settings.MILVUS_DB_PASSWORD}",
                 db_name=settings.MILVUS_DB_NAME,
             )
+            # Collection 객체 사용을 위한 connections.connect 설정
+            cls._instance._ensure_connections_connect()
         return cls._instance
+
+    def _ensure_connections_connect(self):
+        """Collection 객체 사용을 위한 connections.connect 설정"""
+        try:
+            # 연결이 이미 존재하는지 확인
+            existing_connections = connections.list_connections()
+            if self._connection_alias in existing_connections:
+                return
+        except Exception:
+            pass
+
+        # 연결이 없으면 새로 생성
+        try:
+            connections.connect(
+                alias=self._connection_alias,
+                uri=f"http://{settings.MILVUS_DB_HOST}:{settings.MILVUS_DB_PORT}",
+                token=f"{settings.MILVUS_DB_USERNAME}:{settings.MILVUS_DB_PASSWORD}",
+                db_name=settings.MILVUS_DB_NAME,
+            )
+        except Exception as e:
+            # 연결이 이미 존재하는 경우 무시
+            if "already exists" not in str(e).lower():
+                logger.debug(f"Milvus connections.connect 설정 중 오류 (무시): {e}")
 
     def get(self) -> MilvusClient:
         return self.client
+
+    def get_connection_alias(self) -> str:
+        """Collection 객체 사용을 위한 연결 alias 반환"""
+        return self._connection_alias
 
 
 class MilvusManager:
@@ -117,9 +151,45 @@ class MilvusManager:
         return partition_name
 
     @classmethod
+    def ensure_connection(cls):
+        """Collection 객체 사용을 위한 Milvus 연결 확인 및 설정
+
+        Client 클래스를 통해 연결이 자동으로 설정되므로,
+        이 메서드는 Client 인스턴스를 생성하여 연결을 보장합니다.
+        """
+        # Client 인스턴스 생성 시 자동으로 connections.connect가 설정됨
+        Client()
+
+    @classmethod
+    def release_partition(cls, collection_name: str, partition_name: str) -> bool:
+        """
+        Milvus 컬렉션의 파티션을 메모리에서 해제합니다.
+
+        매개변수:
+            collection_name (str): 컬렉션의 이름.
+            partition_name (str): 해제할 파티션의 이름.
+
+        반환:
+            bool: 파티션이 해제되었는지 여부 (존재하지 않으면 False).
+        """
+        try:
+            if not cls._client.has_partition(collection_name, partition_name):
+                return False
+
+            # MilvusClient의 release_partitions 메서드 사용
+            # partition_names는 리스트로 전달해야 함
+            cls._client.release_partitions(collection_name=collection_name, partition_names=[partition_name])
+            return True
+        except Exception as e:
+            # release_partition이 실패해도 계속 진행 (이미 release되었을 수 있음)
+            logger.warning(f"파티션 '{partition_name}' 해제 중 오류 발생 (무시): {e}")
+            return False
+
+    @classmethod
     def drop_partition(cls, collection_name: str, partition_name: str) -> bool:
         """
         Milvus 컬렉션에서 파티션을 삭제합니다.
+        삭제 전에 파티션이 메모리에 로드되어 있으면 자동으로 해제합니다.
 
         매개변수:
             collection_name (str): 컬렉션의 이름.
@@ -129,12 +199,30 @@ class MilvusManager:
             bool: 파티션이 삭제되었는지 여부 (존재하지 않으면 False).
         """
         try:
-            if cls._client.has_partition(collection_name, partition_name):
-                cls._client.drop_partition(collection_name=collection_name, partition_name=partition_name)
-                return True
-            else:
+            if not cls._client.has_partition(collection_name, partition_name):
                 return False
+
+            # 파티션 삭제 전에 메모리에서 해제 시도
+            try:
+                cls.release_partition(collection_name, partition_name)
+            except Exception as release_error:
+                # release 실패해도 계속 진행 (이미 release되었을 수 있음)
+                logger.debug(f"파티션 해제 시도 중 오류 (계속 진행): {release_error}")
+
+            # 파티션 삭제
+            cls._client.drop_partition(collection_name=collection_name, partition_name=partition_name)
+            return True
         except Exception as e:
+            error_msg = str(e)
+            # "partition is loaded" 오류인 경우 다시 release 시도
+            if "partition is loaded" in error_msg.lower() or "please release it first" in error_msg.lower():
+                try:
+                    logger.info(f"파티션이 로드되어 있어 해제 후 재시도: {partition_name}")
+                    cls.release_partition(collection_name, partition_name)
+                    cls._client.drop_partition(collection_name=collection_name, partition_name=partition_name)
+                    return True
+                except Exception as retry_error:
+                    raise Exception(f"파티션 '{partition_name}' 삭제 중 오류 발생 (재시도 실패): {retry_error}")
             raise Exception(f"파티션 '{partition_name}' 삭제 중 오류 발생: {e}")
 
     @classmethod
@@ -236,22 +324,15 @@ class MilvusSearchManager:
             collection_name (str): 사용할 Milvus 컬렉션의 이름.
             top_k (int): 검색 시 반환할 상위 k개의 결과 수.
         """
-        self.connect_to_milvus()
-        self._collection = Collection(collection_name)
+        # Client를 통해 연결 설정 (자동으로 connections.connect도 설정됨)
+        client_instance = Client()
+        connection_alias = client_instance.get_connection_alias()
+
+        # Collection 객체 생성 시 Client에서 설정한 연결 alias 사용
+        self._collection = Collection(collection_name, using=connection_alias)
         self._top_k = top_k
         self._dense_search_param = {"metric_type": "COSINE", "params": {}}
         self._sparse_search_param = {"metric_type": "IP", "params": {}}
-
-    @staticmethod
-    def connect_to_milvus():
-        """
-        Milvus 서버에 연결합니다. 연결 정보는 환경 변수에서 설정된 값을 사용합니다.
-        """
-        connections.connect(
-            uri=f"http://{settings.MILVUS_DB_HOST}:{settings.MILVUS_DB_PORT}",
-            token=f"{settings.MILVUS_DB_USERNAME}:{settings.MILVUS_DB_PASSWORD}",
-            db_name=settings.MILVUS_DB_NAME,
-        )
 
     def dense_search(self, embeded_query: np.ndarray):
         """

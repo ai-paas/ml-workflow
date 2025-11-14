@@ -68,7 +68,9 @@ class OllamaEmbedding:
 
                 logger.debug(f"Sending embedding request to {url} with model {self._model_name}")
 
-                response = requests.post(url, json=data, headers=headers, timeout=30)
+                # 타임아웃 설정: 텍스트 길이에 따라 동적 조정 (최소 30초, 최대 300초)
+                timeout = min(30 + (len(text) // 1000) * 10, 300)
+                response = requests.post(url, json=data, headers=headers, timeout=timeout)
                 response.raise_for_status()
 
                 result = response.json()
