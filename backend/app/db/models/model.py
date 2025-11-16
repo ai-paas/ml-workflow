@@ -1,8 +1,17 @@
+from enum import Enum as PyEnum
 from typing import Optional
 
 from db.models.base import BaseModel, TimestampCreateMixin, TimestampMixin, TimestampUpdateMixin
 from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+
+class ModelTaskType(PyEnum):
+    """모델 태스크 타입 열거형"""
+
+    EMBEDDING = "embedding"
+    TEXT_GENERATION = "text-generation"
+    OBJECT_DETECTION = "object-detection"
 
 
 class Model(BaseModel, TimestampMixin):

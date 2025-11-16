@@ -1,13 +1,10 @@
 """모델 기본 배포 관리 Service"""
 
-import json
 import logging
 import os
 import re
-import time
 import uuid
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
@@ -562,7 +559,7 @@ class ModelBaseDeploymentService:
     def cleanup_model_deployment(db: Session, model_id: int) -> dict:
         """
         모델의 배포된 Kubernetes 리소스 정리 (Kubeflow 파이프라인 사용)
-        파이프라인 완료를 기다린 후 DB 레코드 삭제
+        파이프라인을 시작만 하고 상태 체크하지 않음 (백그라운드 실행)
 
         Args:
             db: DB 세션
@@ -622,43 +619,16 @@ class ModelBaseDeploymentService:
                     run_id = run_dict.get("run_id") or run_dict.get("id") or f"unknown-{uuid.uuid4().hex[:8]}"
 
                 logger.info(f"Cleanup pipeline started with run_id: {run_id}")
-
-                # 파이프라인 완료 대기 (최대 10분)
-                max_wait = 600  # 10분
-                wait_interval = 10  # 10초 간격
-                elapsed = 0
-                pipeline_completed = False
-
-                while elapsed < max_wait:
-                    try:
-                        run_status = kf_manager.get_run_status(run_id)
-                        logger.info(f"Pipeline run {run_id} status: {run_status}")
-
-                        # 파이프라인 완료 상태 확인
-                        if run_status in ["Succeeded", "Failed", "Skipped", "Error"]:
-                            pipeline_completed = True
-                            logger.info(f"Pipeline {run_id} completed with status: {run_status}")
-                            break
-
-                        time.sleep(wait_interval)
-                        elapsed += wait_interval
-
-                    except Exception as e:
-                        logger.warning(f"Error checking pipeline status: {e}")
-                        time.sleep(wait_interval)
-                        elapsed += wait_interval
-
-                if not pipeline_completed:
-                    logger.warning(f"Pipeline {run_id} did not complete within {max_wait} seconds")
-                    # 타임아웃이어도 계속 진행 (파이프라인은 백그라운드에서 계속 실행됨)
+                # 파이프라인은 백그라운드에서 실행되며, 상태 체크하지 않음
 
             finally:
                 # 임시 파일 삭제
                 if os.path.exists(pipeline_filename):
                     os.remove(pipeline_filename)
 
-            # 파이프라인 완료 후 DB 레코드 삭제
+            # 파이프라인 시작 후 바로 DB 레코드 삭제
             # (외래키 제약 조건 때문에 모델 삭제 전에 삭제해야 함)
+            # 파이프라인은 백그라운드에서 실행되므로 상태 체크하지 않음
             try:
                 model_base_deployment_repository.delete(db, pk=deployment_info.id)
                 db.commit()
@@ -671,8 +641,8 @@ class ModelBaseDeploymentService:
             return {
                 "model_id": model_id,
                 "cleanup_run_id": run_id,
-                "status": "completed" if pipeline_completed else "timeout",
-                "message": f"Cleanup pipeline {'completed' if pipeline_completed else 'timeout'}",
+                "status": "started",
+                "message": "Cleanup pipeline started (running in background)",
             }
 
         except Exception as e:

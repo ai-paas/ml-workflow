@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
+from db.models.knowledge_base import KnowledgeBase
 from db.models.model import Model, ModelProvider, ModelType
 from db.models.service import WorkflowComponent
 from fastapi import UploadFile
@@ -182,6 +183,17 @@ class ModelService:
                     "type": "child_model",
                     "count": len(child_models),
                     "items": [{"id": m.id, "name": m.name} for m in child_models[:5]],
+                }
+            )
+
+        # 4. KnowledgeBase에서 참조 확인 (embedding_model_id)
+        knowledge_bases = db.query(KnowledgeBase).filter(KnowledgeBase.embedding_model_id == model_id).all()
+        if knowledge_bases:
+            references.append(
+                {
+                    "type": "knowledge_base",
+                    "count": len(knowledge_bases),
+                    "items": [{"id": kb.id, "name": kb.name} for kb in knowledge_bases[:5]],  # 최대 5개만
                 }
             )
 

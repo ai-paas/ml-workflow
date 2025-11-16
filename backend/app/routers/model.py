@@ -5,6 +5,7 @@ from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
 from config.settings import get_settings
+from db.models.model import ModelTaskType
 from db.models.model_base_deployment import BaseDeploymentStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.security import APIKeyHeader
@@ -90,9 +91,10 @@ def create_model(
         - 내부 시스템에서만 사용하는 파라미터
         - 프론트엔드에서는 전달하지 않아야 함
     - **task** (str, optional): 모델 태스크
-        - 모델이 수행하는 작업 유형 (예: "object-detection", "text-classification")
-        - 최대 길이: 500자
-        - 생략 가능
+        - 모델이 수행하는 작업 유형
+        - 허용 값: "embedding", "text-generation", "object-detection" 중 하나만 가능
+        - 생략 가능 (null 허용)
+        - 다른 값 입력 시 422 에러 발생
     - **parameter** (str, optional): 모델 파라미터
         - 모델 관련 파라미터 정보
         - 최대 길이: 100자
@@ -152,6 +154,19 @@ def create_model(
     - 401: 인증되지 않은 사용자
     - 500: 모델 등록 중 서버 내부 오류
     """
+
+    # task 값 검증 (Enum 사용)
+    if task is not None:
+        try:
+            # 문자열을 Enum으로 변환
+            task_enum = ModelTaskType(task)
+            task = task_enum.value  # Enum 값을 문자열로 변환하여 저장
+        except ValueError:
+            valid_tasks = [e.value for e in ModelTaskType]
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
+            )
 
     try:
         if model_registry_schema:

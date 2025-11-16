@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from db.models.model import ModelTaskType
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 
 
@@ -17,9 +18,22 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     learning_enable_yn: bool
     version: int
     subversion: int
-    task: str | None = None
+    task: Optional[str] = Field(
+        None,
+        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection' 중 하나",
+    )
     parameter: str | None = None
     sample_code: str | None = None
+
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        valid_values = {e.value for e in ModelTaskType}
+        if v not in valid_values:
+            raise ValueError(f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_values)}")
+        return v
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):
@@ -99,7 +113,7 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
     format_info: ModelFormatReadSchema
     parent_model_id: int | None = None
     registry: ModelRegistryReadSchema
-    task: str | None = None
+    task: Optional[str] = None
     parameter: str | None = None
     sample_code: str | None = None
 
@@ -117,7 +131,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
     format_info: ModelFormatReadSchema
     parent_model_id: int | None = None
     registry: ModelRegistryReadSchema
-    task: str | None = None
+    task: Optional[str] = None
     parameter: str | None = None
     sample_code: str | None = None
 
