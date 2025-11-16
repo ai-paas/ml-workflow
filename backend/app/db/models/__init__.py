@@ -20,6 +20,7 @@ from .model import (
     TrainImageRegistry,
 )
 from .model_base_deployment import ModelBaseDeployment
+from .prompt import Prompt, PromptVariable
 from .service import (
     ComponentConnection,
     ComponentType,
