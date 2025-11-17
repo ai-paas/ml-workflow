@@ -10,7 +10,7 @@ from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 class ModelBaseSchema(TimeStampSchemaMixin):
     name: str
     description: str | None = None
-    repo_id: str
+    repo_id: str | None = None
     provider_id: int
     type_id: int
     format_id: int
@@ -107,7 +107,7 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
     description: str | None = None
-    repo_id: str
+    repo_id: str | None = None
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema
@@ -125,7 +125,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
     description: str | None = None
-    repo_id: str
+    repo_id: str | None = None
     provider_info: ModelProviderReadSchema
     type_info: ModelTypeReadSchema
     format_info: ModelFormatReadSchema

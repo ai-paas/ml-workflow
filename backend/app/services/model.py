@@ -327,6 +327,8 @@ class HuggingFaceModelService:
     def create(self, db: Session, *, model_schema: ModelBaseSchema):
         # model_format_id = model_schema.format_id
         repo_id = model_schema.repo_id
+        if not repo_id:
+            raise ValueError("repo_id is required for HuggingFace models")
         # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # if model_format_id == transformers_db_obj.id:  # transformers
         save_dir = self.load_and_save_transformers(repo_id)

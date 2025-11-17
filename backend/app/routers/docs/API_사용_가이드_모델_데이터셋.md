@@ -71,7 +71,7 @@ UI에서 모델과 데이터셋 관련 기능을 구현할 때 사용할 API 호
 - 모든 API는 Bearer Token 인증 필요
 - HuggingFace 모델: `provider_id`가 huggingface ID와 일치해야 함
 - 커스텀 모델: `provider_id`가 custom ID와 일치하고 `file` 필수
-- 모델 이름에 "yolo" 포함 시 자동으로 학습 가능 모델로 설정
+- 모델 이름에 "yolox" 포함 시 자동으로 학습 가능 모델로 설정
 - 참조 관계가 있으면 삭제 불가
 - 상세한 요청/응답 형식은 각 API의 docstring 참조
 

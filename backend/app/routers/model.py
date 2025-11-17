@@ -27,6 +27,8 @@ from services.model import (
     ModelProviderService,
     ModelService,
     ModelTypeService,
+    is_yolox_local_model,
+    is_yolox_remote_model,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
@@ -47,7 +49,7 @@ def create_model(
     db: Session = SessionDepends,
     name: Annotated[str, Form()],
     description: Annotated[str, Form()] = None,
-    repo_id: Annotated[str, Form()],
+    repo_id: Annotated[str, Form()] = None,
     provider_id: Annotated[int, Form()],
     type_id: Annotated[int, Form()],
     format_id: Annotated[int, Form()],
@@ -68,13 +70,14 @@ def create_model(
     ## Request Body (multipart/form-data)
     - **name** (str, required): 모델 이름
         - 모델을 식별하기 위한 이름
-        - "yolo"가 포함된 경우 학습 가능 모델로 자동 설정됨
+        - YOLOX 모델인 경우 학습 가능 모델로 자동 설정됨
     - **description** (str, optional): 모델 설명
         - 모델에 대한 상세 설명
         - 생략 가능
-    - **repo_id** (str, required): 모델 저장소 ID
+    - **repo_id** (str, optional): 모델 저장소 ID
         - HuggingFace 모델인 경우: repository ID (예: "google/owlv2-base-patch16")
         - 커스텀 모델인 경우: 모델 식별자
+        - 생략 가능 (null 허용)
     - **provider_id** (int, required): 모델 제공자 ID
         - **중요**: `GET /api/v1/models/providers` API로 제공자 목록을 조회한 후, 해당 제공자의 `id` 값을 사용해야 합니다
         - 예: `GET /api/v1/models/providers?provider_name=huggingface`로 조회하여 반환된 `id` 값 사용
@@ -113,7 +116,7 @@ def create_model(
     - **id** (int): 모델 고유 ID
     - **name** (str): 모델 이름
     - **description** (str, optional): 모델 설명
-    - **repo_id** (str): 모델 저장소 ID
+    - **repo_id** (str, optional): 모델 저장소 ID
     - **provider_info** (ModelProviderReadSchema): 모델 제공자 정보
         - id (int): 제공자 ID
         - name (str): 제공자 이름
@@ -146,7 +149,7 @@ def create_model(
       를 먼저 호출하여 ID 값을 확인한 후 사용해야 합니다
     - HuggingFace 모델인 경우 provider_id가 huggingface의 ID와 일치해야 합니다
     - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, file이 필요합니다
-    - 모델 이름에 "yolo"가 포함되면 자동으로 학습 가능 모델로 설정됩니다
+    - YOLOX 모델인 경우에만 자동으로 학습 가능 모델(learning_enable_yn=True)로 설정됩니다
     - **중요**: `parent_model_id`와 `model_registry_schema`는 내부 시스템에서만 사용하는 파라미터입니다. 프론트엔드에서는 이 파라미터들을 전달하지 않아야 합니다.
 
     ## Errors
@@ -181,6 +184,16 @@ def create_model(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="model_registry_schema is unprocessable entity"
         )
+    # YOLOX 모델인지 확인 (repo_id 또는 name으로 확인)
+    is_yolox = False
+    if repo_id:
+        is_yolox = is_yolox_remote_model(repo_id)
+    if not is_yolox:
+        is_yolox = is_yolox_local_model(name)
+
+    # YOLOX 모델인 경우에만 learning_enable_yn을 true로 설정
+    learning_enable_yn = is_yolox
+
     model = ModelBaseSchema(
         name=name,
         description=description,
@@ -189,8 +202,7 @@ def create_model(
         type_id=type_id,
         format_id=format_id,
         parent_model_id=parent_model_id,
-        # TODO : 추후 학습 가능 모델에 대한 구분 기준을 모델 이름에서 고정기준으로 변경 필요. ex) provider 또는 type에 yolo 추가.
-        learning_enable_yn="yolo" in name.lower(),
+        learning_enable_yn=learning_enable_yn,
         version=1,
         subversion=1,
         task=task,
@@ -254,6 +266,10 @@ def create_model(
 
             return model_repository.get(db, model_id)
         elif provider_id == huggingface_model_provider.id:  # HuggingFace
+            if not repo_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for HuggingFace models"
+                )
             return HuggingFaceModelService().create(db, model_schema=model)
         elif provider_id == custom_model_provider.id:  # Custom
             return CustomModelService().create(
@@ -408,7 +424,7 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     - **id** (int): 모델 고유 ID
     - **name** (str): 모델 이름
     - **description** (str, optional): 모델 설명
-    - **repo_id** (str): 모델 저장소 ID
+    - **repo_id** (str, optional): 모델 저장소 ID
     - **provider_info** (ModelProviderReadSchema): 모델 제공자 정보
         - id (int): 제공자 ID
         - name (str): 제공자 이름

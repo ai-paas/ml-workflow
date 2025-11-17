@@ -20,7 +20,7 @@ class Model(BaseModel, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    repo_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    repo_id: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     provider_id: Mapped[int] = mapped_column(ForeignKey("model_provider.id"))
     type_id: Mapped[int] = mapped_column(ForeignKey("model_type.id"))
     format_id: Mapped[int] = mapped_column(ForeignKey("model_format.id"))
