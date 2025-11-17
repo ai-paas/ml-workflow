@@ -5,7 +5,7 @@ from typing import Optional
 
 from config.db.connect import SessionDepends
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from schemas.prompt import PromptCreateSchema, PromptReadSchema, PromptUpdateSchema
+from schemas.prompt import PromptCreateSchema, PromptReadSchema, PromptUpdateSchema, PromptVariableTypeListSchema
 from schemas.user import UserSchema
 from services.prompt import PromptService
 from sqlalchemy.orm import Session
@@ -14,6 +14,26 @@ from utils.authentication import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/prompts", tags=["Prompts"])
+
+
+@router.get("/variable-types", response_model=PromptVariableTypeListSchema)
+def get_prompt_variable_types(
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    프롬프트 변수 가능한 타입 목록 조회
+
+    프롬프트에서 사용할 수 있는 변수 타입 목록을 조회합니다.
+
+    ## Response (PromptVariableTypeListSchema)
+    - **available_types** (List[str]): 사용 가능한 변수 타입 목록
+        - 현재는 "context"만 사용 가능
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
+    """
+    return PromptService.get_available_variable_types()
 
 
 @router.post("", response_model=PromptReadSchema, status_code=status.HTTP_201_CREATED)

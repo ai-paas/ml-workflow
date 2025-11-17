@@ -1,8 +1,15 @@
+from enum import Enum as PyEnum
 from typing import Optional
 
 from db.models.base import BaseModel, TimestampMixin
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+
+class PromptVariableType(PyEnum):
+    """프롬프트 변수 타입 열거형"""
+
+    CONTEXT = "context"  # 컨텍스트 변수 (Knowledge Base 검색 결과 등)
 
 
 class Prompt(BaseModel, TimestampMixin):

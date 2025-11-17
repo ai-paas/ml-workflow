@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from db.models.prompt import Prompt
+from db.models.prompt import Prompt, PromptVariableType
 from repos.prompt import prompt_repository, prompt_variable_repository
 from schemas.prompt import (
     PromptCreateSchema,
@@ -9,6 +9,7 @@ from schemas.prompt import (
     PromptUpdateSchema,
     PromptVariableBaseSchema,
     PromptVariableReadSchema,
+    PromptVariableTypeListSchema,
 )
 from sqlalchemy.orm import Session
 
@@ -28,10 +29,11 @@ class PromptService:
 
             # 2. 프롬프트 변수 생성
             if obj_in.prompt_variable:
-                for var_name in obj_in.prompt_variable:
+                for var_type in obj_in.prompt_variable:
+                    # Enum을 String으로 변환하여 저장
                     prompt_variable_repository.create(
                         db,
-                        obj_in=PromptVariableBaseSchema(name=var_name, prompt_id=prompt_id),
+                        obj_in=PromptVariableBaseSchema(name=var_type.value, prompt_id=prompt_id),
                     )
 
             db.commit()
@@ -127,10 +129,11 @@ class PromptService:
                 prompt_variable_repository.delete_by_prompt_id(db, pk)
 
                 # 새 변수 생성
-                for var_name in obj_in.prompt_variable:
+                for var_type in obj_in.prompt_variable:
+                    # Enum을 String으로 변환하여 저장
                     prompt_variable_repository.create(
                         db,
-                        obj_in=PromptVariableBaseSchema(name=var_name, prompt_id=pk),
+                        obj_in=PromptVariableBaseSchema(name=var_type.value, prompt_id=pk),
                     )
 
             db.commit()
@@ -163,3 +166,9 @@ class PromptService:
             db.rollback()
             logger.error(f"프롬프트 삭제 중 오류 발생: {str(e)}", exc_info=True)
             raise
+
+    @staticmethod
+    def get_available_variable_types() -> PromptVariableTypeListSchema:
+        """프롬프트 변수 가능한 타입 목록 조회"""
+        available_types = [var_type.value for var_type in PromptVariableType]
+        return PromptVariableTypeListSchema(available_types=available_types)
