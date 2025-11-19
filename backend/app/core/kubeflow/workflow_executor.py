@@ -395,11 +395,11 @@ class WorkflowExecutor:
                         ollama_resources = client.V1ResourceRequirements(
                             requests={
                                 "memory": "8Gi",
-                                "cpu": "2",
+                                "cpu": "500m",
                             },
                             limits={
                                 "memory": "16Gi",
-                                "cpu": "6",
+                                "cpu": "2000m",
                             },
                         )
 

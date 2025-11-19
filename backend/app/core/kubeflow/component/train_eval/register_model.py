@@ -139,7 +139,7 @@ def register_model_component(
                 type_response = self._session.get(
                     f"{self.base_url}/api/v1/models/types",
                     headers=self._get_headers(),
-                    params={"type_name": "Fine-Tuned"},
+                    params={"type_name": "ODM"},
                 )
                 if type_response.status_code == 200:
                     metadata["type_id"] = type_response.json().get("id")

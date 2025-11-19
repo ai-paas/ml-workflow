@@ -76,11 +76,7 @@ MODEL_TYPE_DATA = [
     {
         "name": "ODM",
         "description": "Object Detection Model",
-    },
-    {
-        "name": "Fine-Tuned",
-        "description": "Fine-Tuned Model",
-    },
+    }
 ]
 
 MODEL_TYPE_DATA_2 = [

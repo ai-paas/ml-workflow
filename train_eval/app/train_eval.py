@@ -405,18 +405,6 @@ class CustomTrainModel:
                 logger.info("학습 완료! 평가를 시작합니다.")
                 self.evaluate_after_training(run, temp_exp_path, matched_exp_name, modifications)
 
-                # self.insert_metadata(
-                #     run_id=run.info.run_id,
-                #     artifact_uri=run.info.artifact_uri,
-                #     model_id=self.model_id,
-                #     model_version="1",
-                #     model_uri="",
-                #     train_model_name=self.result_model_name,
-                #     restapi_url=self.restapi_url,
-                #     restapi_token=self.get_token_from_restapi(
-                #         url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                #     ),
-                # )
             self.update_experiment(
                 experiment_id=self.experiment_id,
                 status="COMPLETED",
@@ -858,85 +846,6 @@ class CustomTrainModel:
                 return None
         except requests.exceptions.ConnectionError:
             logger.warning(f"REST API 서버에 연결할 수 없습니다: {self.restapi_url}")
-            return None
-
-    def insert_metadata(
-        self,
-        run_id: str,
-        artifact_uri: str,
-        model_id: int,
-        model_version: str,
-        model_uri: str,
-        train_model_name: str,
-        restapi_url: str,
-        restapi_token: str,
-    ):
-        """메타데이터 삽입"""
-        try:
-            if not restapi_token:
-                logger.warning("REST API 토큰이 없어 메타데이터 삽입을 건너뜁니다.")
-                return None
-
-            # API 토큰 헤더 설정
-            headers = {"Authorization": f"Bearer {restapi_token}"}
-
-            # provider, type, format ID 조회 (타임아웃 추가)
-            provider_response = requests.get(
-                f"{restapi_url}/api/v1/models/providers",
-                headers=headers,
-                params={"provider_name": "custom"},
-                timeout=10,
-            )
-            if provider_response.status_code != 200:
-                raise Exception(f"Provider 조회 실패: {provider_response.text}")
-            provider_id = provider_response.json().get("id")
-
-            type_response = requests.get(
-                f"{restapi_url}/api/v1/models/types", headers=headers, params={"type_name": "Fine-Tuned"}
-            )
-            if type_response.status_code != 200:
-                raise Exception(f"Type 조회 실패: {type_response.text}")
-            type_id = type_response.json().get("id")
-
-            format_response = requests.get(
-                f"{restapi_url}/api/v1/models/formats", headers=headers, params={"format_name": "pytorch"}
-            )
-            if format_response.status_code != 200:
-                raise Exception(f"Format 조회 실패: {format_response.text}")
-            format_id = format_response.json().get("id")
-
-            data = {
-                "name": train_model_name,
-                "description": f"fine-tuned model: {train_model_name}",
-                "provider_id": provider_id,
-                "type_id": type_id,
-                "format_id": format_id,
-                "parent_model_id": model_id,
-                "model_registry_schema": json.dumps(
-                    {
-                        "artifact_path": artifact_uri,
-                        "uri": model_uri,
-                        "run_id": run_id,
-                    }
-                ),
-            }
-
-            api_endpoint = f"{restapi_url}/api/v1/models"
-            response = requests.post(api_endpoint, headers=headers, data=data)
-
-            if response.status_code == 200:
-                logger.info("메타데이터 삽입 성공")
-                return response.json()
-            else:
-                logger.error(f"메타데이터 삽입 실패: {response.status_code}")
-                logger.error(f"메타데이터 삽입 실패: {response.text}")
-                return None
-
-        except requests.exceptions.ConnectionError:
-            logger.warning(f"REST API 서버에 연결할 수 없습니다: {restapi_url}")
-            return None
-        except Exception as e:
-            logger.error(f"메타데이터 삽입 중 오류 발생: {e}")
             return None
 
     def get_token_from_restapi(self, url: str, username: str, password: str) -> str:

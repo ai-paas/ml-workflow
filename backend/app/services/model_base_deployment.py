@@ -279,12 +279,12 @@ class ModelBaseDeploymentService:
                 # Ollama용 리소스 설정
                 ollama_resources = client.V1ResourceRequirements(
                     requests={
-                        "memory": "8Gi",
-                        "cpu": "2",
+                        "memory": "4Gi",
+                        "cpu": "500m",
                     },
                     limits={
-                        "memory": "12Gi",
-                        "cpu": "4",
+                        "memory": "8Gi",
+                        "cpu": "2000m",
                     },
                 )
 
