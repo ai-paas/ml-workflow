@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum as PyEnum
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import TIMESTAMP, Enum, ForeignKey, Integer, String
+from sqlalchemy import TIMESTAMP, Enum, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import BaseModel, TimestampMixin
@@ -29,6 +29,11 @@ class ModelBaseDeployment(BaseModel, TimestampMixin):
     """모델 기본 배포 정보 테이블"""
 
     __tablename__ = "model_base_deployments"
+    __table_args__ = (
+        Index("ix_model_base_deployments_model_id", "model_id"),
+        Index("ix_model_base_deployments_service_name", "service_name"),
+        Index("ix_model_base_deployments_status", "status"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 

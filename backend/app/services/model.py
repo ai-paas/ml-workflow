@@ -82,7 +82,9 @@ def is_yolox_local_model(model_name: str) -> bool:
 
 
 class ModelService:
-    def get(self, db: Session, pk: int) -> ModelReadSchema:
+    @staticmethod
+    def get(db: Session, pk: int) -> Optional[Model]:
+        """ID로 Model 객체 조회"""
         return model_repository.get(db, pk)
 
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[ModelReadSchema]:

@@ -67,6 +67,11 @@ class AppServiceService:
         return service_repository.get_multi_with_filters(db, skip=skip, limit=limit, creator_id=creator_id)
 
     @staticmethod
+    def count_services(db: Session, *, creator_id: Optional[int] = None) -> int:
+        """필터 조건에 맞는 서비스 개수 조회"""
+        return service_repository.count(db, creator_id=creator_id)
+
+    @staticmethod
     def update_service(db: Session, service_id: str, service_data: ServiceUpdateRequest) -> Optional[Service]:
         """서비스 정보 수정"""
         service = service_repository.get(db, service_id)

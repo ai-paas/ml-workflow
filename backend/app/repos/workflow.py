@@ -43,7 +43,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
         creator_id: Optional[int] = None,
         service_id: Optional[int] = None,
         is_template: Optional[bool] = None,
-        status: Optional[WorkflowStatus] = None
+        status: Optional[WorkflowStatus] = None,
     ) -> List[Workflow]:
         """필터링된 워크플로우 목록 조회"""
         query = db.query(Workflow).options(joinedload(Workflow.creator), joinedload(Workflow.service))
@@ -69,7 +69,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
         skip: int = 0,
         limit: int = 100,
         creator_id: Optional[int] = None,
-        category: Optional[str] = None
+        category: Optional[str] = None,
     ) -> List[Workflow]:
         """워크플로우 템플릿 목록 조회"""
         query = db.query(Workflow).filter(Workflow.is_template == True).options(joinedload(Workflow.creator))
@@ -82,10 +82,39 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
 
         return query.offset(skip).limit(limit).all()
 
-    def get_derived_workflows_count(self, db: Session, template_id: int) -> int:
+    def get_derived_workflows_count(self, db: Session, template_id: str) -> int:
         """템플릿에서 파생된 워크플로우 개수 조회"""
-        # base에 count 메서드가 없으므로 유지
         return db.query(Workflow).filter(Workflow.template_id == template_id).count()
+
+    def count(
+        self,
+        db: Session,
+        *,
+        creator_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        is_template: Optional[bool] = None,
+        status: Optional[WorkflowStatus] = None,
+        category: Optional[str] = None,
+    ) -> int:
+        """필터 조건에 맞는 워크플로우 개수 조회"""
+        query = db.query(Workflow)
+
+        if creator_id is not None:
+            query = query.filter(Workflow.creator_id == creator_id)
+
+        if service_id is not None:
+            query = query.filter(Workflow.service_id == service_id)
+
+        if is_template is not None:
+            query = query.filter(Workflow.is_template == is_template)
+
+        if status is not None:
+            query = query.filter(Workflow.status == status)
+
+        if category is not None:
+            query = query.filter(Workflow.category == category)
+
+        return query.count()
 
     # create_workflow, update_workflow_fields 제거 - base의 create, update 메서드로 충분
 
@@ -128,6 +157,8 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
             type=ComponentType(component_data.type),
             config=None,  # config는 사용하지 않음
             model_id=component_data.model_id,
+            knowledge_base_id=component_data.knowledge_base_id,
+            prompt_id=component_data.prompt_id,
         )
         db.add(component)
         db.flush()
@@ -136,6 +167,16 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
     def get_by_workflow_id(self, db: Session, workflow_id: str) -> List[WorkflowComponent]:
         """워크플로우 ID로 컴포넌트 목록 조회 - base의 filter 활용"""
         return self.filter(db, {"workflow_id": workflow_id})
+
+    def get_by_id_and_workflow_id(
+        self, db: Session, component_id: str, workflow_id: str
+    ) -> Optional[WorkflowComponent]:
+        """컴포넌트 ID와 워크플로우 ID로 컴포넌트 조회"""
+        return (
+            db.query(WorkflowComponent)
+            .filter(WorkflowComponent.id == component_id, WorkflowComponent.workflow_id == workflow_id)
+            .first()
+        )
 
     def delete_by_workflow_id(self, db: Session, workflow_id: str) -> int:
         """워크플로우의 모든 컴포넌트 삭제"""

@@ -15,7 +15,9 @@ UI에서 워크플로우 관련 기능을 구현할 때 사용할 API 호출 순
   - 필수: `name`, `workflow_definition`
   - 선택: `description`, `category`
   - `workflow_definition`:
-    - `components`: 컴포넌트 목록 (START, END, MODEL)
+    - `components`: 컴포넌트 목록 (START, END, MODEL, KNOWLEDGE_BASE)
+      - **MODEL 타입**: `model_id` (필수), `prompt_id` (선택)
+      - **KNOWLEDGE_BASE 타입**: `knowledge_base_id` (필수)
     - `connections`: 컴포넌트 간 연결 정보
 - 응답: 생성된 템플릿 정보 (WorkflowTemplateBriefSchema)
 - **주의**:
@@ -39,7 +41,8 @@ UI에서 워크플로우 관련 기능을 구현할 때 사용할 API 호출 순
       {
         "name": "YOLOX 모델",
         "type": "MODEL",
-        "model_id": 1
+        "model_id": 1,
+        "prompt_id": 1
       },
       {
         "name": "종료 노드",
@@ -49,6 +52,52 @@ UI에서 워크플로우 관련 기능을 구현할 때 사용할 API 호출 순
     "connections": [
       {
         "source_component_type": "START",
+        "target_component_type": "MODEL"
+      },
+      {
+        "source_component_type": "MODEL",
+        "target_component_type": "END"
+      }
+    ]
+  }
+}
+```
+
+**Knowledge Base와 프롬프트를 포함한 템플릿 예시**:
+```json
+{
+  "name": "의료 진단 템플릿",
+  "description": "Knowledge Base와 LLM을 활용한 의료 진단 워크플로우 템플릿",
+  "category": "Medical",
+  "workflow_definition": {
+    "components": [
+      {
+        "name": "시작 노드",
+        "type": "START"
+      },
+      {
+        "name": "의료 지식 베이스",
+        "type": "KNOWLEDGE_BASE",
+        "knowledge_base_id": 1
+      },
+      {
+        "name": "의료 LLM 모델",
+        "type": "MODEL",
+        "model_id": 2,
+        "prompt_id": 1
+      },
+      {
+        "name": "종료 노드",
+        "type": "END"
+      }
+    ],
+    "connections": [
+      {
+        "source_component_type": "START",
+        "target_component_type": "KNOWLEDGE_BASE"
+      },
+      {
+        "source_component_type": "KNOWLEDGE_BASE",
         "target_component_type": "MODEL"
       },
       {
@@ -84,7 +133,7 @@ UI에서 워크플로우 관련 기능을 구현할 때 사용할 API 호출 순
   - `category` (선택): 새 카테고리
   - `status` (선택): 새 상태 (DRAFT/ACTIVE/ERROR)
   - `workflow_definition` (선택): 새 템플릿 구조
-    - `components`: 컴포넌트 목록 (START, END, MODEL)
+    - `components`: 컴포넌트 목록 (START, END, MODEL, KNOWLEDGE_BASE)
     - `connections`: 컴포넌트 간 연결 정보
 - 응답: 업데이트된 템플릿 정보 (WorkflowTemplateReadSchema)
 - **주의**:
@@ -109,7 +158,8 @@ UI에서 워크플로우 관련 기능을 구현할 때 사용할 API 호출 순
       {
         "name": "YOLOX 모델 v2",
         "type": "MODEL",
-        "model_id": 2
+        "model_id": 2,
+        "prompt_id": 2
       },
       {
         "name": "종료 노드",
@@ -169,7 +219,12 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
 **API**: `GET /api/v1/workflows/component-types`
 
 - 사용 가능한 컴포넌트 타입 확인용
-- 응답: START, END, MODEL 타입 정보
+- 응답: START, END, MODEL, KNOWLEDGE_BASE 타입 정보
+- 각 타입별 설명:
+  - **START**: 워크플로우 시작점
+  - **END**: 워크플로우 종료점
+  - **MODEL**: ML 모델 실행 노드 (model_id 필수, prompt_id 선택)
+  - **KNOWLEDGE_BASE**: 지식 베이스 검색 노드 (knowledge_base_id 필수)
 
 #### 2-2. 워크플로우 직접 생성
 **API**: `POST /api/v1/workflows`
@@ -178,7 +233,9 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
   - 필수: `name`
   - 선택: `description`, `category`, `service_id`, `workflow_definition`
   - `workflow_definition`:
-    - `components`: 컴포넌트 목록 (START, END, MODEL)
+    - `components`: 컴포넌트 목록 (START, END, MODEL, KNOWLEDGE_BASE)
+      - **MODEL 타입**: `model_id` (필수), `prompt_id` (선택)
+      - **KNOWLEDGE_BASE 타입**: `knowledge_base_id` (필수)
     - `connections`: 컴포넌트 간 연결 정보
 - 응답: 생성된 워크플로우 정보 (WorkflowBaseSchema)
 - 상태는 DRAFT로 시작
@@ -201,7 +258,8 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
       {
         "name": "YOLOX 모델",
         "type": "MODEL",
-        "model_id": 1
+        "model_id": 1,
+        "prompt_id": 1
       },
       {
         "name": "종료 노드",
@@ -211,6 +269,52 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
     "connections": [
       {
         "source_component_type": "START",
+        "target_component_type": "MODEL"
+      },
+      {
+        "source_component_type": "MODEL",
+        "target_component_type": "END"
+      }
+    ]
+  }
+}
+```
+
+**Knowledge Base와 프롬프트를 포함한 워크플로우 생성 예시**:
+```json
+{
+  "name": "의료 진단 워크플로우",
+  "description": "Knowledge Base 검색 후 LLM으로 진단하는 워크플로우",
+  "category": "Medical",
+  "workflow_definition": {
+    "components": [
+      {
+        "name": "시작 노드",
+        "type": "START"
+      },
+      {
+        "name": "의료 지식 베이스",
+        "type": "KNOWLEDGE_BASE",
+        "knowledge_base_id": 1
+      },
+      {
+        "name": "의료 LLM 모델",
+        "type": "MODEL",
+        "model_id": 2,
+        "prompt_id": 1
+      },
+      {
+        "name": "종료 노드",
+        "type": "END"
+      }
+    ],
+    "connections": [
+      {
+        "source_component_type": "START",
+        "target_component_type": "KNOWLEDGE_BASE"
+      },
+      {
+        "source_component_type": "KNOWLEDGE_BASE",
         "target_component_type": "MODEL"
       },
       {
@@ -272,8 +376,10 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
   - `category` (선택): 새 카테고리
   - `status` (선택): 새 상태 (DRAFT/ACTIVE/ERROR)
   - `service_id` (선택): 연결할 서비스 ID (UUID)
-  - `workflow_definition` (선택): 새 워크플로우 구조
-    - `components`: 컴포넌트 목록 (START, END, MODEL)
+    - `workflow_definition` (선택): 새 워크플로우 구조
+    - `components`: 컴포넌트 목록 (START, END, MODEL, KNOWLEDGE_BASE)
+      - **MODEL 타입**: `model_id` (필수), `prompt_id` (선택)
+      - **KNOWLEDGE_BASE 타입**: `knowledge_base_id` (필수)
     - `connections`: 컴포넌트 간 연결 정보
 - 응답: 업데이트된 워크플로우 정보 (WorkflowReadSchema)
 - **주의**:
@@ -317,52 +423,76 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
 - 응답: `{ "status": "completed", "workflow_updated": true, ... }`
 - 파이프라인 완료 확인 후 워크플로우 상태를 DRAFT로 변경
 
-### 8. 워크플로우 배포된 모델 추론 방법
+### 8. 워크플로우 테스트 방법
 
-**API**: `POST /api/v1/workflows/{workflow_id}/models/{component_id}/inference`
+#### 8-1. RAG 워크플로우 테스트
+
+**API**: `POST /api/v1/workflows/{workflow_id}/test/rag`
 
 - 경로 파라미터:
   - `workflow_id`: 워크플로우 UUID
-  - `component_id`: 컴포넌트 UUID
-    - **component_id 조회 방법**:
-      1. **워크플로우 상세 조회** (`GET /api/v1/workflows/{workflow_id}`)
-         - 응답의 `components` 배열에서 `id` 필드 확인
-         - `type`이 "MODEL"인 컴포넌트의 `id` 사용
-         - 예시:
-         ```json
-         {
-           "components": [
-             {
-               "id": "123e4567-e89b-12d3-a456-426614174000",
-               "name": "YOLOX 모델",
-               "type": "MODEL",
-               "model_id": 1
-             }
-           ]
-         }
-         ```
-      2. **배포된 모델 목록 조회** (`GET /api/v1/workflows/{workflow_id}/models`)
-         - 응답의 `deployed_models` 배열에서 `component_id` 필드 확인
-         - 배포된 모델만 조회 가능 (DEPLOYED 상태)
-         - 예시:
-         ```json
-         {
-           "deployed_models": [
-             {
-               "component_id": "123e4567-e89b-12d3-a456-426614174000",
-               "component_name": "YOLOX 모델",
-               "status": "DEPLOYED"
-             }
-           ]
-         }
-         ```
 - 요청 바디: `multipart/form-data`
-  - `image`: 이미지 파일 (JPEG, PNG, GIF, WebP)
-- 응답: 추론 결과
-  - `predictions`: 추론 결과 (boxes, scores, labels 등)
-  - `image_info`: 이미지 메타데이터
-  - `model_info`: 모델 정보
-- **주의**: 모델이 DEPLOYED 상태여야 추론 가능
+  - `text` (required): 검색 쿼리 및 LLM 입력 텍스트
+    - Knowledge Base가 있으면 검색 쿼리로 사용
+    - LLM 모델의 입력 텍스트로도 사용
+- 응답: `WorkflowTestResponse`
+  - `workflow_id`: 워크플로우 UUID
+  - `execution_order`: 실행된 컴포넌트 ID 순서
+  - `results`: 각 컴포넌트 실행 결과 목록
+    - Knowledge Base 컴포넌트: 검색 결과 포함
+    - LLM 모델 컴포넌트: LLM 응답 포함
+  - `final_result`: 마지막 LLM 모델의 결과
+- **주의**:
+  - 워크플로우는 ACTIVE 상태여야 함 (배포 완료)
+  - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
+  - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
+  - 지식베이스 검색 결과는 자동으로 LLM 모델에 전달됨
+  - **프롬프트 처리 방식**:
+    - `prompt_id`가 설정된 경우:
+      - 프롬프트에 `context` 변수가 있으면: 프롬프트의 `{context}` 또는 `{{context}}` 위치에 자동 치환
+      - 프롬프트에 `context` 변수가 없어도: `[참고자료]` 태그와 함께 별도의 system 메시지로 추가
+    - `prompt_id`가 없는 경우: `[참고자료]` 태그와 함께 system 메시지로 추가
+  - 각 컴포넌트의 실행 결과는 `results` 배열에 순서대로 포함됨
+
+**사용 예시**:
+```bash
+# RAG 워크플로우 테스트 (Knowledge Base 검색 + LLM 추론 자동 실행)
+POST /api/v1/workflows/{workflow_id}/test/rag
+Content-Type: multipart/form-data
+
+text=의료진단에 대해 알려주세요
+```
+
+#### 8-2. ML 워크플로우 테스트
+
+**API**: `POST /api/v1/workflows/{workflow_id}/test/ml`
+
+- 경로 파라미터:
+  - `workflow_id`: 워크플로우 UUID
+- 요청 바디: `multipart/form-data`
+  - `image` (required): 이미지 파일 (JPEG, PNG, GIF, WebP)
+    - ODM 모델 추론용
+- 응답: `WorkflowTestResponse`
+  - `workflow_id`: 워크플로우 UUID
+  - `execution_order`: 실행된 컴포넌트 ID 순서
+  - `results`: 각 컴포넌트 실행 결과 목록
+    - ODM 모델 컴포넌트: 객체 탐지 결과 포함
+  - `final_result`: 마지막 ODM 모델의 결과
+- **주의**:
+  - 워크플로우는 ACTIVE 상태여야 함 (배포 완료)
+  - 워크플로우에 최소 하나의 ODM MODEL 컴포넌트가 있어야 함
+  - KNOWLEDGE_BASE 컴포넌트는 포함될 수 없음 (ML 워크플로우는 ODM만 지원)
+  - 각 컴포넌트의 실행 결과는 `results` 배열에 순서대로 포함됨
+  - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록됨 (서비스와 연결된 경우)
+
+**사용 예시**:
+```bash
+# ML 워크플로우 테스트 (ODM 추론 자동 실행)
+POST /api/v1/workflows/{workflow_id}/test/ml
+Content-Type: multipart/form-data
+
+image=@test_image.jpg
+```
 
 ### 9. 워크플로우 템플릿 삭제하는 방법
 
@@ -389,7 +519,8 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
 | 워크플로우 실행 (배포) | `/api/v1/workflows/{workflow_id}/execute` | POST | `workflow_id` (경로), `parameters` (선택) |
 | 워크플로우 상태 조회 | `/api/v1/workflows/{workflow_id}/status` | GET | `workflow_id` (경로) |
 | 배포된 모델 목록 조회 | `/api/v1/workflows/{workflow_id}/models` | GET | `workflow_id` (경로) |
-| 모델 추론 | `/api/v1/workflows/{workflow_id}/components/{component_id}/inference` | POST | `workflow_id` (경로), `component_id` (경로), `image` (파일) |
+| RAG 워크플로우 테스트 | `/api/v1/workflows/{workflow_id}/test/rag` | POST | `workflow_id` (경로), `text` (필수) |
+| ML 워크플로우 테스트 | `/api/v1/workflows/{workflow_id}/test/ml` | POST | `workflow_id` (경로), `image` (파일, 필수) |
 | 워크플로우 리소스 정리 | `/api/v1/workflows/{workflow_id}/cleanup` | POST | `workflow_id` (경로) |
 | 리소스 정리 완료 확인 | `/api/v1/workflows/{workflow_id}/finalize-cleanup` | POST | `workflow_id` (경로), `run_id` (쿼리) |
 | 워크플로우 삭제 시작 | `/api/v1/workflows/{workflow_id}` | DELETE | `workflow_id` (경로) |
@@ -411,3 +542,16 @@ POST /api/v1/workflows/templates/123e4567-e89b-12d3-a456-426614174000/clone?work
 - 삭제와 리소스 정리는 2단계 프로세스 (파이프라인 완료 확인 필요)
 - 서비스 연결 방법은 서비스 API 사용 가이드 참조
 - 상세한 요청/응답 형식은 각 API의 docstring 참조
+- **컴포넌트 타입별 필수 필드**:
+  - **MODEL**: `model_id` (필수), `prompt_id` (선택 - Ollama 모델인 경우 프롬프트 적용)
+  - **KNOWLEDGE_BASE**: `knowledge_base_id` (필수)
+- **프롬프트 사용 방법**:
+  - MODEL 컴포넌트에 `prompt_id`를 설정하면 Ollama 모델 추론 시 프롬프트가 자동 적용됨
+  - `prompt_id`가 설정된 경우:
+    - 프롬프트에 `context` 변수가 있으면: 프롬프트의 `{context}` 또는 `{{context}}` 위치에 자동 치환
+    - 프롬프트에 `context` 변수가 없어도: `[참고자료]` 태그와 함께 별도의 system 메시지로 추가
+  - `prompt_id`가 없고 `search_text`가 있으면: `[참고자료]` 태그와 함께 system 메시지로 추가됨
+- **Knowledge Base 연동 방법**:
+  1. `/test/rag` API 호출
+  2. Knowledge Base 검색과 LLM 추론이 자동으로 순차 실행됨
+  3. 검색 결과가 자동으로 LLM 모델에 전달됨

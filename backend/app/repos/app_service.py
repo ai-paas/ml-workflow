@@ -46,6 +46,15 @@ class ServiceRepository(CRUDBase[Service, ServiceCreateRequest, ServiceUpdateReq
 
         return query.offset(skip).limit(limit).all()
 
+    def count(self, db: Session, *, creator_id: Optional[int] = None) -> int:
+        """필터 조건에 맞는 서비스 개수 조회"""
+        query = db.query(Service)
+
+        if creator_id is not None:
+            query = query.filter(Service.creator_id == creator_id)
+
+        return query.count()
+
     # update_service 메서드 제거 - base의 update() 메서드 사용
 
     def delete_with_workflow_unlink(self, db: Session, service_id: str) -> bool:

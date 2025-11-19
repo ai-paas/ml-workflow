@@ -2,7 +2,7 @@ from enum import Enum as PyEnum
 from typing import Optional
 
 from db.models.base import BaseModel, TimestampMixin
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
@@ -32,6 +32,7 @@ class PromptVariable(BaseModel):
     """프롬프트 변수 테이블"""
 
     __tablename__ = "prompt_variable"
+    __table_args__ = (Index("ix_prompt_variable_prompt_id", "prompt_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)

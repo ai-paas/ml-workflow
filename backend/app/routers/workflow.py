@@ -1,28 +1,44 @@
 """Workflow API 라우터"""
 
+import base64
+import io
 import json
 import logging
 import math
+import tempfile
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import requests
 from config.db.connect import SessionDepends
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
 from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
-from db.models.model import Model
+from db.models.prompt import PromptVariableType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
+from PIL import Image, ImageDraw, ImageFont
+from repos.prompt import prompt_repository
 from repos.workflow import workflow_repository
 from schemas.user import UserSchema
 from schemas.workflow import (
+    ComponentTestErrorResult,
+    ComponentTestResult,
     ComponentTypeInfo,
+    KnowledgeBaseComponentTestResult,
+    KnowledgeBaseTestResult,
+    ModelComponentTestResult,
+    ModelLLMTestResult,
+    ModelODMTestResult,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
     WorkflowExecuteRequest,
     WorkflowExecuteResponse,
     WorkflowListSchema,
+    WorkflowMLTestResponse,
+    WorkflowRAGTestResponse,
     WorkflowReadSchema,
     WorkflowTemplateBriefSchema,
     WorkflowTemplateCreateRequest,
@@ -31,9 +47,11 @@ from schemas.workflow import (
     WorkflowTemplateUpdateRequest,
     WorkflowUpdateRequest,
 )
+from services.app_service import ServiceMonitoringService
+from services.knowledge_base import KnowledgeBaseService
 from services.kserve_deployment import KServeDeploymentService
+from services.model import ModelService
 from services.workflow import WorkflowService
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -60,11 +78,12 @@ def get_component_types():
         - "START": 워크플로우 시작점
         - "END": 워크플로우 종료점
         - "MODEL": ML 모델 실행 노드
+        - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
     - **component_id** (str): 컴포넌트 식별자
         - 워크플로우 정의 시 사용할 고유 ID
-        - 일반적으로 type과 동일 (예: "START", "END", "MODEL")
+        - 일반적으로 type과 동일 (예: "START", "END", "MODEL", "KNOWLEDGE_BASE")
     - **name** (str): 타입 표시명 (한글)
-        - "시작 노드", "종료 노드", "모델 노드" 등
+        - "시작 노드", "종료 노드", "모델 노드", "지식 베이스 노드" 등
     - **description** (str): 타입 설명
         - 각 컴포넌트 타입의 역할과 용도 설명
 
@@ -76,7 +95,8 @@ def get_component_types():
     ## Notes
     - 고정된 타입 목록 반환 (동적 변경 없음)
     - 워크플로우는 반드시 START로 시작하고 END로 종료
-    - MODEL 타입은 model_id 필수
+    - MODEL 타입은 model_id 필수, prompt_id 선택
+    - KNOWLEDGE_BASE 타입은 knowledge_base_id 필수
     """
     return [
         ComponentTypeInfo(
@@ -96,6 +116,12 @@ def get_component_types():
             component_id=ComponentType.MODEL.value,
             name="모델 노드",
             description="ML 모델을 실행하는 노드",
+        ),
+        ComponentTypeInfo(
+            type=ComponentType.KNOWLEDGE_BASE.value,
+            component_id=ComponentType.KNOWLEDGE_BASE.value,
+            name="지식 베이스 노드",
+            description="Knowledge Base에서 정보를 검색하는 노드",
         ),
     ]
 
@@ -125,8 +151,10 @@ def create_workflow(
     - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
             - name (str): 컴포넌트 이름
-            - type (ComponentType): 타입 (START/END/MODEL)
+            - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
+            - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
+            - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_component_type (ComponentType): 소스 컴포넌트 타입
             - target_component_type (ComponentType): 타겟 컴포넌트 타입
@@ -156,7 +184,8 @@ def create_workflow(
 
     ## Notes
     - 템플릿으로부터 생성하려면 `/workflows/templates/{template_id}/clone` API 사용
-    - MODEL 컴포넌트는 유효한 model_id 필요
+    - MODEL 컴포넌트는 유효한 model_id 필요, prompt_id는 선택
+    - KNOWLEDGE_BASE 컴포넌트는 유효한 knowledge_base_id 필요
     - 생성 직후 상태는 DRAFT
     - is_template은 항상 false로 설정됨 (템플릿 생성은 /workflows/templates API 사용)
     - 상세 정보(components, connections, creator 등)는 GET /workflows/{workflow_id}로 조회 가능
@@ -167,12 +196,19 @@ def create_workflow(
     - 500: 서버 내부 오류
     """
     try:
+        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+        if workflow_data.workflow_definition:
+            _validate_workflow_definition(db, workflow_data.workflow_definition)
+
         # create_workflow는 항상 is_template=False로 생성됨
         workflow = WorkflowService.create_workflow(db=db, workflow_data=workflow_data, creator_id=current_user.id)
 
         # 기본 스키마로 변환
         return WorkflowBaseSchema.model_validate(workflow)
 
+    except HTTPException:
+        # _validate_workflow_definition 등에서 발생한 HTTPException을 그대로 전달
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
@@ -242,20 +278,6 @@ def list_workflows(
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
-    from db.models.service import Workflow, WorkflowStatus
-
-    # 전체 개수 조회를 위한 쿼리 구성 (템플릿 제외)
-    count_query = db.query(func.count(Workflow.id)).filter(Workflow.is_template == False)
-    if creator_id is not None:
-        count_query = count_query.filter(Workflow.creator_id == creator_id)
-    if service_id is not None:
-        count_query = count_query.filter(Workflow.service_id == service_id)
-    if status is not None:
-        try:
-            status_enum = WorkflowStatus(status)
-            count_query = count_query.filter(Workflow.status == status_enum)
-        except ValueError:
-            pass
 
     # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
     if page is None or page_size is None:
@@ -272,7 +294,13 @@ def list_workflows(
         return WorkflowListSchema(total=len(items), items=items)
 
     # 페이지네이션 적용
-    total_count = count_query.scalar()
+    total_count = WorkflowService.count_workflows(
+        db=db,
+        creator_id=creator_id,
+        service_id=service_id,
+        is_template=False,
+        status=status,
+    )
     skip = page_size * (page - 1)
 
     workflows = WorkflowService.get_workflows(
@@ -316,8 +344,10 @@ def create_workflow_template(
     - **workflow_definition** (WorkflowDefinition, required): 템플릿 구조
         - components (List[ComponentCreateRequest]): 컴포넌트 정의
             - name (str): 컴포넌트 이름
-            - type (str): 타입 (START/END/MODEL)
-            - model_id (int): MODEL 타입의 모델 ID
+            - type (str): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - model_id (int, optional): MODEL 타입인 경우 모델 ID
+            - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
+            - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
         - connections (List[ConnectionCreateRequest]): 연결 정의
             - source_component_id (str): 소스 컴포넌트 ID
             - target_component_id (str): 타겟 컴포넌트 ID
@@ -362,6 +392,10 @@ def create_workflow_template(
     - 500: 서버 내부 오류
     """
     try:
+        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+        if template_data.workflow_definition:
+            _validate_workflow_definition(db, template_data.workflow_definition)
+
         # is_template은 WorkflowService.create_workflow_template 내부에서 true로 설정됨
         template = WorkflowService.create_workflow_template(
             db=db, template_data=template_data, creator_id=current_user.id
@@ -370,11 +404,13 @@ def create_workflow_template(
         result = WorkflowTemplateBriefSchema.model_validate(template)
 
         # 사용 횟수 계산
-        usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+        usage_count = WorkflowService.get_template_usage_count(db, template.id)
         result.usage_count = usage_count
 
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create template: {str(e)}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create template")
@@ -447,13 +483,6 @@ def list_workflow_templates(
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
-    from db.models.service import Workflow
-
-    # 전체 개수 조회를 위한 쿼리 구성
-    count_query = db.query(func.count(Workflow.id)).filter(Workflow.is_template == True)
-    if category:
-        count_query = count_query.filter(Workflow.category == category)
-
     # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
     if page is None or page_size is None:
         templates = WorkflowService.get_workflow_templates(
@@ -463,13 +492,17 @@ def list_workflow_templates(
         for template in templates:
             result = WorkflowTemplateBriefSchema.model_validate(template)
             # 사용 횟수 계산
-            usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+            usage_count = WorkflowService.get_template_usage_count(db, template.id)
             result.usage_count = usage_count
             results.append(result)
         return WorkflowTemplateListSchema(total=len(results), items=results)
 
     # 페이지네이션 적용
-    total_count = count_query.scalar()
+    total_count = WorkflowService.count_workflows(
+        db=db,
+        is_template=True,
+        category=category,
+    )
     skip = page_size * (page - 1)
 
     templates = WorkflowService.get_workflow_templates(
@@ -481,7 +514,7 @@ def list_workflow_templates(
         result = WorkflowTemplateBriefSchema.model_validate(template)
 
         # 사용 횟수 계산
-        usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+        usage_count = WorkflowService.get_template_usage_count(db, template.id)
         result.usage_count = usage_count
 
         results.append(result)
@@ -542,8 +575,13 @@ def get_workflow_template(
             - "START": 워크플로우 시작점
             - "END": 워크플로우 종료점
             - "MODEL": ML 모델 실행 노드
+            - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
         - model_id (int, optional): 연결된 모델 ID
             - MODEL 타입인 경우 필수, 다른 타입은 null
+        - knowledge_base_id (int, optional): 연결된 Knowledge Base ID
+            - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
+        - prompt_id (int, optional): 연결된 프롬프트 ID
+            - MODEL 타입인 경우 선택, 다른 타입은 null
         - model (ModelBriefReadSchema, optional): 모델 상세 정보
             - MODEL 타입인 경우에만 포함
             - id (int): 모델 ID
@@ -618,7 +656,7 @@ def get_workflow_template(
     result = WorkflowTemplateReadSchema.model_validate(template)
 
     # 사용 횟수 계산
-    usage_count = db.query(Workflow).filter(Workflow.template_id == template.id).count()
+    usage_count = WorkflowService.get_template_usage_count(db, template.id)
     result.usage_count = usage_count
 
     return result
@@ -739,8 +777,10 @@ def update_workflow_template(
     - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 템플릿 구조
         - components (List[ComponentUpdateRequest]): 컴포넌트 목록
             - name (str): 컴포넌트 이름
-            - type (ComponentType): 타입 (START/END/MODEL)
+            - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
+            - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
+            - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
         - connections (List[ConnectionUpdateRequest]): 연결 목록
             - source_component_type (ComponentType): 소스 컴포넌트 타입
             - target_component_type (ComponentType): 타겟 컴포넌트 타입
@@ -783,32 +823,43 @@ def update_workflow_template(
         - template_id가 존재하지 않거나 템플릿이 아닌 경우
     - 500: 서버 내부 오류
     """
-    # 템플릿인지 확인
-    template = WorkflowService.get_workflow_by_id(db, template_id)
-    if not template or not template.is_template:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
+    try:
+        # 템플릿인지 확인
+        template = WorkflowService.get_workflow_by_id(db, template_id)
+        if not template or not template.is_template:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
 
-    # WorkflowTemplateUpdateRequest를 WorkflowUpdateRequest로 변환 (service_id는 None으로 설정)
-    workflow_update_data = WorkflowUpdateRequest(
-        name=template_data.name,
-        description=template_data.description,
-        category=template_data.category,
-        status=template_data.status,
-        service_id=None,  # 템플릿은 service_id를 수정할 수 없음
-        workflow_definition=template_data.workflow_definition,
-    )
+        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+        if template_data.workflow_definition:
+            _validate_workflow_definition(db, template_data.workflow_definition)
 
-    updated_template = WorkflowService.update_workflow(
-        db=db, workflow_id=template_id, workflow_data=workflow_update_data
-    )
+        # WorkflowTemplateUpdateRequest를 WorkflowUpdateRequest로 변환 (service_id는 None으로 설정)
+        workflow_update_data = WorkflowUpdateRequest(
+            name=template_data.name,
+            description=template_data.description,
+            category=template_data.category,
+            status=template_data.status,
+            service_id=None,  # 템플릿은 service_id를 수정할 수 없음
+            workflow_definition=template_data.workflow_definition,
+        )
 
-    result = WorkflowTemplateReadSchema.from_orm(updated_template)
+        updated_template = WorkflowService.update_workflow(
+            db=db, workflow_id=template_id, workflow_data=workflow_update_data
+        )
 
-    # 사용 횟수 계산
-    usage_count = db.query(Workflow).filter(Workflow.template_id == template_id).count()
-    result.usage_count = usage_count
+        result = WorkflowTemplateReadSchema.model_validate(updated_template)
 
-    return result
+        # 사용 횟수 계산
+        usage_count = WorkflowService.get_template_usage_count(db, template_id)
+        result.usage_count = usage_count
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update template: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update template")
 
 
 @router.delete("/templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -911,8 +962,13 @@ def get_workflow(
             - "START": 워크플로우 시작점
             - "END": 워크플로우 종료점
             - "MODEL": ML 모델 실행 노드
+            - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
         - model_id (int, optional): 모델 ID
             - MODEL 타입인 경우 필수, 다른 타입은 null
+        - knowledge_base_id (int, optional): Knowledge Base ID
+            - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
+        - prompt_id (int, optional): 프롬프트 ID
+            - MODEL 타입인 경우 선택, 다른 타입은 null
         - model (ModelBriefReadSchema, optional): 모델 상세 정보
             - MODEL 타입인 경우에만 포함
             - id (int): 모델 ID
@@ -1025,12 +1081,17 @@ def update_workflow(
     - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 워크플로우 구조
         - components (List[ComponentUpdateRequest]): 컴포넌트 목록
             - name (str): 컴포넌트 이름
-            - type (ComponentType): 타입 (START/END/MODEL)
+            - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
                 - "START": 워크플로우 시작점
                 - "END": 워크플로우 종료점
                 - "MODEL": ML 모델 실행 노드
+                - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
                 - MODEL 타입인 경우 필수, 다른 타입은 null
+            - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
+                - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
+            - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
+                - MODEL 타입인 경우 선택, 다른 타입은 null
         - connections (List[ConnectionUpdateRequest]): 연결 목록
             - source_component_type (ComponentType): 소스 컴포넌트 타입
             - target_component_type (ComponentType): 타겟 컴포넌트 타입
@@ -1074,14 +1135,25 @@ def update_workflow(
     - 404: 워크플로우를 찾을 수 없음
     - 500: 서버 내부 오류
     """
-    workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
+    try:
+        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+        if workflow_data.workflow_definition:
+            _validate_workflow_definition(db, workflow_data.workflow_definition)
 
-    if not workflow:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+        workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
 
-    # 관계를 다시 로드하여 스키마로 변환
-    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
-    return WorkflowReadSchema.model_validate(workflow)
+        if not workflow:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+        # 관계를 다시 로드하여 스키마로 변환
+        workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+        return WorkflowReadSchema.model_validate(workflow)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update workflow: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update workflow")
 
 
 async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300) -> bool:
@@ -1425,20 +1497,22 @@ async def execute_workflow(
     - **message** (str): 상태 메시지
 
     ## Process
-    1. MODEL 컴포넌트를 KServe InferenceService로 배포
-    2. 워크플로우를 Kubeflow 파이프라인으로 변환
-    3. 파이프라인 실행 및 모니터링 시작
-    4. KServeDeployment 테이블에 배포 정보 기록
+    1. 지식베이스가 모델 앞에 있는지 검증
+    2. MODEL 컴포넌트를 KServe InferenceService로 배포
+    3. 워크플로우를 Kubeflow 파이프라인으로 변환
+    4. 파이프라인 실행 및 모니터링 시작
+    5. KServeDeployment 테이블에 배포 정보 기록
 
     ## Notes
     - 워크플로우 상태가 ERROR인 경우만 실행 불가
     - DRAFT 상태에서도 실행 가능 (파이프라인 완료 시 자동으로 ACTIVE로 변경됨)
+    - 지식베이스 컴포넌트는 모델 컴포넌트보다 앞에 있어야 함
     - 배포된 모델은 /workflows/{workflow_id}/models로 확인
     - 실행 상태는 /workflows/{workflow_id}/status로 모니터링
     - 파이프라인 완료 시 워크플로우 상태가 자동으로 ACTIVE로 변경됨
 
     ## Errors
-    - 400: 워크플로우가 ERROR 상태임
+    - 400: 워크플로우가 ERROR 상태이거나 지식베이스가 모델 뒤에 있음
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
     - 500: 실행 중 오류 발생
@@ -1454,6 +1528,12 @@ async def execute_workflow(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Workflow has errors. Please fix the errors before execution.",
         )
+
+    # 지식베이스가 모델 앞에 있는지 검증
+    try:
+        WorkflowService._validate_knowledge_base_before_model(workflow)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     try:
         # WorkflowExecutor를 사용하여 워크플로우 실행
@@ -1662,7 +1742,7 @@ async def update_component_deployment_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{workflow_id}/models/{component_id}/inference")
+@router.post("/{workflow_id}/models/{component_id}/inference", deprecated=True)
 async def inference_workflow_model(
     *,
     db: Session = SessionDepends,
@@ -1670,10 +1750,15 @@ async def inference_workflow_model(
     component_id: str,
     image: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None),
+    search_text: Optional[str] = Form(None, description="Knowledge Base 검색 결과 텍스트"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    배포된 모델에 추론 요청
+    배포된 모델에 추론 요청 (Deprecated)
+
+    ⚠️ 이 API는 deprecated 되었습니다. 대신 다음 API를 사용하세요:
+    - RAG 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/rag`
+    - ML 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/ml`
 
     워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
     - KServe 모델: KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
@@ -1699,6 +1784,11 @@ async def inference_workflow_model(
     - **text** (str, optional): 텍스트 입력
         - Ollama 모델인 경우 필수 (image가 없는 경우)
         - KServe 모델인 경우 사용하지 않음
+    - **search_text** (str, optional): Knowledge Base 검색 결과 텍스트
+        - Knowledge Base 컴포넌트에서 검색된 결과를 전달하는 파라미터
+        - Ollama 모델인 경우에만 사용됨
+        - prompt_id가 설정된 경우: prompt의 context 변수에 자동 치환
+        - prompt_id가 없는 경우: [참고자료] 태그와 함께 system 메시지로 추가
 
     ## Response (통일된 형식)
     - **workflow_id** (str): 워크플로우 UUID
@@ -1793,17 +1883,13 @@ async def inference_workflow_model(
     model_info = {"component_id": component_id, "service_name": service_name, "sanitized_model_name": model_name}
 
     # 컴포넌트의 모델 정보 추가
-    component = (
-        db.query(WorkflowComponent)
-        .filter(WorkflowComponent.workflow_id == workflow_id, WorkflowComponent.id == component_id)
-        .first()
-    )
+    component = WorkflowService.get_component_by_id_and_workflow_id(db, component_id, workflow_id)
 
     is_ollama_model = False
     model_repo_id = None
 
     if component and component.model_id:
-        model = db.query(Model).filter(Model.id == component.model_id).first()
+        model = ModelService.get(db, component.model_id)
         if model:
             model_info.update(
                 {
@@ -1869,8 +1955,49 @@ async def inference_workflow_model(
                 detail="Ollama model requires 'text' parameter",
             )
 
-        # 메시지 구성
-        message = {
+        # 메시지 리스트 초기화
+        messages = []
+
+        # 프롬프트 처리
+        if component and component.prompt_id:
+            # prompt_id가 설정된 경우: 프롬프트 조회 및 처리
+            prompt = prompt_repository.get_with_variables(db, component.prompt_id)
+            if prompt:
+                # prompt_variables 중 context 변수가 있는지 확인
+                has_context_variable = False
+                if prompt.prompt_variables:
+                    for var in prompt.prompt_variables:
+                        if var.name == PromptVariableType.CONTEXT.value:
+                            has_context_variable = True
+                            break
+
+                # prompt.content 처리
+                prompt_content = prompt.content
+
+                # context 변수가 있고 search_text가 제공된 경우 치환
+                if has_context_variable and search_text:
+                    # {context} 또는 {{context}} 패턴을 search_text로 치환
+                    prompt_content = prompt_content.replace("{context}", search_text)
+                    prompt_content = prompt_content.replace("{{context}}", search_text)
+
+                # role: system 메시지에 prompt.content 추가
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": prompt_content,
+                    }
+                )
+        elif search_text:
+            # prompt_id가 없고 search_text가 있는 경우: [참고자료] 태그와 함께 system 메시지로 추가
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"[참고자료]\n{search_text}",
+                }
+            )
+
+        # role: user 메시지에 text 추가
+        user_message = {
             "role": "user",
             "content": text,  # content는 항상 문자열 (텍스트 필수)
         }
@@ -1887,11 +2014,13 @@ async def inference_workflow_model(
             )
             # Vision 모델이 아닌 경우 이미지를 보내지 않음
             # Vision 모델인 경우 아래 주석을 해제하고 사용
-            # message["images"] = [image_base64]  # base64 문자열 배열
+            # user_message["images"] = [image_base64]  # base64 문자열 배열
+
+        messages.append(user_message)
 
         data = {
             "model": model_repo_id,  # repo_id 사용
-            "messages": [message],
+            "messages": messages,
             "stream": False,
         }
 
@@ -2147,8 +2276,511 @@ async def inference_workflow_model(
         response_time_ms = (time.time() - start_time) * 1000
 
         logger.error(f"Unexpected error occurred: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unexpected error: {str(e)}")
 
-        # 모니터링 데이터 기록 (실패)
+
+def _get_workflow_execution_order(workflow: Workflow) -> List[WorkflowComponent]:
+    """
+    워크플로우의 실행 순서를 결정 (START -> KNOWLEDGE_BASE -> MODEL -> END)
+
+    Args:
+        workflow: 워크플로우
+
+    Returns:
+        실행 순서대로 정렬된 컴포넌트 리스트
+    """
+    # START 컴포넌트 찾기
+    start_components = [c for c in workflow.components if c.type == ComponentType.START]
+    if not start_components:
+        return []
+
+    # 컴포넌트 ID -> 컴포넌트 매핑
+    component_map = {c.id: c for c in workflow.components}
+
+    # 연결 정보로 그래프 구성 (source -> target)
+    graph = {}
+    for conn in workflow.component_connections:
+        if conn.source_component_id not in graph:
+            graph[conn.source_component_id] = []
+        graph[conn.source_component_id].append(conn.target_component_id)
+
+    # BFS로 워크플로우 순회
+    visited = set()
+    execution_order = []
+
+    def traverse(component_id: str):
+        if component_id in visited:
+            return
+        visited.add(component_id)
+
+        component = component_map.get(component_id)
+        if not component:
+            return
+
+        # START, END는 제외하고 KNOWLEDGE_BASE와 MODEL만 추가
+        if component.type in [ComponentType.KNOWLEDGE_BASE, ComponentType.MODEL]:
+            execution_order.append(component)
+
+        # 다음 컴포넌트로 이동
+        for next_id in graph.get(component_id, []):
+            traverse(next_id)
+
+    # 모든 START 컴포넌트에서 시작
+    for start_component in start_components:
+        traverse(start_component.id)
+
+    return execution_order
+
+
+# ============= Workflow Validation Helper Functions =============
+
+
+def _validate_workflow_definition(db: Session, definition: Any) -> None:
+    """
+    워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+
+    Args:
+        db: 데이터베이스 세션
+        definition: WorkflowDefinition 또는 WorkflowUpdateDefinition
+
+    Raises:
+        HTTPException: 검증 실패 시
+    """
+    if not definition or not definition.components:
+        return
+
+    components = definition.components
+    connections = definition.connections if hasattr(definition, "connections") else []
+
+    # 1. KNOWLEDGE_BASE와 ODM MODEL 공존 검증
+    has_knowledge_base = any(c.type == ComponentType.KNOWLEDGE_BASE for c in components)
+    has_odm_model = False
+
+    # MODEL 컴포넌트 중 ODM 타입이 있는지 확인
+    for component in components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            if model and model.type_info and model.type_info.name == "ODM":
+                has_odm_model = True
+                break
+
+    if has_knowledge_base and has_odm_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="KNOWLEDGE_BASE component and ODM MODEL component cannot coexist in the same workflow",
+        )
+
+    # 2. KNOWLEDGE_BASE가 MODEL 앞에 있는지 순서 검증
+    if not has_knowledge_base:
+        return  # KNOWLEDGE_BASE가 없으면 순서 검증 불필요
+
+    # START 컴포넌트 찾기
+    start_components = [c for c in components if c.type == ComponentType.START]
+    if not start_components:
+        return  # START가 없으면 검증 스킵
+
+    # 컴포넌트 타입 -> 컴포넌트 매핑 (같은 타입이 여러 개일 수 있으므로 리스트로 관리)
+    component_type_map: Dict[ComponentType, List[Any]] = {}
+    for comp in components:
+        if comp.type not in component_type_map:
+            component_type_map[comp.type] = []
+        component_type_map[comp.type].append(comp)
+
+    # 연결 정보로 그래프 구성 (타입 기반)
+    graph: Dict[ComponentType, List[ComponentType]] = {}
+    for conn in connections:
+        source_type = conn.source_component_type
+        target_type = conn.target_component_type
+        if source_type not in graph:
+            graph[source_type] = []
+        graph[source_type].append(target_type)
+
+    # DFS로 각 경로를 독립적으로 확인하여 모든 경로에서 KNOWLEDGE_BASE가 MODEL 앞에 있는지 검증
+    def traverse_path(component_type: ComponentType, path_visited: set, knowledge_base_found_in_path: bool = False):
+        """각 경로를 독립적으로 순회하여 순서 검증"""
+        # 순환 참조 방지 (현재 경로 내에서만)
+        if component_type in path_visited:
+            return
+        path_visited.add(component_type)
+
+        # KNOWLEDGE_BASE 발견
+        if component_type == ComponentType.KNOWLEDGE_BASE:
+            knowledge_base_found_in_path = True
+
+        # MODEL 발견 - 이전에 KNOWLEDGE_BASE가 없었으면 에러
+        if component_type == ComponentType.MODEL:
+            if not knowledge_base_found_in_path:
+                # KNOWLEDGE_BASE가 워크플로우에 있으면 에러
+                if has_knowledge_base:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Knowledge Base components must come before Model components in the workflow",
+                    )
+
+        # 다음 컴포넌트 타입으로 이동 (각 경로를 독립적으로 확인)
+        for next_type in graph.get(component_type, []):
+            traverse_path(next_type, path_visited.copy(), knowledge_base_found_in_path)
+
+    # 모든 START 컴포넌트에서 시작하여 각 경로를 독립적으로 확인
+    for start_component in start_components:
+        traverse_path(ComponentType.START, set(), False)
+
+
+# ============= Workflow Test Helper Functions =============
+
+
+def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], image_info: dict = None) -> bytes:
+    """
+    이미지에 예측 결과(bbox, label)를 그려서 반환
+
+    Args:
+        image_bytes: 원본 이미지 바이트 데이터
+        predictions: 예측 결과 리스트 (각 항목은 score, label, box 포함)
+        image_info: 이미지 메타데이터 (model_input_size 등)
+
+    Returns:
+        bbox와 label이 그려진 이미지의 바이트 데이터
+    """
+    try:
+        # 이미지 로드
+        image = Image.open(io.BytesIO(image_bytes))
+        original_width, original_height = image.size
+        draw = ImageDraw.Draw(image)
+
+        # 폰트 설정
+        try:
+            # 시스템 폰트 시도
+            font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 20)
+        except Exception:
+            try:
+                # Linux 폰트 시도
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+            except Exception:
+                # 기본 폰트 사용
+                font = ImageFont.load_default()
+
+        # 크기 비율 계산 (bbox를 원본 이미지 크기로 스케일링)
+        scale_x = 1.0
+        scale_y = 1.0
+
+        if image_info:
+            model_input_size = image_info.get("model_input_size", {})
+            model_height = model_input_size.get("height")
+            model_width = model_input_size.get("width")
+
+            if model_height and model_width:
+                scale_x = original_width / model_width
+                scale_y = original_height / model_height
+                logger.info(
+                    f"Scaling bbox: model_input={model_width}x{model_height}, "
+                    f"original={original_width}x{original_height}, "
+                    f"scale=({scale_x:.2f}, {scale_y:.2f})"
+                )
+
+        # 각 prediction에 대해 bbox와 label 그리기
+        for pred in predictions:
+            score = pred.get("score", 0)
+            label = pred.get("label", "unknown")
+            box = pred.get("box", [])
+
+            # box는 [xmin, ymin, xmax, ymax] 형식
+            if len(box) >= 4:
+                # box가 리스트의 리스트인 경우 ([Array(4)]) 처리
+                if isinstance(box[0], list):
+                    box = box[0]
+
+                # bbox를 원본 이미지 크기로 스케일링
+                xmin = box[0] * scale_x
+                ymin = box[1] * scale_y
+                xmax = box[2] * scale_x
+                ymax = box[3] * scale_y
+
+                # 바운딩 박스 그리기 (빨간색, 두께 3)
+                draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=3)
+
+                # 레이블 텍스트 (label + score)
+                text = f"{label}: {score:.2f}"
+
+                # 텍스트 배경 박스
+                text_bbox = draw.textbbox((xmin, ymin - 25), text, font=font)
+                draw.rectangle(text_bbox, fill="red")
+
+                # 텍스트 그리기 (흰색)
+                draw.text((xmin, ymin - 25), text, fill="white", font=font)
+
+        # 이미지를 바이트로 변환
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format="JPEG")
+        return output_buffer.getvalue()
+
+    except Exception as e:
+        logger.error(f"Failed to draw predictions on image: {e}")
+        # 에러 발생 시 원본 이미지 반환
+        return image_bytes
+
+
+def _validate_rag_workflow(db: Session, workflow: Workflow) -> None:
+    """
+    RAG 워크플로우 검증 (MODEL 컴포넌트나 KNOWLEDGE_BASE 컴포넌트 중 하나라도 있는지 확인)
+    MODEL 컴포넌트가 있으면 모델 타입이 LLM인지 확인
+
+    Args:
+        db: 데이터베이스 세션
+        workflow: 워크플로우
+
+    Raises:
+        HTTPException: RAG 워크플로우가 아닌 경우
+    """
+    has_knowledge_base = any(c.type == ComponentType.KNOWLEDGE_BASE for c in workflow.components)
+    has_llm_model = False
+
+    # MODEL 컴포넌트가 있으면 모델 타입이 LLM인지 확인
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            if model and model.type_info and model.type_info.name == "LLM":
+                has_llm_model = True
+                break
+
+    if not has_knowledge_base and not has_llm_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="RAG workflow requires at least one KNOWLEDGE_BASE component or LLM MODEL component",
+        )
+
+
+def _validate_ml_workflow(db: Session, workflow: Workflow) -> None:
+    """
+    ML 워크플로우 검증 (ODM 모델이 있는지 확인, KNOWLEDGE_BASE 컴포넌트가 없어야 함)
+
+    Args:
+        db: 데이터베이스 세션
+        workflow: 워크플로우
+
+    Raises:
+        HTTPException: ML 워크플로우가 아닌 경우
+    """
+    # KNOWLEDGE_BASE 컴포넌트가 존재하면 안 됨
+    knowledge_base_components = [c for c in workflow.components if c.type == ComponentType.KNOWLEDGE_BASE]
+    if knowledge_base_components:
+        component_names = ", ".join([c.name for c in knowledge_base_components])
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"ML workflow cannot have KNOWLEDGE_BASE components. Found: {component_names}",
+        )
+
+    # ODM 모델이 있는지 확인
+    has_odm_model = False
+
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            if model and model.type_info and model.type_info.name == "ODM":
+                has_odm_model = True
+                break
+
+    if not has_odm_model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="ML workflow requires at least one ODM (Object Detection Model) component",
+        )
+
+
+async def _execute_knowledge_base_search(
+    db: Session, component: WorkflowComponent, query: str
+) -> tuple[Optional[str], ComponentTestResult]:
+    """
+    지식베이스 검색 실행
+
+    Args:
+        db: 데이터베이스 세션
+        component: 지식베이스 컴포넌트
+        query: 검색 쿼리
+
+    Returns:
+        (search_result_text, component_result) 튜플
+    """
+    try:
+        search_result = KnowledgeBaseService.search(db, knowledge_base_id=component.knowledge_base_id, query=query)
+
+        # 검색 결과를 문자열로 변환
+        search_result_strings = []
+        for idx, result_item in enumerate(search_result.results):
+            search_result_strings.append(f"[참고자료{idx + 1}]\n{result_item.text}")
+
+        search_result_text = "\n\n".join(search_result_strings)
+
+        component_result = KnowledgeBaseComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="KNOWLEDGE_BASE",
+            model_type="embedding",
+            result=KnowledgeBaseTestResult(
+                search_result=search_result_text,
+                total=search_result.total,
+                search_method=search_result.search_method,
+            ),
+        )
+
+        return search_result_text, component_result
+
+    except Exception as e:
+        logger.error(f"Knowledge Base search failed for component {component.id}: {e}")
+        error_result = ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="KNOWLEDGE_BASE",
+            model_type="embedding",
+            error=str(e),
+        )
+        return None, error_result
+
+
+async def _execute_llm_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    text: str,
+    search_text: Optional[str],
+    service_id: Optional[str],
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """
+    LLM 모델 추론 실행
+
+    Args:
+        db: 데이터베이스 세션
+        workflow_id: 워크플로우 ID
+        component: 모델 컴포넌트
+        text: 입력 텍스트
+        search_text: 지식베이스 검색 결과 텍스트
+        service_id: 서비스 ID
+        current_user: 현재 사용자
+
+    Returns:
+        컴포넌트 테스트 결과
+    """
+    # 모델 정보 가져오기
+    model_type_name = None
+    is_ollama_model = False
+    model_repo_id = None
+
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model:
+            model_type_name = model.type_info.name if model.type_info else None
+            # Ollama 모델 확인
+            if hasattr(model, "provider_info") and model.provider_info and model.provider_info.name.lower() == "ollama":
+                if hasattr(model, "format_info") and model.format_info and model.format_info.name.lower() == "gguf":
+                    is_ollama_model = True
+                    model_repo_id = model.repo_id
+
+    # 배포 검증
+    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+
+    # 입력 검증
+    if not text:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="LLM model requires 'text' parameter",
+        )
+
+    # 요청 시작 시간 기록
+    start_time = time.time()
+
+    try:
+        if not is_ollama_model:
+            return ComponentTestErrorResult(
+                component_id=component.id,
+                component_name=component.name,
+                component_type="MODEL",
+                model_type=model_type_name,
+                error="LLM model must be an Ollama model",
+            )
+
+        # Ollama 모델 처리
+        if not deployment.internal_url:
+            return ComponentTestErrorResult(
+                component_id=component.id,
+                component_name=component.name,
+                component_type="MODEL",
+                model_type=model_type_name,
+                error="Internal URL not available for Ollama model deployment",
+            )
+
+        ollama_url = deployment.internal_url.rstrip("/")
+        url = f"{ollama_url}/api/chat"
+
+        messages = []
+
+        # 프롬프트 처리
+        if component.prompt_id:
+            prompt = prompt_repository.get_with_variables(db, component.prompt_id)
+            if prompt:
+                has_context_variable = False
+                if prompt.prompt_variables:
+                    for var in prompt.prompt_variables:
+                        if var.name == PromptVariableType.CONTEXT.value:
+                            has_context_variable = True
+                            break
+
+                prompt_content = prompt.content
+                if has_context_variable and search_text:
+                    # context 변수가 있으면 치환
+                    prompt_content = prompt_content.replace("{context}", search_text)
+                    prompt_content = prompt_content.replace("{{context}}", search_text)
+                    messages.append({"role": "system", "content": prompt_content})
+                else:
+                    # context 변수가 없어도 search_text가 있으면 프롬프트와 함께 추가
+                    messages.append({"role": "system", "content": prompt_content})
+                    if search_text:
+                        messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
+        elif search_text:
+            messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
+
+        user_message = {"role": "user", "content": text}
+        messages.append(user_message)
+
+        data = {"model": model_repo_id, "messages": messages, "stream": False}
+        headers = {"Content-Type": "application/json"}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        # 요청 실행
+        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
+        response.raise_for_status()
+
+        response_time_ms = (time.time() - start_time) * 1000
+        result_data = response.json()
+
+        # 결과 처리
+        ollama_message = result_data.get("message", {})
+        ollama_content = ollama_message.get("content", "") if isinstance(ollama_message, dict) else ""
+
+        component_result = ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or "LLM",
+            result=ModelLLMTestResult(
+                response=ollama_content,
+                full_response=result_data,
+            ),
+        )
+
+        # 모니터링 데이터 기록
         if service_id:
             try:
                 ServiceMonitoringService.record_inference_request(
@@ -2157,15 +2789,520 @@ async def inference_workflow_model(
                     workflow_id=workflow_id,
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
-                    is_success=False,
-                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
+                    is_success=True,
+                    is_object_detection=False,
                 )
                 db.commit()
-            except Exception as mon_error:
-                logger.error(f"Failed to record monitoring data: {mon_error}")
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
                 db.rollback()
 
-        raise
+        return component_result
+
+    except Exception as e:
+        logger.error(f"LLM inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
+async def _execute_odm_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    image_base64: str,
+    service_id: Optional[str],
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """
+    ODM 모델 추론 실행
+
+    Args:
+        db: 데이터베이스 세션
+        workflow_id: 워크플로우 ID
+        component: 모델 컴포넌트
+        image_base64: base64로 인코딩된 이미지 문자열
+        service_id: 서비스 ID
+        current_user: 현재 사용자
+
+    Returns:
+        컴포넌트 테스트 결과
+    """
+    # 모델 정보 가져오기
+    model_type_name = None
+
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model:
+            model_type_name = model.type_info.name if model.type_info else None
+
+    # 배포 검증
+    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+
+    # 입력 검증
+    if not image_base64:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="ODM model requires 'image' parameter",
+        )
+
+    # 요청 시작 시간 기록
+    start_time = time.time()
+
+    try:
+        # KServe 모델 처리
+        infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+
+        payload = {"image": image_base64}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        headers = {"Content-Type": "application/json", "Host": service_hostname}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+
+        # 요청 실행
+        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
+        response.raise_for_status()
+
+        response_time_ms = (time.time() - start_time) * 1000
+        result_data = response.json()
+
+        # KServe 응답 처리
+        outputs = result_data.get("outputs", [])
+        if outputs and len(outputs) > 0:
+            prediction_data = outputs[0].get("data", [])
+            if prediction_data and len(prediction_data) > 0:
+                response_data = prediction_data[0]
+
+                if isinstance(response_data, str):
+                    try:
+                        response_data = json.loads(response_data)
+                    except Exception:
+                        pass
+
+                if isinstance(response_data, dict):
+                    predictions = response_data.get("predictions", response_data)
+                    image_info = response_data.get("image_info", {})
+
+                    component_result = ModelComponentTestResult(
+                        component_id=component.id,
+                        component_name=component.name,
+                        component_type="MODEL",
+                        model_type=model_type_name or "ODM",
+                        result=ModelODMTestResult(
+                            predictions=predictions if isinstance(predictions, list) else [predictions],
+                            image_info=image_info if image_info else None,
+                        ),
+                    )
+
+                    # 모니터링 데이터 기록
+                    if service_id:
+                        try:
+                            ServiceMonitoringService.record_inference_request(
+                                db=db,
+                                service_id=service_id,
+                                workflow_id=workflow_id,
+                                user_id=current_user.id,
+                                response_time_ms=response_time_ms,
+                                is_success=True,
+                                is_object_detection=True,
+                            )
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"Failed to record monitoring data: {e}")
+                            db.rollback()
+
+                    return component_result
+                else:
+                    component_result = ModelComponentTestResult(
+                        component_id=component.id,
+                        component_name=component.name,
+                        component_type="MODEL",
+                        model_type=model_type_name or "ODM",
+                        result=ModelODMTestResult(
+                            predictions=[response_data] if not isinstance(response_data, list) else response_data,
+                            image_info=None,
+                        ),
+                    )
+
+                    # 모니터링 데이터 기록
+                    if service_id:
+                        try:
+                            ServiceMonitoringService.record_inference_request(
+                                db=db,
+                                service_id=service_id,
+                                workflow_id=workflow_id,
+                                user_id=current_user.id,
+                                response_time_ms=response_time_ms,
+                                is_success=True,
+                                is_object_detection=True,
+                            )
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"Failed to record monitoring data: {e}")
+                            db.rollback()
+
+                    return component_result
+        else:
+            # 예상치 못한 응답 형식
+            component_result = ModelComponentTestResult(
+                component_id=component.id,
+                component_name=component.name,
+                component_type="MODEL",
+                model_type=model_type_name or "ODM",
+                result=ModelODMTestResult(
+                    predictions=[result_data] if not isinstance(result_data, list) else result_data,
+                    image_info=None,
+                ),
+            )
+            return component_result
+
+    except Exception as e:
+        logger.error(f"ODM inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
+# ============= Workflow Test Endpoints =============
+
+
+@router.post("/{workflow_id}/test/rag", response_model=WorkflowRAGTestResponse)
+async def test_rag_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    text: str = Form(..., description="검색 쿼리 및 LLM 입력 텍스트"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    RAG 워크플로우 테스트
+
+    Knowledge Base와 LLM 모델을 사용하는 RAG 워크플로우를 테스트합니다.
+    지식베이스가 있으면 검색 후 결과를 LLM 모델에 전달하여 추론하고,
+    지식베이스가 없으면 LLM 모델만 실행합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID
+
+    ## Request Body (Form Data)
+    - **text** (str, required): 검색 쿼리 및 LLM 입력 텍스트
+
+    ## Response (WorkflowTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서 (워크플로우 실행 순서)
+    - **results** (List[ComponentTestResult]): 각 컴포넌트 실행 결과 목록
+        - 각 항목은 다음 중 하나의 타입:
+
+        **KnowledgeBaseComponentTestResult** (지식베이스 컴포넌트인 경우):
+        - **component_id** (str): 컴포넌트 UUID
+        - **component_name** (str): 컴포넌트 이름
+        - **component_type** (str): "KNOWLEDGE_BASE"
+        - **model_type** (str): "embedding"
+        - **result** (KnowledgeBaseTestResult): 검색 결과
+            - **search_result** (str): 검색 결과 문자열 (LLM 프롬프트에 사용 가능한 형식)
+            - **total** (int): 검색 결과 총 개수
+            - **search_method** (str): 검색 방법 (예: "similarity", "keyword")
+
+        **ModelComponentTestResult** (LLM 모델 컴포넌트인 경우):
+        - **component_id** (str): 컴포넌트 UUID
+        - **component_name** (str): 컴포넌트 이름
+        - **component_type** (str): "MODEL"
+        - **model_type** (str): "LLM"
+        - **result** (ModelLLMTestResult): LLM 추론 결과
+            - **response** (str): LLM 응답 텍스트
+            - **full_response** (dict, optional): Ollama API 전체 응답 (디버깅용)
+
+        **ComponentTestErrorResult** (오류 발생 시):
+        - **component_id** (str): 컴포넌트 UUID
+        - **component_name** (str): 컴포넌트 이름
+        - **component_type** (str): "KNOWLEDGE_BASE" 또는 "MODEL"
+        - **model_type** (str, optional): 모델 타입 (오류 발생 시 null 가능)
+        - **error** (str): 오류 메시지
+
+    - **final_result** (str, optional): 최종 결과 문자열
+        - 우선순위: 마지막 LLM MODEL 컴포넌트의 응답 > 마지막 KNOWLEDGE_BASE 컴포넌트의 검색 결과
+        - MODEL 컴포넌트가 있으면: LLM 응답 텍스트 (response)
+        - MODEL 컴포넌트가 없고 KNOWLEDGE_BASE만 있으면: 검색 결과 문자열 (search_result)
+        - 상세 정보는 results 배열의 각 컴포넌트 결과에서 확인 가능
+
+    ## Notes
+    - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
+    - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
+    - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
+    - 지식베이스 검색 결과는 자동으로 LLM 모델의 context 파라미터로 전달됨
+    - prompt_id가 설정된 경우:
+        - prompt에 context 변수가 있으면: prompt의 {context} 또는 {{context}} 위치에 자동 치환
+        - prompt에 context 변수가 없어도: [참고자료] 태그와 함께 별도의 system 메시지로 추가
+    - prompt_id가 없는 경우: [참고자료] 태그와 함께 system 메시지로 추가
+    - 각 컴포넌트의 실행 결과는 results 배열에 순서대로 포함됨
+    - final_result는 최종 결과 문자열만 포함 (LLM 응답 또는 검색 결과)
+    - 상세 정보 (total, search_method, full_response 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
+
+    ## Errors
+    - 400: 잘못된 요청 (RAG 워크플로우가 아님, 필수 파라미터 누락 등)
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 503: 모델 서비스가 준비되지 않음
+    - 500: 서버 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    # 워크플로우가 배포되어 있는지 확인
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # RAG 워크플로우 검증
+    _validate_rag_workflow(db, workflow)
+
+    # 실행 순서 결정
+    execution_order = _get_workflow_execution_order(workflow)
+
+    if not execution_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No executable components found in workflow.",
+        )
+
+    # Service ID 확인
+    service_id = workflow.service_id
+
+    results = []
+    execution_order_ids = []
+    knowledge_base_search_result = None
+
+    # 각 컴포넌트를 순서대로 실행
+    for component in execution_order:
+        execution_order_ids.append(component.id)
+
+        if component.type == ComponentType.KNOWLEDGE_BASE:
+            # 지식베이스 검색 실행
+            search_result_text, component_result = await _execute_knowledge_base_search(db, component, text)
+            if search_result_text:
+                knowledge_base_search_result = search_result_text
+            results.append(component_result)
+
+        elif component.type == ComponentType.MODEL:
+            # LLM 모델 추론 실행
+            search_text = knowledge_base_search_result if knowledge_base_search_result else None
+            component_result = await _execute_llm_inference(
+                db, workflow_id, component, text, search_text, service_id, current_user
+            )
+            results.append(component_result)
+
+    # 최종 결과 문자열 추출 (마지막 MODEL 또는 KNOWLEDGE_BASE 컴포넌트의 결과)
+    # 우선순위: MODEL > KNOWLEDGE_BASE
+    final_result = None
+    for result in reversed(results):
+        if isinstance(result, ModelComponentTestResult):
+            # LLM 모델인 경우 response 문자열 추출
+            if isinstance(result.result, ModelLLMTestResult):
+                final_result = result.result.response
+                break
+        elif isinstance(result, KnowledgeBaseComponentTestResult):
+            # MODEL이 없으면 KNOWLEDGE_BASE 검색 결과 문자열 추출
+            if final_result is None:
+                final_result = result.result.search_result
+
+    return WorkflowRAGTestResponse(
+        workflow_id=workflow_id,
+        execution_order=execution_order_ids,
+        results=results,
+        final_result=final_result,
+    )
+
+
+@router.post("/{workflow_id}/test/ml", response_model=WorkflowMLTestResponse)
+async def test_ml_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    image: UploadFile = File(..., description="이미지 파일 (ODM 추론용)"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    ML 워크플로우 테스트
+
+    Object Detection Model을 사용하는 ML 워크플로우를 테스트합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID
+
+    ## Request Body (Form Data)
+    - **image** (file, required): 이미지 파일 (ODM 추론용)
+        - 지원 형식: JPEG, PNG, GIF, WebP
+        - Base64로 인코딩되어 서버로 전송
+
+    ## Response (WorkflowTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서 (워크플로우 실행 순서)
+    - **results** (List[ComponentTestResult]): 각 컴포넌트 실행 결과 목록
+        - 각 항목은 다음 중 하나의 타입:
+
+        **ModelComponentTestResult** (ODM 모델 컴포넌트인 경우):
+        - **component_id** (str): 컴포넌트 UUID
+        - **component_name** (str): 컴포넌트 이름
+        - **component_type** (str): "MODEL"
+        - **model_type** (str): "ODM"
+        - **result** (ModelODMTestResult): ODM 추론 결과
+            - **predictions** (List[dict]): 추론 결과 목록
+                - 각 항목은 다음 필드를 포함:
+                    - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
+                    - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
+                    - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
+            - **image_info** (dict, optional): 이미지 메타데이터
+                - **original_size** (dict): 원본 이미지 크기
+                - **model_input_size** (dict): 모델 입력 크기
+
+        **ComponentTestErrorResult** (오류 발생 시):
+        - **component_id** (str): 컴포넌트 UUID
+        - **component_name** (str): 컴포넌트 이름
+        - **component_type** (str): "MODEL"
+        - **model_type** (str, optional): "ODM" (오류 발생 시 null 가능)
+        - **error** (str): 오류 메시지
+
+    - **final_result** (str, optional): 최종 결과 이미지 (base64 인코딩)
+        - 입력 이미지에 마지막 ODM MODEL 컴포넌트의 predictions를 이용해 bbox와 label을 그린 이미지
+        - base64로 인코딩된 JPEG 이미지 문자열
+        - predictions가 없거나 에러 발생 시 원본 이미지를 base64로 인코딩하여 반환
+        - 상세 정보 (predictions, image_info 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
+
+    ## Notes
+    - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
+    - 워크플로우에 최소 하나의 ODM MODEL 컴포넌트가 있어야 함
+    - KNOWLEDGE_BASE 컴포넌트는 포함될 수 없음 (ML 워크플로우는 ODM만 지원)
+    - 각 컴포넌트의 실행 결과는 results 배열에 순서대로 포함됨
+    - final_result는 입력 이미지에 bbox와 label이 그려진 이미지를 base64로 인코딩한 문자열
+    - bbox는 빨간색으로, label은 빨간 배경에 흰색 텍스트로 표시됨
+    - 상세 정보 (predictions, image_info 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
+    - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록됨 (서비스와 연결된 경우)
+
+    ## Errors
+    - 400: 잘못된 요청 (ML 워크플로우가 아님, 필수 파라미터 누락 등)
+    - 401: 인증되지 않은 사용자
+    - 404: 워크플로우를 찾을 수 없음
+    - 503: 모델 서비스가 준비되지 않음
+    - 500: 서버 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    # 워크플로우가 배포되어 있는지 확인
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # ML 워크플로우 검증
+    _validate_ml_workflow(db, workflow)
+
+    # 실행 순서 결정
+    execution_order = _get_workflow_execution_order(workflow)
+
+    if not execution_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No executable components found in workflow.",
+        )
+
+    # Service ID 확인
+    service_id = workflow.service_id
+
+    results = []
+    execution_order_ids = []
+
+    # 이미지 읽기 및 base64 인코딩 (한 번만 수행)
+    image_base64 = None
+    image_bytes = None
+    if image:
+        try:
+            await image.seek(0)
+            image_bytes = await image.read()
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Error reading image: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unable to read image file",
+            )
+
+    # 각 컴포넌트를 순서대로 실행
+    for component in execution_order:
+        execution_order_ids.append(component.id)
+
+        if component.type == ComponentType.MODEL:
+            # ODM 모델 추론 실행
+            component_result = await _execute_odm_inference(
+                db, workflow_id, component, image_base64, service_id, current_user
+            )
+            results.append(component_result)
+
+    # 최종 결과 이미지 생성 (마지막 MODEL 컴포넌트의 predictions를 이용해 이미지에 bbox와 label 그리기)
+    final_result = None
+    if image_bytes:
+        for result in reversed(results):
+            if isinstance(result, ModelComponentTestResult):
+                # ODM 모델인 경우 predictions를 이용해 이미지에 bbox와 label 그리기
+                if isinstance(result.result, ModelODMTestResult):
+                    predictions = result.result.predictions
+                    image_info = result.result.image_info
+
+                    if predictions:
+                        try:
+                            # 이미지에 bbox와 label 그리기
+                            annotated_image_bytes = _draw_predictions_on_image(
+                                image_bytes,
+                                predictions if isinstance(predictions, list) else [predictions],
+                                image_info if image_info else None,
+                            )
+                            # base64로 인코딩
+                            final_result = base64.b64encode(annotated_image_bytes).decode("utf-8")
+                        except Exception as e:
+                            logger.error(f"Failed to draw predictions on image: {e}")
+                            # 에러 발생 시 원본 이미지를 base64로 인코딩
+                            final_result = base64.b64encode(image_bytes).decode("utf-8")
+                    else:
+                        # predictions가 없으면 원본 이미지를 base64로 인코딩
+                        final_result = base64.b64encode(image_bytes).decode("utf-8")
+                    break
+
+    return WorkflowMLTestResponse(
+        workflow_id=workflow_id,
+        execution_order=execution_order_ids,
+        results=results,
+        final_result=final_result,
+    )
 
 
 @router.get("/{workflow_id}/models")

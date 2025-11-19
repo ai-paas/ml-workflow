@@ -2,9 +2,10 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from config.settings import get_settings
+from db.models.service import ComponentType
 from pydantic import BaseModel, Field, computed_field, model_serializer
 from schemas.base import TimeStampSchemaMixin
 from schemas.kserve_deployment import KServeDeploymentReadSchema
@@ -23,18 +24,10 @@ class WorkflowStatus(str, Enum):
     ERROR = "ERROR"  # 오류 상태
 
 
-class ComponentType(str, Enum):
-    """컴포넌트 타입"""
-
-    START = "START"  # 시작 노드
-    END = "END"  # 종료 노드
-    MODEL = "MODEL"  # 모델 노드
-
-
 class ComponentTypeInfo(BaseModel):
     """컴포넌트 타입 정보"""
 
-    type: str = Field(..., description="컴포넌트 타입 (START, END, MODEL)")
+    type: str = Field(..., description="컴포넌트 타입 (START, END, MODEL, KNOWLEDGE_BASE)")
     component_id: str = Field(..., description="자동 생성되는 component_id")
     name: str = Field(..., description="타입 표시명")
     description: str = Field(..., description="타입 설명")
@@ -49,6 +42,8 @@ class ComponentCreateRequest(BaseModel):
     name: str
     type: ComponentType
     model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
+    knowledge_base_id: Optional[int] = Field(None, description="Knowledge Base 컴포넌트인 경우 Knowledge Base ID")
+    prompt_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 프롬프트 ID")
 
 
 class ComponentUpdateRequest(BaseModel):
@@ -57,6 +52,8 @@ class ComponentUpdateRequest(BaseModel):
     name: str
     type: ComponentType
     model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
+    knowledge_base_id: Optional[int] = Field(None, description="Knowledge Base 컴포넌트인 경우 Knowledge Base ID")
+    prompt_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 프롬프트 ID")
 
 
 class ComponentReadSchema(TimeStampSchemaMixin):
@@ -68,6 +65,8 @@ class ComponentReadSchema(TimeStampSchemaMixin):
     type: ComponentType
     model_id: Optional[int] = None
     model: Optional[ModelBriefReadSchema] = None
+    knowledge_base_id: Optional[int] = None
+    prompt_id: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -312,3 +311,84 @@ class WorkflowExecuteResponse(BaseModel):
     kubeflow_run_id: str
     status: str
     message: str
+
+
+# ============= Workflow Test 스키마 =============
+class KnowledgeBaseTestResult(BaseModel):
+    """지식베이스 테스트 결과"""
+
+    search_result: str = Field(..., description="검색 결과 문자열")
+    total: int = Field(..., description="검색 결과 총 개수")
+    search_method: str = Field(..., description="검색 방법")
+
+
+class ModelODMTestResult(BaseModel):
+    """ODM 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="추론 결과 목록")
+    image_info: Optional[Dict[str, Any]] = Field(None, description="이미지 메타데이터")
+
+
+class ModelLLMTestResult(BaseModel):
+    """LLM 모델 테스트 결과"""
+
+    response: str = Field(..., description="LLM 응답 텍스트")
+    full_response: Optional[Dict[str, Any]] = Field(None, description="전체 응답 (Ollama API 응답)")
+
+
+class ComponentTestResultBase(BaseModel):
+    """컴포넌트 테스트 결과 기본"""
+
+    component_id: str
+    component_name: str
+    component_type: str  # KNOWLEDGE_BASE 또는 MODEL
+    model_type: str  # embedding, ODM, LLM
+
+
+class KnowledgeBaseComponentTestResult(ComponentTestResultBase):
+    """지식베이스 컴포넌트 테스트 결과"""
+
+    component_type: str = Field(default="KNOWLEDGE_BASE", description="컴포넌트 타입")
+    model_type: str = Field(default="embedding", description="모델 타입")
+    result: KnowledgeBaseTestResult
+
+
+class ModelComponentTestResult(ComponentTestResultBase):
+    """모델 컴포넌트 테스트 결과"""
+
+    component_type: str = Field(default="MODEL", description="컴포넌트 타입")
+    model_type: str  # ODM 또는 LLM
+    result: Union[ModelODMTestResult, ModelLLMTestResult]
+
+
+class ComponentTestErrorResult(BaseModel):
+    """컴포넌트 테스트 오류 결과"""
+
+    component_id: str
+    component_name: str
+    component_type: str
+    model_type: Optional[str] = None
+    error: str
+
+
+ComponentTestResult = Union[KnowledgeBaseComponentTestResult, ModelComponentTestResult, ComponentTestErrorResult]
+
+
+class WorkflowRAGTestResponse(BaseModel):
+    """RAG 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+    final_result: Optional[str] = Field(None, description="최종 결과 문자열 (LLM 응답 또는 검색 결과)")
+
+
+class WorkflowMLTestResponse(BaseModel):
+    """ML 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+    final_result: Optional[str] = Field(
+        None, description="최종 결과 이미지 (bbox와 label이 그려진 이미지를 base64로 인코딩한 문자열)"
+    )

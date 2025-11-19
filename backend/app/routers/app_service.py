@@ -16,7 +16,6 @@ from schemas.app_service import (
 )
 from schemas.user import UserSchema
 from services.app_service import AppServiceService
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
 
@@ -154,13 +153,6 @@ def list_services(
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
-    from db.models.service import Service
-
-    # 전체 개수 조회를 위한 쿼리 구성
-    count_query = db.query(func.count(Service.id))
-    if creator_id:
-        count_query = count_query.filter(Service.creator_id == creator_id)
-
     # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
     if page is None or page_size is None:
         services = AppServiceService.get_services(db=db, skip=0, limit=10000, creator_id=creator_id)
@@ -182,7 +174,7 @@ def list_services(
         return ServiceListResponse(total=len(items), items=items)
 
     # 페이지네이션 적용
-    total_count = count_query.scalar()
+    total_count = AppServiceService.count_services(db=db, creator_id=creator_id)
     skip = page_size * (page - 1)
 
     services = AppServiceService.get_services(db=db, skip=skip, limit=page_size, creator_id=creator_id)

@@ -5,9 +5,9 @@ from typing import Dict, List, Optional
 
 from config.settings import get_settings
 from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
-from db.models.service import WorkflowComponent
 from repos.kserve_deployment import kserve_deployment_repository
 from schemas.kserve_deployment import KServeDeploymentBaseSchema
+from services.workflow import WorkflowService
 from sqlalchemy.orm import Session
 
 settings = get_settings()
@@ -143,13 +143,8 @@ class KServeDeploymentService:
 
             # 컴포넌트 정보 추가
             if include_component_info:
-                component = (
-                    db.query(WorkflowComponent)
-                    .filter(
-                        WorkflowComponent.workflow_id == workflow_id,
-                        WorkflowComponent.id == deployment.component_id,
-                    )
-                    .first()
+                component = WorkflowService.get_component_by_id_and_workflow_id(
+                    db, deployment.component_id, workflow_id
                 )
 
                 if component:

@@ -137,6 +137,38 @@ class WorkflowService:
         )
 
     @staticmethod
+    def count_workflows(
+        db: Session,
+        *,
+        creator_id: Optional[int] = None,
+        service_id: Optional[int] = None,
+        is_template: Optional[bool] = None,
+        status: Optional[WorkflowStatus] = None,
+        category: Optional[str] = None,
+    ) -> int:
+        """필터 조건에 맞는 워크플로우 개수 조회"""
+        return workflow_repository.count(
+            db,
+            creator_id=creator_id,
+            service_id=service_id,
+            is_template=is_template,
+            status=status,
+            category=category,
+        )
+
+    @staticmethod
+    def get_template_usage_count(db: Session, template_id: str) -> int:
+        """템플릿 사용 횟수 조회"""
+        return workflow_repository.get_derived_workflows_count(db, template_id)
+
+    @staticmethod
+    def get_component_by_id_and_workflow_id(
+        db: Session, component_id: str, workflow_id: str
+    ) -> Optional[WorkflowComponent]:
+        """컴포넌트 ID와 워크플로우 ID로 컴포넌트 조회"""
+        return workflow_component_repository.get_by_id_and_workflow_id(db, component_id, workflow_id)
+
+    @staticmethod
     def update_workflow(db: Session, workflow_id: str, workflow_data: WorkflowUpdateRequest) -> Optional[Workflow]:
         """워크플로우 정보 수정"""
         workflow = workflow_repository.get(db, workflow_id)
@@ -168,6 +200,8 @@ class WorkflowService:
                             name=comp_update.name,
                             type=comp_update.type,
                             model_id=comp_update.model_id,
+                            knowledge_base_id=comp_update.knowledge_base_id,
+                            prompt_id=comp_update.prompt_id,
                         )
                     )
 
@@ -354,3 +388,66 @@ class WorkflowService:
 
         logger.info(f"Workflow cloned from template successfully: {workflow.id}")
         return workflow
+
+    @staticmethod
+    def _validate_knowledge_base_before_model(workflow: Workflow) -> None:
+        """
+        워크플로우에서 지식베이스가 모델 앞에 있는지 검증
+
+        Args:
+            workflow: 검증할 워크플로우
+
+        Raises:
+            ValueError: 지식베이스가 모델 뒤에 있는 경우
+        """
+        # START 컴포넌트 찾기
+        start_components = [c for c in workflow.components if c.type == ComponentType.START]
+        if not start_components:
+            return  # START가 없으면 검증 스킵
+
+        # 컴포넌트 ID -> 컴포넌트 매핑
+        component_map = {c.id: c for c in workflow.components}
+
+        # 연결 정보로 그래프 구성 (source -> target)
+        graph = {}
+        for conn in workflow.component_connections:
+            if conn.source_component_id not in graph:
+                graph[conn.source_component_id] = []
+            graph[conn.source_component_id].append(conn.target_component_id)
+
+        # BFS로 워크플로우 순회하면서 KNOWLEDGE_BASE와 MODEL의 순서 확인
+        visited = set()
+        knowledge_base_found = False
+
+        def traverse(component_id: str):
+            nonlocal knowledge_base_found
+            if component_id in visited:
+                return
+            visited.add(component_id)
+
+            component = component_map.get(component_id)
+            if not component:
+                return
+
+            # KNOWLEDGE_BASE 발견
+            if component.type == ComponentType.KNOWLEDGE_BASE:
+                knowledge_base_found = True
+
+            # MODEL 발견 - 이전에 KNOWLEDGE_BASE가 없었으면 에러
+            if component.type == ComponentType.MODEL:
+                if not knowledge_base_found:
+                    # 하지만 KNOWLEDGE_BASE가 워크플로우에 없으면 괜찮음
+                    kb_components = [c for c in workflow.components if c.type == ComponentType.KNOWLEDGE_BASE]
+                    if kb_components:
+                        raise ValueError(
+                            "Knowledge Base components must come before Model components in the workflow. "
+                            f"Found Model component '{component.name}' before any Knowledge Base component."
+                        )
+
+            # 다음 컴포넌트로 이동
+            for next_id in graph.get(component_id, []):
+                traverse(next_id)
+
+        # 모든 START 컴포넌트에서 시작
+        for start_component in start_components:
+            traverse(start_component.id)

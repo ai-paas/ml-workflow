@@ -3,7 +3,7 @@ from typing import Optional
 import sqlalchemy as sa
 from db.models.base import BaseModel, TimestampMixin
 from db.models.model import Model
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
@@ -33,6 +33,11 @@ class SearchMethod(BaseModel):
 
 class KnowledgeBase(BaseModel, TimestampMixin):
     __tablename__ = "knowledge_base"
+    __table_args__ = (
+        Index("ix_knowledge_base_collection_name", "collection_name"),
+        Index("ix_knowledge_base_embedding_model_id", "embedding_model_id"),
+        Index("ix_knowledge_base_language_id", "language_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -58,6 +63,7 @@ class KnowledgeBase(BaseModel, TimestampMixin):
 
 class KnowledgeBaseFile(BaseModel, TimestampMixin):
     __tablename__ = "knowledge_base_file"
+    __table_args__ = (Index("ix_knowledge_base_file_knowledge_base_id", "knowledge_base_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -71,6 +77,7 @@ class KnowledgeBaseFile(BaseModel, TimestampMixin):
 
 class KnowledgeBaseSearchRecord(BaseModel):
     __tablename__ = "knowledge_base_search_test_record"
+    __table_args__ = (Index("ix_knowledge_base_search_test_record_knowledge_base_id", "knowledge_base_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     knowledge_base_id: Mapped[int] = mapped_column(ForeignKey("knowledge_base.id", ondelete="CASCADE"), nullable=False)
