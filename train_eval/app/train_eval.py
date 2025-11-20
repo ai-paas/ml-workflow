@@ -341,23 +341,51 @@ class CustomTrainModel:
             # train.py의 실행 코드를 직접 구현
             configure_module()
 
-            # 인자 파싱
+            # GPU 사용 가능 여부 확인
+            gpu_available = torch.cuda.is_available()
+            gpu_count = torch.cuda.device_count() if gpu_available else 0
+            gpu_limit_int = int(self.gpu_limit) if self.gpu_limit.isdigit() else 0
+
+            logger.info(f"GPU 사용 가능: {gpu_available}, GPU 개수: {gpu_count}, 요청한 GPU 개수: {gpu_limit_int}")
+
+            # GPU가 요청되었지만 사용 불가능한 경우 경고
+            if gpu_limit_int > 0 and not gpu_available:
+                logger.warning(f"GPU {gpu_limit_int}개를 요청했지만 GPU를 사용할 수 없습니다. CPU 모드로 실행합니다.")
+                gpu_limit_int = 0
+            elif gpu_limit_int > 0 and gpu_count == 0:
+                logger.warning("GPU를 요청했지만 GPU가 감지되지 않습니다. CPU 모드로 실행합니다.")
+                gpu_limit_int = 0
+            elif gpu_limit_int > gpu_count:
+                logger.warning(
+                    f"요청한 GPU 개수({gpu_limit_int})가 사용 가능한 GPU 개수({gpu_count})보다 많습니다. {gpu_count}개로 제한합니다."
+                )
+                gpu_limit_int = gpu_count
+
+            # 인자 파싱 - GPU가 있을 때만 -d 옵션 포함
             parser = make_parser()
-            args = parser.parse_args(
+            parse_args_list = [
+                "-f",
+                str(temp_exp_path),
+                "-c",
+                str(model_file),
+                "-b",
+                self.batch_size,
+            ]
+
+            # GPU가 있을 때만 -d 옵션 추가
+            if gpu_limit_int > 0 and gpu_available:
+                parse_args_list.extend(["-d", str(gpu_limit_int)])
+                # GPU가 있을 때만 fp16 사용
+                parse_args_list.append("--fp16")
+
+            parse_args_list.extend(
                 [
-                    "-f",
-                    str(temp_exp_path),
-                    "-c",
-                    str(model_file),
-                    "-b",
-                    self.batch_size,
-                    "-d",
-                    self.gpu_limit,
-                    "--fp16",
                     "--logger",
                     "mlflow",
                 ]
             )
+
+            args = parser.parse_args(parse_args_list)
 
             exp = get_exp(args.exp_file, args.name)
             exp.merge(args.opts)
@@ -368,6 +396,11 @@ class CustomTrainModel:
 
             num_gpu = get_num_devices() if args.devices is None else args.devices
             num_gpu = min(num_gpu, get_num_devices())
+
+            # GPU가 없으면 0으로 설정
+            if not gpu_available or gpu_count == 0:
+                num_gpu = 0
+                logger.info("GPU를 사용할 수 없으므로 CPU 모드로 실행합니다.")
 
             if args.cache is not None:
                 exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
@@ -522,9 +555,13 @@ class CustomTrainModel:
                 ckpt_path,
                 "-b",
                 self.batch_size,
-                "-d",
-                self.gpu_limit,
             ]
+
+            # GPU가 있을 때만 -d 옵션 추가
+            gpu_available = torch.cuda.is_available()
+            gpu_limit_int = int(self.gpu_limit) if self.gpu_limit.isdigit() else 0
+            if gpu_limit_int > 0 and gpu_available:
+                eval_args.extend(["-d", str(gpu_limit_int)])
 
             args = parser.parse_args(eval_args)
 
