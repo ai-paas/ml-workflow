@@ -99,7 +99,7 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
     run_id: Optional[str] = None
-    pvc: Optional[str] = None
+    pvc: Optional[str] = Field(None, exclude=True)
     reference_model_id: int
 
     class Config:
