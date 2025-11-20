@@ -5,6 +5,7 @@ from typing import Optional
 
 import mlflow
 from config.db.connect import SessionDepends
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.component.train_eval.register_model import register_model_component
 from core.kubeflow.component.train_eval.train_eval import container_train_eval_component
@@ -290,6 +291,10 @@ def register_model(
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        provider_name: str,
+        type_name: str,
+        yolox_format_name: str,
+        pytorch_format_name: str,
     ):
         register_model_component(
             parent_model_id=parent_model_id,
@@ -301,6 +306,10 @@ def register_model(
             restapi_url=restapi_url,
             restapi_username=restapi_username,
             restapi_password=restapi_password,
+            provider_name=provider_name,
+            type_name=type_name,
+            yolox_format_name=yolox_format_name,
+            pytorch_format_name=pytorch_format_name,
         )
 
     try:
@@ -316,6 +325,12 @@ def register_model(
         experiment_db_obj = ExperimentService().get(db, experiment_id)
         parent_model_id = experiment_db_obj.reference_model_id
 
+        # Enum 값 추출
+        provider_name = ModelProviderEnum.CUSTOM.value
+        type_name = ModelTypeEnum.ODM.value
+        yolox_format_name = ModelFormatEnum.YOLOX.value
+        pytorch_format_name = ModelFormatEnum.PYTORCH.value
+
         client.create_run_from_pipeline_func(
             register_model_pipeline,
             enable_caching=False,
@@ -330,6 +345,10 @@ def register_model(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
+                "provider_name": provider_name,
+                "type_name": type_name,
+                "yolox_format_name": yolox_format_name,
+                "pytorch_format_name": pytorch_format_name,
             },
         )
         return True

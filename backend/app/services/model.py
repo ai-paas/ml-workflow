@@ -7,17 +7,17 @@ import uuid
 from enum import Enum
 from typing import Any, Optional
 
+from config.db.enums import ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
-from db.models.experiment import ExperimentModel
-from db.models.knowledge_base import KnowledgeBase
-from db.models.model import Model, ModelProvider, ModelType
-from db.models.service import WorkflowComponent
+from db.models.model import Model
 from fastapi import UploadFile
 from huggingface_hub import snapshot_download
 from kfp import dsl
 from kfp.compiler import Compiler
+from repos.experiment import experiment_repository
+from repos.knowledge_base import knowledge_base_repository
 from repos.model import (
     model_format_repository,
     model_provider_repository,
@@ -26,6 +26,7 @@ from repos.model import (
     model_type_repository,
 )
 from repos.model_base_deployment import model_base_deployment_repository
+from repos.workflow import workflow_component_repository
 from schemas.model import (
     ModelBaseSchema,
     ModelFormatReadSchema,
@@ -162,7 +163,7 @@ class ModelService:
         references = []
 
         # 1. Experiment에서 참조 확인
-        experiments = db.query(ExperimentModel).filter(ExperimentModel.reference_model_id == model_id).all()
+        experiments = experiment_repository.get_by_reference_model_id(db, model_id)
         if experiments:
             references.append(
                 {
@@ -173,7 +174,7 @@ class ModelService:
             )
 
         # 2. WorkflowComponent에서 참조 확인
-        workflow_components = db.query(WorkflowComponent).filter(WorkflowComponent.model_id == model_id).all()
+        workflow_components = workflow_component_repository.get_by_model_id(db, model_id)
         if workflow_components:
             references.append(
                 {
@@ -186,7 +187,7 @@ class ModelService:
             )
 
         # 3. 다른 모델의 parent_model_id로 참조 확인 (자식 모델 확인)
-        child_models = db.query(Model).filter(Model.parent_model_id == model_id).all()
+        child_models = model_repository.get_by_parent_model_id(db, model_id)
         if child_models:
             references.append(
                 {
@@ -197,7 +198,7 @@ class ModelService:
             )
 
         # 4. KnowledgeBase에서 참조 확인 (embedding_model_id)
-        knowledge_bases = db.query(KnowledgeBase).filter(KnowledgeBase.embedding_model_id == model_id).all()
+        knowledge_bases = knowledge_base_repository.get_by_embedding_model_id(db, model_id)
         if knowledge_bases:
             references.append(
                 {
@@ -239,15 +240,17 @@ class ModelService:
                 )
 
             # 3. 모델 타입과 provider 확인 (명시적으로 조회)
-
-            model_type = db.query(ModelType).filter(ModelType.id == model_obj.type_id).first()
-            model_provider = db.query(ModelProvider).filter(ModelProvider.id == model_obj.provider_id).first()
+            model_type = model_type_repository.get(db, model_obj.type_id)
+            model_provider = model_provider_repository.get(db, model_obj.provider_id)
 
             model_type_name = model_type.name if model_type else None
             model_provider_name = model_provider.name if model_provider else None
 
-            is_ollama_embedding = model_type_name == "Embedding" and model_provider_name == "ollama"
-            is_ollama = model_provider_name == "ollama"
+            is_ollama_embedding = (
+                model_type_name == ModelTypeEnum.EMBEDDING.value
+                and model_provider_name == ModelProviderEnum.OLLAMA.value
+            )
+            is_ollama = model_provider_name == ModelProviderEnum.OLLAMA.value
 
             # 3-1. model_base_deployments 레코드 삭제 (외래키 제약 조건 때문에 먼저 삭제 필요)
             # cleanup_model_deployment가 파이프라인 완료 후 DB 레코드를 삭제함

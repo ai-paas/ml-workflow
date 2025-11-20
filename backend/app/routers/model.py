@@ -4,11 +4,11 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from db.models.model import ModelTaskType
 from db.models.model_base_deployment import BaseDeploymentStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.security import APIKeyHeader
 from repos.model_base_deployment import model_base_deployment_repository
 from schemas.model import (
     ModelBaseSchema,
@@ -210,11 +210,11 @@ def create_model(
         parameter=parameter,
         sample_code=sample_code,
     )
-    custom_model_provider = ModelProviderService.get_by_name(db, "custom")
-    huggingface_model_provider = ModelProviderService.get_by_name(db, "huggingface")
-    ollama_model_provider = ModelProviderService.get_by_name(db, "ollama")
-    gguf_format = ModelFormatService.get_by_name(db, "gguf")
-    embedding_type = ModelTypeService.get_by_name(db, "Embedding")
+    custom_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.CUSTOM.value)
+    huggingface_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.HUGGINGFACE.value)
+    ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
+    gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
+    embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
 
     try:
         # Ollama + GGUF인 경우: 단순히 meta 정보만 DB에 등록

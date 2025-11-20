@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 
 
 class ExperimentRepository(CRUDBase[ExperimentModel, ExperimentBaseSchema, ExperimentUpdateRequest]):
-    pass
+    def get_by_reference_model_id(self, db: Session, reference_model_id: int) -> list[ExperimentModel]:
+        """reference_model_id로 실험 목록 조회"""
+        return db.query(self.model).filter(self.model.reference_model_id == reference_model_id).all()
 
 
 class HyperparameterTypeRepository(

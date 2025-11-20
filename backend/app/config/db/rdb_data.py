@@ -1,5 +1,6 @@
 import datetime
 
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from utils.crypto import get_sha256_hash
 
@@ -16,79 +17,79 @@ USER_DATA = [
 
 MODEL_FORMAT_DATA = [
     {
-        "name": "transformers",
+        "name": ModelFormatEnum.TRANSFORMERS.value,
         "description": "Huggingface transformers",
     }
 ]
 
 MODEL_FORMAT_DATA_2 = [
     {
-        "name": "pytorch",
+        "name": ModelFormatEnum.PYTORCH.value,
         "description": "Pytorch",
     },
     {
-        "name": "keras",
+        "name": ModelFormatEnum.KERAS.value,
         "description": "Keras",
     },
     {
-        "name": "onnx",
+        "name": ModelFormatEnum.ONNX.value,
         "description": "ONNX",
     },
 ]
 
 MODEL_FORMAT_DATA_3 = [
     {
-        "name": "tensorflow",
+        "name": ModelFormatEnum.TENSORFLOW.value,
         "description": "TensorFlow",
     },
     {
-        "name": "yolox",
+        "name": ModelFormatEnum.YOLOX.value,
         "description": "YOLOX Object Detection",
     },
 ]
 
 MODEL_FORMAT_DATA_4 = [
     {
-        "name": "gguf",
+        "name": ModelFormatEnum.GGUF.value,
         "description": "GGUF format for Ollama",
     },
 ]
 
 MODEL_PROVIDER_DATA = [
     {
-        "name": "huggingface",
+        "name": ModelProviderEnum.HUGGINGFACE.value,
         "description": "huggingface",
     },
     {
-        "name": "custom",
+        "name": ModelProviderEnum.CUSTOM.value,
         "description": "user uploaded",
     },
 ]
 
 MODEL_PROVIDER_DATA_2 = [
     {
-        "name": "ollama",
+        "name": ModelProviderEnum.OLLAMA.value,
         "description": "Ollama",
     },
 ]
 
 MODEL_TYPE_DATA = [
     {
-        "name": "ODM",
+        "name": ModelTypeEnum.ODM.value,
         "description": "Object Detection Model",
     }
 ]
 
 MODEL_TYPE_DATA_2 = [
     {
-        "name": "LLM",
+        "name": ModelTypeEnum.LLM.value,
         "description": "Large Language Model",
     },
 ]
 
 MODEL_TYPE_DATA_3 = [
     {
-        "name": "Embedding",
+        "name": ModelTypeEnum.EMBEDDING.value,
         "description": "Embedding Model",
     },
 ]

@@ -184,6 +184,10 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
         db.flush()
         return deleted_count
 
+    def get_by_model_id(self, db: Session, model_id: int) -> List[WorkflowComponent]:
+        """모델 ID로 워크플로우 컴포넌트 목록 조회"""
+        return self.filter(db, {"model_id": model_id})
+
 
 class ComponentConnectionRepository(CRUDBase[ComponentConnection, ConnectionCreateRequest, ConnectionCreateRequest]):
     """ComponentConnection Repository"""

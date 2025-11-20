@@ -23,6 +23,10 @@ class KnowledgeBaseRepository(CRUDBase[KnowledgeBase, KnowledgeBaseBaseSchema, K
     def get_by_collection_name(self, db: Session, collection_name: str) -> Optional[KnowledgeBase]:
         return db.query(self.model).filter(self.model.collection_name == collection_name).first()
 
+    def get_by_embedding_model_id(self, db: Session, embedding_model_id: int) -> list[KnowledgeBase]:
+        """embedding_model_id로 지식베이스 목록 조회"""
+        return db.query(self.model).filter(self.model.embedding_model_id == embedding_model_id).all()
+
 
 class KnowledgeBaseFileRepository(
     CRUDBase[KnowledgeBaseFile, KnowledgeBaseFileCreateSchema, KnowledgeBaseFileCreateSchema]

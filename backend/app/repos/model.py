@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 
 
 class ModelRepository(CRUDBase[Model, ModelBaseSchema, ModelBaseSchema]):
-    pass
+    def get_by_parent_model_id(self, db: Session, parent_model_id: int) -> list[Model]:
+        """parent_model_id로 자식 모델 목록 조회"""
+        return db.query(self.model).filter(self.model.parent_model_id == parent_model_id).all()
 
 
 class ModelRegistryRepository(CRUDBase[ModelRegistry, ModelRegistryBaseSchema, ModelRegistryBaseSchema]):

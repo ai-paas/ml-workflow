@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from config.db.connect import SessionDepends
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
@@ -1900,8 +1901,16 @@ async def inference_workflow_model(
                 }
             )
             # Ollama 모델 확인 (provider가 ollama이고 format이 gguf인 경우)
-            if hasattr(model, "provider_info") and model.provider_info and model.provider_info.name.lower() == "ollama":
-                if hasattr(model, "format_info") and model.format_info and model.format_info.name.lower() == "gguf":
+            if (
+                hasattr(model, "provider_info")
+                and model.provider_info
+                and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
+            ):
+                if (
+                    hasattr(model, "format_info")
+                    and model.format_info
+                    and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
+                ):
                     is_ollama_model = True
                     model_repo_id = model.repo_id
 
@@ -2363,7 +2372,7 @@ def _validate_workflow_definition(db: Session, definition: Any) -> None:
     for component in components:
         if component.type == ComponentType.MODEL and component.model_id:
             model = ModelService.get(db, component.model_id)
-            if model and model.type_info and model.type_info.name == "ODM":
+            if model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value:
                 has_odm_model = True
                 break
 
@@ -2541,7 +2550,7 @@ def _validate_rag_workflow(db: Session, workflow: Workflow) -> None:
     for component in workflow.components:
         if component.type == ComponentType.MODEL and component.model_id:
             model = ModelService.get(db, component.model_id)
-            if model and model.type_info and model.type_info.name == "LLM":
+            if model and model.type_info and model.type_info.name == ModelTypeEnum.LLM.value:
                 has_llm_model = True
                 break
 
@@ -2578,7 +2587,7 @@ def _validate_ml_workflow(db: Session, workflow: Workflow) -> None:
     for component in workflow.components:
         if component.type == ComponentType.MODEL and component.model_id:
             model = ModelService.get(db, component.model_id)
-            if model and model.type_info and model.type_info.name == "ODM":
+            if model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value:
                 has_odm_model = True
                 break
 
@@ -2673,8 +2682,16 @@ async def _execute_llm_inference(
         if model:
             model_type_name = model.type_info.name if model.type_info else None
             # Ollama 모델 확인
-            if hasattr(model, "provider_info") and model.provider_info and model.provider_info.name.lower() == "ollama":
-                if hasattr(model, "format_info") and model.format_info and model.format_info.name.lower() == "gguf":
+            if (
+                hasattr(model, "provider_info")
+                and model.provider_info
+                and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
+            ):
+                if (
+                    hasattr(model, "format_info")
+                    and model.format_info
+                    and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
+                ):
                     is_ollama_model = True
                     model_repo_id = model.repo_id
 
@@ -2783,7 +2800,7 @@ async def _execute_llm_inference(
             component_id=component.id,
             component_name=component.name,
             component_type="MODEL",
-            model_type=model_type_name or "LLM",
+            model_type=model_type_name or ModelTypeEnum.LLM.value,
             result=ModelLLMTestResult(
                 response=ollama_content,
                 full_response=result_data,
@@ -2916,7 +2933,7 @@ async def _execute_odm_inference(
                         component_id=component.id,
                         component_name=component.name,
                         component_type="MODEL",
-                        model_type=model_type_name or "ODM",
+                        model_type=model_type_name or ModelTypeEnum.ODM.value,
                         result=ModelODMTestResult(
                             predictions=predictions if isinstance(predictions, list) else [predictions],
                             image_info=image_info if image_info else None,
@@ -2946,7 +2963,7 @@ async def _execute_odm_inference(
                         component_id=component.id,
                         component_name=component.name,
                         component_type="MODEL",
-                        model_type=model_type_name or "ODM",
+                        model_type=model_type_name or ModelTypeEnum.ODM.value,
                         result=ModelODMTestResult(
                             predictions=[response_data] if not isinstance(response_data, list) else response_data,
                             image_info=None,
@@ -2977,7 +2994,7 @@ async def _execute_odm_inference(
                 component_id=component.id,
                 component_name=component.name,
                 component_type="MODEL",
-                model_type=model_type_name or "ODM",
+                model_type=model_type_name or ModelTypeEnum.ODM.value,
                 result=ModelODMTestResult(
                     predictions=[result_data] if not isinstance(result_data, list) else result_data,
                     image_info=None,

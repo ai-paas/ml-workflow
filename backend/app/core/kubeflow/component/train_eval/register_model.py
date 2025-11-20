@@ -21,6 +21,10 @@ def register_model_component(
     restapi_url: str,
     restapi_username: str,
     restapi_password: str,
+    provider_name: str,  # Enum 값 전달
+    type_name: str,  # Enum 값 전달
+    yolox_format_name: str,  # Enum 값 전달
+    pytorch_format_name: str,  # Enum 값 전달
 ):
     import glob
     import json
@@ -119,7 +123,7 @@ def register_model_component(
                 logger.error(f"모델 정보 조회 중 오류 발생: {e}")
                 return None
 
-        def get_model_metadata(self) -> Dict[str, int]:
+        def get_model_metadata(self, provider_name: str, type_name: str) -> Dict[str, int]:
             """모델 메타데이터 조회 (provider, type ID)"""
             metadata = {}
 
@@ -128,7 +132,7 @@ def register_model_component(
                 provider_response = self._session.get(
                     f"{self.base_url}/api/v1/models/providers",
                     headers=self._get_headers(),
-                    params={"provider_name": "custom"},
+                    params={"provider_name": provider_name},
                 )
                 if provider_response.status_code == 200:
                     metadata["provider_id"] = provider_response.json().get("id")
@@ -139,7 +143,7 @@ def register_model_component(
                 type_response = self._session.get(
                     f"{self.base_url}/api/v1/models/types",
                     headers=self._get_headers(),
-                    params={"type_name": "ODM"},
+                    params={"type_name": type_name},
                 )
                 if type_response.status_code == 200:
                     metadata["type_id"] = type_response.json().get("id")
@@ -256,12 +260,12 @@ def register_model_component(
                     f"모델 ID {reference_model_id}의 format_id를 조회할 수 없습니다. 기본값으로 pytorch 사용"
                 )
                 # 모델 이름으로 format 유추
-                if "yolox" in reference_model_name.lower():
+                if yolox_format_name.lower() in reference_model_name.lower():
                     # YOLOX 모델인 경우
                     format_response = api_client._session.get(
                         f"{api_client.base_url}/api/v1/models/formats",
                         headers=api_client._get_headers(),
-                        params={"format_name": "yolox"},
+                        params={"format_name": yolox_format_name},
                     )
                     if format_response.status_code == 200:
                         reference_format_id = format_response.json().get("id")
@@ -270,7 +274,7 @@ def register_model_component(
                     format_response = api_client._session.get(
                         f"{api_client.base_url}/api/v1/models/formats",
                         headers=api_client._get_headers(),
-                        params={"format_name": "pytorch"},
+                        params={"format_name": pytorch_format_name},
                     )
                     if format_response.status_code == 200:
                         reference_format_id = format_response.json().get("id")
@@ -295,7 +299,7 @@ def register_model_component(
                 )
 
                 # 모델 메타데이터 조회 (provider, type만 조회)
-                metadata = api_client.get_model_metadata()
+                metadata = api_client.get_model_metadata(provider_name, type_name)
 
                 # 모델 데이터 준비 (format_id는 reference_model의 것을 사용)
                 model_data = {

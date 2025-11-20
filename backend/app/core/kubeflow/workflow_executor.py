@@ -6,6 +6,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional
 
+from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
@@ -223,12 +224,12 @@ class WorkflowExecutor:
                     if (
                         hasattr(model, "provider_info")
                         and model.provider_info
-                        and model.provider_info.name.lower() == "ollama"
+                        and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
                     ):
                         if (
                             hasattr(model, "format_info")
                             and model.format_info
-                            and model.format_info.name.lower() == "gguf"
+                            and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
                         ):
                             framework = "ollama"
 
@@ -239,17 +240,17 @@ class WorkflowExecutor:
                     # framework 정보 추론
                     if hasattr(model, "format_info") and model.format_info:
                         format_name = model.format_info.name.lower()
-                        if "pytorch" in format_name or "torch" in format_name:
+                        if ModelFormatEnum.PYTORCH.value.lower() in format_name or "torch" in format_name:
                             framework = "pytorch"
-                        elif "tensorflow" in format_name or "tf" in format_name:
+                        elif ModelFormatEnum.TENSORFLOW.value.lower() in format_name or "tf" in format_name:
                             framework = "tensorflow"
-                        elif "onnx" in format_name:
+                        elif ModelFormatEnum.ONNX.value.lower() in format_name:
                             framework = "onnx"
-                        elif "transformers" in format_name:
+                        elif ModelFormatEnum.TRANSFORMERS.value.lower() in format_name:
                             framework = "transformers"
-                        elif "keras" in format_name:
+                        elif ModelFormatEnum.KERAS.value.lower() in format_name:
                             framework = "keras"
-                        elif "yolox" in format_name:
+                        elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
 
             # KServe 배포만 수행하는 컴포넌트 (추론은 별도로 수행)
