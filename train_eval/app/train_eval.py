@@ -402,7 +402,6 @@ class CustomTrainModel:
                 num_gpu = 0
                 logger.info("GPU를 사용할 수 없으므로 CPU 모드로 실행합니다.")
 
-            num_gpu = 0
             if args.cache is not None:
                 exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
 
