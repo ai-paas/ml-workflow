@@ -394,13 +394,13 @@ class CustomTrainModel:
             if not args.experiment_name:
                 args.experiment_name = exp.exp_name
 
-            num_gpu = get_num_devices() if args.devices is None else args.devices
-            num_gpu = min(num_gpu, get_num_devices())
-
-            # GPU가 없으면 0으로 설정
+            # GPU가 없으면 먼저 0으로 설정
             if not gpu_available or gpu_count == 0:
                 num_gpu = 0
                 logger.info("GPU를 사용할 수 없으므로 CPU 모드로 실행합니다.")
+            else:
+                num_gpu = get_num_devices() if args.devices is None else args.devices
+                num_gpu = min(num_gpu, get_num_devices())
 
             if args.cache is not None:
                 exp.dataset = exp.get_dataset(cache=True, cache_type=args.cache)
