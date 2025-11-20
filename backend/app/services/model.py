@@ -960,9 +960,9 @@ class OllamaModelService:
                                     "model-id": str(model_id),
                                     "app": "ollama-download",
                                 },
-                                # annotations={
-                                #     "sidecar.istio.io/inject": "false",
-                                # },
+                                annotations={
+                                    "sidecar.istio.io/inject": "false",
+                                },
                             ),
                             spec=client.V1PodSpec(
                                 restart_policy="Never",

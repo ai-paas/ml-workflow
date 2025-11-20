@@ -282,14 +282,40 @@ class ModelBaseDeploymentService:
                     f"as service: {service_name} using PVC: {pvc_name}"
                 )
 
-                # PVC가 존재하는지 확인
-                try:
-                    core_v1.read_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
-                    logger.info(f"Using existing PVC: {pvc_name}")
-                except Exception as e:
-                    logger.error(f"PVC {pvc_name} not found: {e}")
+                # PVC가 생성될 때까지 대기 (최대 10분)
+                max_wait = 600  # 10분
+                wait_interval = 5  # 5초 간격
+                elapsed = 0
+                pvc_found = False
+
+                logger.info(f"Waiting for PVC {pvc_name} to be created...")
+                while elapsed < max_wait:
+                    try:
+                        pvc = core_v1.read_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+                        # PVC가 존재하고 Bound 상태인지 확인
+                        if pvc.status.phase == "Bound":
+                            logger.info(f"PVC {pvc_name} is ready (Bound)")
+                            pvc_found = True
+                            break
+                        else:
+                            logger.info(
+                                f"PVC {pvc_name} exists but not Bound yet (phase: {pvc.status.phase}), waiting..."
+                            )
+                    except client.exceptions.ApiException as e:
+                        if e.status == 404:
+                            logger.info(f"PVC {pvc_name} not found yet, waiting... (elapsed: {elapsed}s)")
+                        else:
+                            logger.warning(f"Error checking PVC status: {e.status} - {e.reason}")
+                    except Exception as e:
+                        logger.warning(f"Error checking PVC: {e}")
+
+                    time.sleep(wait_interval)
+                    elapsed += wait_interval
+
+                if not pvc_found:
                     raise RuntimeError(
-                        f"PVC {pvc_name} not found. Please ensure model download pipeline completed successfully."
+                        f"PVC {pvc_name} not found or not Bound after {max_wait} seconds. "
+                        f"Please ensure model download pipeline completed successfully."
                     )
 
                 # Ollama용 리소스 설정
