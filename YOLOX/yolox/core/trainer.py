@@ -132,7 +132,7 @@ class Trainer:
         logger.info("exp value:\n{}".format(self.exp))
 
         # model related init
-        torch.cuda.set_device(self.local_rank)
+        torch.cuda.set_device(self.local_rank) if torch.cuda.is_available() else None
         model = self.exp.get_model()
         logger.info("Model Summary: {}".format(get_model_info(model, self.exp.test_size)))
         model.to(self.device)
