@@ -281,6 +281,7 @@ class WorkflowExecutor:
                 config: str = "{}",
                 gpu_enabled: bool = False,
                 repo_id: str = "",
+                pvc_name: str = "",
             ) -> str:
                 import json
                 import logging
@@ -363,42 +364,33 @@ class WorkflowExecutor:
                         apps_v1 = client.AppsV1Api()
                         core_v1 = client.CoreV1Api()
 
-                        # PVC 이름 생성
-                        pvc_name = f"{service_name}-pvc"
+                        # PVC 이름이 제공되지 않은 경우 에러
+                        if not pvc_name or pvc_name == "":
+                            error_msg = "pvc_name is required for Ollama model deployment in workflow"
+                            logger.error(error_msg)
+                            raise ValueError(error_msg)
 
-                        # 1. PVC 생성
-                        pvc = client.V1PersistentVolumeClaim(
-                            metadata=client.V1ObjectMeta(
-                                name=pvc_name,
-                                namespace=namespace,
-                                labels={
-                                    "workflow-id": workflow_id,
-                                    "component-id": component_id,
-                                    "app": service_name,
-                                },
-                            ),
-                            spec=client.V1PersistentVolumeClaimSpec(
-                                access_modes=["ReadWriteOnce"],
-                                resources=client.V1ResourceRequirements(requests={"storage": "30Gi"}),
-                            ),
-                        )
-
+                        # PVC가 존재하는지 확인
                         try:
-                            core_v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
-                            logger.info(f"Created PVC: {pvc_name}")
+                            existing_pvc = core_v1.read_namespaced_persistent_volume_claim(
+                                name=pvc_name, namespace=namespace
+                            )
+                            logger.info(f"Using existing PVC: {pvc_name}")
                         except Exception as e:
-                            # PVC가 이미 존재하는 경우 무시
-                            if "already exists" not in str(e).lower():
-                                logger.warning(f"PVC creation failed (may already exist): {e}")
+                            logger.error(f"PVC {pvc_name} not found: {e}")
+                            raise RuntimeError(
+                                f"PVC {pvc_name} not found. "
+                                f"Please ensure model download pipeline completed successfully."
+                            )
 
                         # Ollama용 리소스 설정
                         ollama_resources = client.V1ResourceRequirements(
                             requests={
-                                "memory": "8Gi",
+                                "memory": "4Gi",
                                 "cpu": "500m",
                             },
                             limits={
-                                "memory": "16Gi",
+                                "memory": "8Gi",
                                 "cpu": "2000m",
                             },
                         )
@@ -439,13 +431,7 @@ class WorkflowExecutor:
                                                 name="ollama",
                                                 image="ollama/ollama:latest",
                                                 command=["/bin/sh", "-c"],
-                                                args=[
-                                                    (
-                                                        f"ollama serve & SERVE_PID=$! && "
-                                                        f"sleep 10 && ollama pull {ollama_model_name} && "
-                                                        f"wait $SERVE_PID"
-                                                    )
-                                                ],
+                                                args=["ollama serve & SERVE_PID=$! && wait $SERVE_PID"],
                                                 ports=[
                                                     client.V1ContainerPort(
                                                         container_port=11434, name="http", protocol="TCP"
@@ -555,6 +541,38 @@ class WorkflowExecutor:
 
                         if not deployment_ready:
                             logger.warning(f"Deployment {service_name} not ready after {max_wait} seconds")
+
+                        # Deployment가 준비된 경우 모델을 미리 로드
+                        if deployment_ready:
+                            try:
+                                import requests
+
+                                logger.info(f"Preloading Ollama model: {ollama_model_name} at {internal_url}")
+                                # Ollama의 /api/generate 엔드포인트를 사용하여 모델을 미리 로드
+                                # 빈 프롬프트로 호출하면 모델이 메모리에 로드됨
+                                preload_url = f"{internal_url}/api/generate"
+                                preload_data = {
+                                    "model": ollama_model_name,
+                                    "prompt": " ",  # 빈 프롬프트 (공백 1개)
+                                    "stream": False,
+                                    "keep_alive": "24h",
+                                }
+                                preload_headers = {"Content-Type": "application/json"}
+
+                                # 큰 모델의 경우 로딩에 시간이 걸릴 수 있으므로 타임아웃을 300초(5분)로 설정
+                                preload_response = requests.post(
+                                    preload_url, json=preload_data, headers=preload_headers, timeout=300
+                                )
+                                if preload_response.status_code == 200:
+                                    logger.info(f"Successfully preloaded Ollama model: {ollama_model_name}")
+                                else:
+                                    logger.warning(
+                                        f"Failed to preload Ollama model: "
+                                        f"{preload_response.status_code} - {preload_response.text}"
+                                    )
+                            except Exception as preload_error:
+                                # 모델 미리 로드 실패는 치명적이지 않으므로 경고만 기록하고 계속 진행
+                                logger.warning(f"Failed to preload Ollama model {ollama_model_name}: {preload_error}")
 
                         # 배포 상태 결정
                         deployment_status = "deployed" if deployment_ready else "deploying"
@@ -1013,6 +1031,11 @@ class WorkflowExecutor:
             # repo_id 추출 (Ollama 모델용)
             repo_id_value = model.repo_id if model and model.repo_id else ""
 
+            # PVC 이름 추출 (Ollama 모델용)
+            pvc_name_value = ""
+            if model and hasattr(model, "registry") and model.registry:
+                pvc_name_value = model.registry.pvc or ""
+
             return model_deployment_component(
                 workflow_id=str(workflow.id),
                 component_id=component.id,
@@ -1032,6 +1055,7 @@ class WorkflowExecutor:
                 config=json.dumps(component.config or {}),
                 gpu_enabled=component.config.get("gpu_enabled", False) if component.config else False,
                 repo_id=repo_id_value,
+                pvc_name=pvc_name_value,
             )
 
         # END 컴포넌트
@@ -1444,7 +1468,7 @@ class WorkflowExecutor:
                             logger.error(f"Unexpected error deleting Service {service_name}: {e}")
                             failed_count += 1
 
-                    # PVC 삭제
+                    # PVC 삭제 (모델의 PVC는 제외 - model-id label이 있는 PVC는 모델 삭제 시에만 삭제됨)
                     logger.info(f"Querying PVCs for workflow: {workflow_id}")
                     pvcs = core_v1.list_namespaced_persistent_volume_claim(
                         namespace=namespace,
@@ -1453,18 +1477,37 @@ class WorkflowExecutor:
 
                     pvc_items = pvcs.items
                     logger.info(f"Found {len(pvc_items)} PVCs for workflow {workflow_id}")
-                    total_count += len(pvc_items)
 
+                    # model-id label이 있는 PVC는 제외 (모델 삭제 시에만 삭제되어야 함)
+                    workflow_pvcs = []
+                    skipped_model_pvcs = []
                     for pvc in pvc_items:
+                        pvc_labels = pvc.metadata.labels or {}
+                        if "model-id" in pvc_labels:
+                            skipped_model_pvcs.append(pvc.metadata.name)
+                            logger.info(
+                                f"Skipping model PVC: {pvc.metadata.name} (model-id: {pvc_labels.get('model-id')})"
+                            )
+                        else:
+                            workflow_pvcs.append(pvc)
+
+                    if skipped_model_pvcs:
+                        logger.info(f"Skipped {len(skipped_model_pvcs)} model PVC(s): {', '.join(skipped_model_pvcs)}")
+                        logger.info("Model PVCs are managed separately and will be deleted when the model is deleted")
+
+                    logger.info(f"Processing {len(workflow_pvcs)} workflow-specific PVC(s)")
+                    total_count += len(workflow_pvcs)
+
+                    for pvc in workflow_pvcs:
                         pvc_name = pvc.metadata.name
                         try:
-                            logger.info(f"Deleting PVC: {pvc_name} in namespace: {namespace}")
+                            logger.info(f"Deleting workflow PVC: {pvc_name} in namespace: {namespace}")
                             core_v1.delete_namespaced_persistent_volume_claim(
                                 name=pvc_name,
                                 namespace=namespace,
                             )
                             deleted_count += 1
-                            logger.info(f"Successfully deleted PVC: {pvc_name}")
+                            logger.info(f"Successfully deleted workflow PVC: {pvc_name}")
                         except client.exceptions.ApiException as e:
                             if e.status == 404:
                                 logger.warning(f"PVC not found: {pvc_name}")

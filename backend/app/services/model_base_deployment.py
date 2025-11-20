@@ -47,6 +47,25 @@ class ModelBaseDeploymentService:
             namespace = settings.KUBEFLOW_NAMESPACE
             ollama_model_name = repo_id
 
+            # 모델 레지스트리에서 PVC 정보 가져오기
+            from db.models.model import Model
+
+            model_obj = db.query(Model).filter(Model.id == model_id).first()
+            if not model_obj:
+                raise ValueError(f"Model not found for model_id: {model_id}")
+
+            if not model_obj.registry:
+                raise ValueError(f"Model registry not found for model_id: {model_id}")
+
+            pvc_name = model_obj.registry.pvc
+            if not pvc_name:
+                raise ValueError(
+                    f"PVC not found for model_id: {model_id}. "
+                    f"Please ensure model download pipeline completed successfully."
+                )
+
+            logger.info(f"Using existing PVC: {pvc_name} for model_id: {model_id}")
+
             # 서비스 이름 생성 (DNS 1035 규칙 준수)
             model_hash = model_name.replace("/", "-")[:20].lower()
             unique_id = uuid.uuid4().hex[:6]
@@ -62,7 +81,10 @@ class ModelBaseDeploymentService:
             if not service_name or service_name[0].isdigit():
                 service_name = f"svc-{service_name}"[:63]
 
-            logger.info(f"Deploying Ollama embedding model: {ollama_model_name} as service: {service_name}")
+            logger.info(
+                f"Deploying Ollama embedding model: {ollama_model_name} "
+                f"as service: {service_name} using PVC: {pvc_name}"
+            )
 
             # 배포 정보를 DB에 저장 (DEPLOYING 상태로)
             deployment_data = ModelBaseDeploymentBaseSchema(
@@ -86,6 +108,7 @@ class ModelBaseDeploymentService:
                 model_name=model_name,
                 service_name=service_name,
                 repo_id=repo_id,
+                pvc_name=pvc_name,
                 gpu_enabled=gpu_enabled,
             )
 
@@ -157,6 +180,7 @@ class ModelBaseDeploymentService:
         model_name: str,
         service_name: str,
         repo_id: str,
+        pvc_name: str,
         gpu_enabled: bool,
     ) -> callable:
         """
@@ -167,6 +191,7 @@ class ModelBaseDeploymentService:
             model_name: 모델 이름
             service_name: 서비스 이름
             repo_id: Ollama 모델 repo_id
+            pvc_name: PVC 이름
             gpu_enabled: GPU 사용 여부
 
         Returns:
@@ -183,6 +208,7 @@ class ModelBaseDeploymentService:
                 model_name=model_name,
                 service_name=service_name,
                 repo_id=repo_id,
+                pvc_name=pvc_name,
                 gpu_enabled=gpu_enabled,
             )
 
@@ -194,6 +220,7 @@ class ModelBaseDeploymentService:
         model_name: str,
         service_name: str,
         repo_id: str,
+        pvc_name: str,
         gpu_enabled: bool,
     ) -> Any:
         """
@@ -204,6 +231,7 @@ class ModelBaseDeploymentService:
             model_name: 모델 이름
             service_name: 서비스 이름
             repo_id: Ollama 모델 repo_id
+            pvc_name: PVC 이름 (기존에 생성된 PVC)
             gpu_enabled: GPU 사용 여부
 
         Returns:
@@ -222,6 +250,7 @@ class ModelBaseDeploymentService:
             model_name: str,
             service_name: str,
             repo_id: str,
+            pvc_name: str,
             gpu_enabled: bool,
             namespace: str,
             rest_api_url: str,
@@ -243,38 +272,25 @@ class ModelBaseDeploymentService:
                 k8s_config.load_incluster_config()
 
                 ollama_model_name = repo_id
-                pvc_name = f"{service_name}-pvc"
 
                 # Kubernetes API 클라이언트
                 apps_v1 = client.AppsV1Api()
                 core_v1 = client.CoreV1Api()
 
-                logger.info(f"Deploying Ollama embedding model: {ollama_model_name} as service: {service_name}")
-
-                # 1. PVC 생성
-                pvc = client.V1PersistentVolumeClaim(
-                    metadata=client.V1ObjectMeta(
-                        name=pvc_name,
-                        namespace=namespace,
-                        labels={
-                            "model-id": str(model_id),
-                            "model-type": "embedding",
-                            "app": service_name,
-                        },
-                    ),
-                    spec=client.V1PersistentVolumeClaimSpec(
-                        access_modes=["ReadWriteOnce"],
-                        resources=client.V1ResourceRequirements(requests={"storage": "3Gi"}),
-                    ),
+                logger.info(
+                    f"Deploying Ollama embedding model: {ollama_model_name} "
+                    f"as service: {service_name} using PVC: {pvc_name}"
                 )
 
+                # PVC가 존재하는지 확인
                 try:
-                    core_v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
-                    logger.info(f"Created PVC: {pvc_name}")
+                    core_v1.read_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+                    logger.info(f"Using existing PVC: {pvc_name}")
                 except Exception as e:
-                    # PVC가 이미 존재하는 경우 무시
-                    if "already exists" not in str(e).lower():
-                        logger.warning(f"PVC creation failed (may already exist): {e}")
+                    logger.error(f"PVC {pvc_name} not found: {e}")
+                    raise RuntimeError(
+                        f"PVC {pvc_name} not found. Please ensure model download pipeline completed successfully."
+                    )
 
                 # Ollama용 리소스 설정
                 ollama_resources = client.V1ResourceRequirements(
@@ -324,13 +340,7 @@ class ModelBaseDeploymentService:
                                         name="ollama",
                                         image="ollama/ollama:latest",
                                         command=["/bin/sh", "-c"],
-                                        args=[
-                                            (
-                                                f"ollama serve & SERVE_PID=$! && "
-                                                f"sleep 10 && ollama pull {ollama_model_name} && "
-                                                f"wait $SERVE_PID"
-                                            )
-                                        ],
+                                        args=["ollama serve & SERVE_PID=$! && wait $SERVE_PID"],
                                         ports=[
                                             client.V1ContainerPort(container_port=11434, name="http", protocol="TCP")
                                         ],
@@ -548,6 +558,7 @@ class ModelBaseDeploymentService:
             model_name=model_name,
             service_name=service_name,
             repo_id=repo_id,
+            pvc_name=pvc_name,
             gpu_enabled=gpu_enabled,
             namespace=settings.KUBEFLOW_NAMESPACE,
             rest_api_url=settings.REST_API_URL,

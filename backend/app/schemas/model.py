@@ -83,12 +83,14 @@ class ModelRegistryRequestSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
     run_id: Optional[str] = None
+    pvc: Optional[str] = None
 
 
 class ModelRegistryBaseSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
     run_id: Optional[str] = None
+    pvc: Optional[str] = None
     reference_model_id: int
 
 
@@ -97,6 +99,7 @@ class ModelRegistryReadSchema(TimeStampCreateUpdateSchema):
     artifact_path: str
     uri: str
     run_id: Optional[str] = None
+    pvc: Optional[str] = None
     reference_model_id: int
 
     class Config:

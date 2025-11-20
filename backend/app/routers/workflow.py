@@ -2053,8 +2053,11 @@ async def inference_workflow_model(
     response_time_ms = 0.0
 
     try:
-
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
+        # Ollama 모델의 경우 모델 로딩 시간과 추론 시간을 고려하여 타임아웃을 300초(5분)로 설정
+        # 큰 모델(Qwen3-30B 등)의 경우 로딩에 30초 이상 소요될 수 있음
+        # KServe 모델의 경우 30초로 유지
+        timeout = 300 if is_ollama_model else 30
+        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=timeout)
         response.raise_for_status()
 
         # 응답 시간 계산
@@ -2753,13 +2756,20 @@ async def _execute_llm_inference(
         user_message = {"role": "user", "content": text}
         messages.append(user_message)
 
-        data = {"model": model_repo_id, "messages": messages, "stream": False}
+        data = {
+            "model": model_repo_id,
+            "messages": messages,
+            "stream": False,
+            "keep_alive": "24h",  # 모델을 24시간 동안 메모리에 유지
+        }
         headers = {"Content-Type": "application/json"}
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
         # 요청 실행
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
+        # LLM 모델의 경우 모델 로딩 시간과 추론 시간을 고려하여 타임아웃을 300초(5분)로 설정
+        # 큰 모델(Qwen3-30B 등)의 경우 로딩에 30초 이상 소요될 수 있음
+        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=300)
         response.raise_for_status()
 
         response_time_ms = (time.time() - start_time) * 1000

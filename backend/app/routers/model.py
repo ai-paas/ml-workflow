@@ -27,6 +27,7 @@ from services.model import (
     ModelProviderService,
     ModelService,
     ModelTypeService,
+    OllamaModelService,
     is_yolox_local_model,
     is_yolox_remote_model,
 )
@@ -235,7 +236,22 @@ def create_model(
             model_obj = model_repository.create(db, obj_in=model)
             model_id = model_obj.id
 
-            # ModelRegistry 생성 (uri는 repo_id 사용)
+            # Ollama 모델을 PVC에 다운로드하는 파이프라인 실행
+            pvc_name = None
+            try:
+                sanitized_model_name = name.replace("/", "-")
+                pvc_name = OllamaModelService.download_ollama_model_to_pvc(
+                    db=db,
+                    model_id=model_id,
+                    model_name=sanitized_model_name,
+                    repo_id=repo_id,
+                )
+                logger.info(f"Started Ollama model download pipeline for model_id: {model_id}, PVC: {pvc_name}")
+            except Exception as download_error:
+                logger.error(f"Failed to start Ollama model download pipeline: {download_error}")
+                # 다운로드 실패해도 모델 등록은 진행 (비동기이므로)
+
+            # ModelRegistry 생성 (uri는 repo_id 사용, pvc는 다운로드 파이프라인에서 생성된 PVC 이름)
             model_registry_repository.create(
                 db,
                 obj_in=ModelRegistryBaseSchema(
@@ -243,6 +259,7 @@ def create_model(
                     uri=repo_id,  # repo_id를 uri로 사용 (예: ahmgam/medllama3-v20)
                     reference_model_id=model_id,
                     run_id=None,  # MLflow run_id 없음
+                    pvc=pvc_name,  # PVC 이름 저장
                 ),
             )
             db.commit()
