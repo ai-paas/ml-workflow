@@ -37,7 +37,7 @@ def container_train(
     train_name: str = Body(""),
     description: str = Body(""),
     gpus: str = Body("1"),
-    batch_size: str = Body("64"),
+    batch_size: str = Body("32"),
     epochs: str = Body("5"),
     save_period: str = Body("1"),
     weight_decay: str = Body("5e-4"),

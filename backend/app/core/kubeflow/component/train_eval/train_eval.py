@@ -49,22 +49,19 @@ def container_train_eval_component(
         # Kubernetes 설정
         k8s_config.load_incluster_config()
 
-        # GPU 리소스 설정 (GPU 개수는 무조건 1로 고정)
-        gpu_count = 1  # GPU 개수는 무조건 1로 고정
-
         logger.info(f"Creating training job for model_id: {model_id}, experiment_id: {experiment_id}")
 
         # 리소스 설정 (Pod YAML 형식과 유사)
         resources = client.V1ResourceRequirements(
             requests={
-                "nvidia.com/gpu": str(gpu_count),
+                "nvidia.com/gpu": gpu_limit,
             },
             limits={
-                "nvidia.com/gpu": str(gpu_count),
+                "nvidia.com/gpu": gpu_limit,
             },
         )
 
-        logger.info(f"GPU resources added: {gpu_count} GPU(s) (fixed to: {gpu_count})")
+        logger.info(f"GPU resources added: {gpu_limit} GPU(s) (fixed to: {gpu_limit})")
 
         # Job 생성
         job_name = f"train-eval-{model_id}-{experiment_id}-{int(time.time())}"
@@ -151,7 +148,7 @@ def container_train_eval_component(
                     ),
                 ),
                 backoff_limit=3,
-                ttl_seconds_after_finished=300,  # Job 완료 후 5분 뒤 자동 삭제
+                ttl_seconds_after_finished=1800,  # Job 완료 후 30분 뒤 자동 삭제
             ),
         )
 

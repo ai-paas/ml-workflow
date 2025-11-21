@@ -1079,7 +1079,7 @@ class WorkflowExecutor:
                 restapi_password=parameters.get("restapi_password", ""),
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
-                gpu_enabled=component.config.get("gpu_enabled", False) if component.config else False,
+                gpu_enabled=parameters.get("gpu_enabled", False),
                 repo_id=repo_id_value,
                 pvc_name=pvc_name_value,
             )

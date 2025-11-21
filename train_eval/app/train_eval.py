@@ -869,6 +869,11 @@ class CustomTrainModel:
         mlflow_run_id: Optional[str] = None,
         kubeflow_run_id: Optional[str] = None,
     ):
+        """
+        실험 정보 업데이트 (내부 통신 전용 API 사용)
+
+        내부 통신 전용 API를 사용하며, 인증 토큰이 필요합니다.
+        """
         try:
             data = {}
             if status:
@@ -877,8 +882,9 @@ class CustomTrainModel:
                 data["mlflow_run_id"] = mlflow_run_id
             if kubeflow_run_id:
                 data["kubeflow_run_id"] = kubeflow_run_id
+            # 내부 통신 전용 API 사용 (인증 필요)
             response = requests.patch(
-                f"{restapi_url}/api/v1/experiments/{experiment_id}",
+                f"{restapi_url}/api/v1/experiments/{experiment_id}/internal-access",
                 json=data,
                 headers={"Authorization": f"Bearer {restapi_token}"},
             )
@@ -890,7 +896,7 @@ class CustomTrainModel:
                 logger.error(f"실험 업데이트 실패: {response.text}")
                 return None
         except requests.exceptions.ConnectionError:
-            logger.warning(f"REST API 서버에 연결할 수 없습니다: {self.restapi_url}")
+            logger.warning(f"REST API 서버에 연결할 수 없습니다: {restapi_url}")
             return None
 
     def get_token_from_restapi(self, url: str, username: str, password: str) -> str:

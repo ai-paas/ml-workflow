@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from schemas.experiment import (
     ExperimentBaseSchema,
     ExperimentCreateRequest,
+    ExperimentInternalUpdateRequest,
     ExperimentReadSchema,
     ExperimentUpdateRequest,
 )
@@ -20,7 +21,7 @@ async def update_experiment(
     *,
     experiment_id: int,
     experiment_update_request: ExperimentUpdateRequest,
-    current_user: UserSchema = Depends(get_current_user)
+    current_user: UserSchema = Depends(get_current_user),
 ):
     """
     실험 정보 수정
@@ -232,5 +233,73 @@ async def get_experiment(
     """
     try:
         return ExperimentService().get(db, pk=experiment_id)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.delete("/{experiment_id}")
+async def delete_experiment_internal(
+    db: Session = SessionDepends, *, experiment_id: int, current_user: UserSchema = Depends(get_current_user)
+):
+    """
+    실험을 삭제합니다.
+    MLflow artifacts와 S3 object도 함께 삭제됩니다.
+
+    ## Path Parameters
+    - **experiment_id** (int): 삭제할 실험 ID
+
+    ## Response
+    - **message** (str): 삭제 성공 메시지
+
+    ## Errors
+    - 404: 실험을 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
+    try:
+        ExperimentService().delete(db, experiment_id=experiment_id)
+        return {"message": f"실험 {experiment_id}가 성공적으로 삭제되었습니다."}
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.patch("/{experiment_id}/internal-access", response_model=ExperimentReadSchema)
+async def update_experiment_internal(
+    db: Session = SessionDepends,
+    *,
+    experiment_id: int,
+    experiment_update_request: ExperimentInternalUpdateRequest,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    내부 통신 전용 실험 정보 수정 API
+
+    시스템 내부 통신에서 사용하는 API로, status, mlflow_run_id, kubeflow_run_id를 수정할 수 있습니다.
+    인증이 필요합니다.
+
+    ## Path Parameters
+    - **experiment_id** (int): 수정할 실험 ID
+
+    ## Request Body (ExperimentInternalUpdateRequest)
+    - **status** (str, optional): 실험 상태
+        - 예: "RUNNING", "COMPLETED", "FAILED"
+    - **mlflow_run_id** (str, optional): MLflow 실행 ID
+    - **kubeflow_run_id** (str, optional): Kubeflow 파이프라인 실행 ID
+
+    ## Response (ExperimentReadSchema)
+    - 실험의 전체 정보를 반환합니다.
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 실험을 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
+    try:
+        return ExperimentService().update_internal(db, experiment_id=experiment_id, obj_in=experiment_update_request)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

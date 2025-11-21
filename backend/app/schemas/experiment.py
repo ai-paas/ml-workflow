@@ -60,6 +60,18 @@ class ExperimentUpdateRequest(BaseModel):
     description: Optional[str] = None
 
 
+class ExperimentInternalUpdateRequest(BaseModel):
+    """
+    내부 통신 전용 실험 수정 요청 스키마
+
+    시스템 내부 통신에서 사용하는 스키마로, status, mlflow_run_id, kubeflow_run_id를 수정할 수 있습니다.
+    """
+
+    status: Optional[str] = None
+    mlflow_run_id: Optional[str] = None
+    kubeflow_run_id: Optional[str] = None
+
+
 class HyperparameterTypeBaseSchema(BaseModel):
     param_name: str
     param_type: str

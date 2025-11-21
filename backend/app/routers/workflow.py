@@ -2894,16 +2894,27 @@ async def _execute_odm_inference(
 
     try:
         # KServe 모델 처리
-        infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+        # internal_url이 있으면 우선 사용, 없으면 게이트웨이 URL 사용
         service_hostname = deployment.service_hostname
         model_name = deployment.model_name
 
+        if deployment.internal_url:
+            # internal_url 사용 (클러스터 내부 접근)
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            # internal_url 사용 시 Host 헤더는 필요 없음 (직접 접근)
+            headers = {"Content-Type": "application/json"}
+        else:
+            # 게이트웨이 URL 사용 (Istio Gateway 경유)
+            infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            # 게이트웨이 사용 시 Host 헤더 필요 (Istio 라우팅용)
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
         payload = {"image": image_base64}
         data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
-        headers = {"Content-Type": "application/json", "Host": service_hostname}
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
-        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
 
         # 요청 실행
         response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
@@ -3536,6 +3547,7 @@ async def finalize_cleanup(
     2. Pipeline 상태 확인 (5초 타임아웃)
     3. 완료 시:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
+       - KServe 배포 데이터(kserve_deployments) 삭제
        - 재실행 가능한 상태로 업데이트
     4. 진행중: 진행 상태 반환 (재호출 필요)
     5. 실패: 오류 메시지 반환
@@ -3573,13 +3585,21 @@ async def finalize_cleanup(
         success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
 
         if success:
-            # Pipeline 완료됨 - 워크플로우 상태 업데이트
-            logger.info(f"Cleanup pipeline completed for workflow {workflow_id}, updating workflow state")
+            # Pipeline 완료됨 - 워크플로우 상태 업데이트 및 배포 데이터 삭제
+            logger.info(
+                f"Cleanup pipeline completed for workflow {workflow_id}, \
+                    updating workflow state and cleaning up deployments"
+            )
 
             # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
             if workflow.status == WorkflowStatus.ERROR:
                 workflow.status = WorkflowStatus.DRAFT
-                db.commit()
+
+            # KServe 배포 데이터 삭제
+            deleted_count = KServeDeploymentService.delete_workflow_deployments(db, workflow_id)
+            logger.info(f"Deleted {deleted_count} deployment records for workflow {workflow_id}")
+
+            db.commit()
 
             return {
                 "workflow_id": workflow_id,

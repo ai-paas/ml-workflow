@@ -187,3 +187,8 @@ class KServeDeploymentService:
             kserve_deployment_repository.update_status(db, deployment, DeploymentStatus.DELETED)
 
         return len(deployments)
+
+    @staticmethod
+    def delete_workflow_deployments(db: Session, workflow_id: str) -> int:
+        """워크플로우의 모든 배포 정보를 DB에서 삭제"""
+        return kserve_deployment_repository.cleanup_workflow_deployments(db, workflow_id)
