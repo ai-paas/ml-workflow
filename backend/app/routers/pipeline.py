@@ -64,6 +64,7 @@ def container_train(
     - **gpus** (str, optional): 사용할 GPU 개수
         - 기본값: "1"
         - 학습에 할당할 GPU 리소스 수
+        - 필수적으로 1개 이상으로 설정해야 합니다 (0 이하 불가)
     - **batch_size** (str, optional): 배치 크기
         - 기본값: "64"
         - 한 번에 처리할 샘플 수
@@ -102,10 +103,24 @@ def container_train(
     - 실패 시 experiment_id가 null로 반환되며, 에러는 로그에 기록됩니다
 
     ## Errors
+    - 400: GPU 개수가 0 이하이거나 유효하지 않은 값
     - 401: 인증되지 않은 사용자
     - 404: 모델 또는 데이터셋을 찾을 수 없음
     - 500: 파이프라인 생성 또는 실행 중 서버 내부 오류
     """
+    # GPU 개수 검증: 0 이하인 경우 오류 발생
+    try:
+        gpu_count = int(gpus)
+        if gpu_count <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="GPU 개수는 필수적으로 1개 이상으로 설정해야 합니다. 현재 설정된 값: " + str(gpu_count),
+            )
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"GPU 개수 값 '{gpus}'이 유효하지 않습니다. 숫자로 입력해주세요.",
+        )
 
     @dsl.pipeline
     def train_pipeline(
