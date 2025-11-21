@@ -133,6 +133,13 @@ def create_knowledge_base(
     - **top_k** (int, required): 검색 시 반환할 상위 k개 결과 수
     - **threshold** (float, required): 검색 임계값 (0.0 ~ 1.0)
     - **file** (UploadFile, required): 업로드할 문서 파일
+        - **지원 파일 타입**:
+          - PDF: `.pdf`
+          - Word: `.doc`, `.docx`
+          - Excel: `.xls`, `.xlsx`
+          - PowerPoint: `.ppt`, `.pptx`
+          - CSV: `.csv`
+        - 지원되지 않는 파일 타입 업로드 시 400 오류 발생
 
     ## Response (KnowledgeBaseReadSchema)
     - **id** (int): Knowledge Base ID
