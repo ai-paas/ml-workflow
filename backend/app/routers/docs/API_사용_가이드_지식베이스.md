@@ -63,6 +63,12 @@ UI에서 지식베이스 관련 기능을 구현할 때 사용할 API 호출 순
   - `file`: 업로드할 문서 파일
 - 선택 파라미터:
   - `description`: Knowledge Base 설명
+- **지원 파일 타입**:
+  - PDF: `.pdf`
+  - Word: `.doc`, `.docx`
+  - Excel: `.xls`, `.xlsx`
+  - PowerPoint: `.ppt`, `.pptx`
+  - CSV: `.csv`
 - 응답: 생성된 Knowledge Base 정보 (KnowledgeBaseReadSchema)
   - `id`: Knowledge Base ID
   - `name`: Knowledge Base 이름
@@ -79,6 +85,12 @@ UI에서 지식베이스 관련 기능을 구현할 때 사용할 API 호출 순
 - 경로 파라미터: `knowledge_base_id` (Knowledge Base ID)
 - 필수 파라미터:
   - `file`: 추가할 문서 파일
+- **지원 파일 타입**:
+  - PDF: `.pdf`
+  - Word: `.doc`, `.docx`
+  - Excel: `.xls`, `.xlsx`
+  - PowerPoint: `.ppt`, `.pptx`
+  - CSV: `.csv`
 - 응답: 업데이트된 Knowledge Base 정보 (KnowledgeBaseReadSchema)
 - **주의**: 파일은 청크로 분할되고 임베딩되어 Milvus의 동일한 Collection에 Partition으로 추가됩니다
 
@@ -178,6 +190,7 @@ UI에서 지식베이스 관련 기능을 구현할 때 사용할 API 호출 순
   - `embedding_model_id`: `GET /api/v1/models?model_type_id={embedding_type_id}`
   - `chunk_type_id`: `GET /api/v1/knowledge-bases/chunk-types`
   - `search_method_id`: `GET /api/v1/knowledge-bases/search-methods`
+- **지원 파일 타입**: PDF (`.pdf`), Word (`.doc`, `.docx`), Excel (`.xls`, `.xlsx`), PowerPoint (`.ppt`, `.pptx`), CSV (`.csv`)
 - 파일 업로드 시 파일은 자동으로 청크로 분할되고 임베딩되어 Milvus에 저장됩니다
 - 추가된 파일은 Milvus의 동일한 Collection에 Partition으로 저장됩니다
 - Knowledge Base 수정은 이름과 설명만 가능하며, 청크 설정이나 검색 설정은 수정할 수 없습니다

@@ -5,16 +5,15 @@ from kfp import dsl
 
 @dsl.component(
     base_image="python:3.10",
-    packages_to_install=[
-        "mlflow==2.17.0",
-        "requests==2.32.5",
-        "loguru==0.7.3",
-    ],
+    packages_to_install=["mlflow==2.17.0", "requests==2.32.5", "loguru==0.7.3", "boto3==1.41.1"],
 )
 def register_model_component(
     experiment_id: int,
     mlflow_tracking_uri: str,
     mlflow_experiment_name: str,
+    mlflow_s3_endpoint_url: str,
+    aws_access_key_id: str,
+    aws_secret_access_key: str,
     parent_model_id: int,
     train_model_name: str,
     description: str,
@@ -216,6 +215,11 @@ def register_model_component(
 
     # 메인 로직
     try:
+        # AWS 자격 증명 환경 변수 설정 (MLflow S3 접근용)
+        os.environ["MLFLOW_S3_ENDPOINT_URL"] = mlflow_s3_endpoint_url
+        os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
+        os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+
         # REST API 클라이언트 초기화
         api_client = RESTAPIClient(restapi_url, restapi_username, restapi_password)
 

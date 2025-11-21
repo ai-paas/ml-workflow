@@ -16,6 +16,7 @@ from fastapi import UploadFile
 from huggingface_hub import snapshot_download
 from kfp import dsl
 from kfp.compiler import Compiler
+from mlflow import MlflowClient
 from repos.experiment import experiment_repository
 from repos.knowledge_base import knowledge_base_repository
 from repos.model import (
@@ -276,13 +277,10 @@ class ModelService:
 
             # 3-3. MLflow 정보 미리 저장 (Ollama provider가 아닌 경우에만 필요)
             run_id = None
-            artifact_path = None
             s3_artifact_path = None
 
             if not is_ollama:
                 run_id = model_obj.registry.run_id if model_obj.registry else None
-                artifact_path = model_obj.registry.artifact_path if model_obj.registry else None
-                s3_artifact_path = artifact_path.replace("mlflow-artifacts:/", "") if artifact_path else None
 
             # 4. 트랜잭션 시작 - MLflow/S3 삭제 후 DB 커밋
             try:
@@ -308,10 +306,30 @@ class ModelService:
                             db.rollback()
                             raise RuntimeError(f"MLflow 아티팩트 삭제 실패 (DB 변경사항 롤백됨): {str(mlflow_error)}")
 
-                    # S3 폴더 삭제
-                    if s3_artifact_path:
+                    # S3 폴더 삭제 (artifact_uri에서 S3 경로 추출)
+                    if run_id:
                         try:
-                            MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
+                            client = MlflowClient(tracking_uri=settings.MLFLOW_TRACKING_URI)
+                            run_info = client.get_run(run_id)
+                            artifact_uri = run_info.info.artifact_uri
+
+                            # artifact_uri에서 S3 경로 추출
+                            # 형식 1: mlflow-artifacts:/0/abc123/artifacts
+                            # 형식 2: s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/google-owlv2-base-patch16
+                            s3_artifact_path = None
+                            if artifact_uri.startswith("mlflow-artifacts:/"):
+                                s3_artifact_path = artifact_uri.replace("mlflow-artifacts:/", "")
+                            elif artifact_uri.startswith("s3://"):
+                                # s3://bucket/path 형식에서 버킷 이름 제거
+                                # s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
+                                # -> 8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
+                                uri_without_protocol = artifact_uri.replace("s3://", "")
+                                # 첫 번째 '/' 이후의 경로만 추출 (버킷 이름 제거)
+                                if "/" in uri_without_protocol:
+                                    s3_artifact_path = uri_without_protocol.split("/", 1)[1]
+
+                            if s3_artifact_path:
+                                MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
                         except Exception as s3_error:
                             # S3 삭제 실패 처리
                             # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
