@@ -130,6 +130,8 @@ def container_train(
         weight_decay: str,
         lr0: str,
         lrf: str,
+        namespace: str,
+        train_image_url: str,
     ):
         container_train_eval_component(
             model_id=model_id,
@@ -153,6 +155,8 @@ def container_train(
             weight_decay=weight_decay,
             lr0=lr0,
             lrf=lrf,
+            namespace=namespace,
+            train_image_url=train_image_url,
         )
 
     try:
@@ -217,6 +221,8 @@ def container_train(
                 "weight_decay": weight_decay,
                 "lr0": lr0,
                 "lrf": lrf,
+                "namespace": settings.KUBEFLOW_NAMESPACE,
+                "train_image_url": settings.TRAIN_IMAGE_URL,
             },
         )
         return {

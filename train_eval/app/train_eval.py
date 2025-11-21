@@ -340,6 +340,14 @@ class CustomTrainModel:
 
             # train.py의 실행 코드를 직접 구현
             configure_module()
+            # GPU 메모리 캐시 정리 (이전 실행의 메모리 정리)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                logger.info(
+                    f"GPU 메모리 캐시 정리 완료. 사용 가능한 GPU 메모리: \
+                        {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
+                )
 
             # GPU 사용 가능 여부 확인
             gpu_available = torch.cuda.is_available()

@@ -91,7 +91,7 @@ class ModelBaseDeploymentService:
                 model_id=model_id,
                 service_name=service_name,
                 service_hostname="",  # Ollama는 사용하지 않음
-                model_name=model_name,
+                model_name=ollama_model_name,
                 internal_url=None,  # 파이프라인 완료 후 업데이트
                 status=BaseDeploymentStatus.DEPLOYING,
             )
@@ -107,7 +107,7 @@ class ModelBaseDeploymentService:
                 model_id=model_id,
                 model_name=model_name,
                 service_name=service_name,
-                repo_id=repo_id,
+                repo_id=ollama_model_name,
                 pvc_name=pvc_name,
                 gpu_enabled=gpu_enabled,
             )

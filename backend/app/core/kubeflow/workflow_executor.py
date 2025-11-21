@@ -812,8 +812,33 @@ class WorkflowExecutor:
                                         f"  Eviction detected {evicted_count} time(s), KServe will retry automatically"
                                     )
 
+                        except client.exceptions.ApiException as api_error:
+                            # 404 에러인 경우 InferenceService가 삭제되었거나 생성에 실패한 것으로 간주
+                            if api_error.status == 404:
+                                error_msg = (
+                                    f"InferenceService {service_name} not found (404). "
+                                    f"The service may have been deleted or failed to create. "
+                                    f"Stopping pipeline execution."
+                                )
+                                logger.error(error_msg)
+                                raise RuntimeError(error_msg)
+                            else:
+                                logger.warning(
+                                    f"Error checking service status: {api_error.status} - {api_error.reason}"
+                                )
                         except Exception as e:
-                            logger.warning(f"Error checking service status: {e}")
+                            # 404 에러가 아닌 경우에만 경고 로그
+                            error_str = str(e)
+                            if "404" in error_str or "not found" in error_str.lower():
+                                error_msg = (
+                                    f"InferenceService {service_name} not found. "
+                                    f"The service may have been deleted or failed to create. "
+                                    f"Stopping pipeline execution."
+                                )
+                                logger.error(error_msg)
+                                raise RuntimeError(error_msg)
+                            else:
+                                logger.warning(f"Error checking service status: {e}")
 
                         time.sleep(wait_interval)
                         elapsed += wait_interval
