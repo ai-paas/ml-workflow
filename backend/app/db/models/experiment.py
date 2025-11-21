@@ -20,7 +20,9 @@ class ExperimentModel(BaseModel, TimestampMixin):
 
     reference_model: Mapped["Model"] = relationship("Model")
     dataset: Mapped["Dataset"] = relationship("Dataset")
-    hyperparameters: Mapped[list["Hyperparameter"]] = relationship("Hyperparameter", back_populates="experiment")
+    hyperparameters: Mapped[list["Hyperparameter"]] = relationship(
+        "Hyperparameter", back_populates="experiment", cascade="all, delete-orphan"
+    )
 
 
 class HyperparameterType(BaseModel):
@@ -35,7 +37,7 @@ class Hyperparameter(BaseModel):
     __tablename__ = "hyperparameter"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     value: Mapped[str] = mapped_column(String(500), nullable=False)
-    experiment_id: Mapped[int] = mapped_column(ForeignKey("experiment.id"))
+    experiment_id: Mapped[int] = mapped_column(ForeignKey("experiment.id", ondelete="CASCADE"))
     hyperparameter_type_id: Mapped[int] = mapped_column(ForeignKey("hyperparameter_type.id"))
 
     experiment: Mapped["ExperimentModel"] = relationship("ExperimentModel", back_populates="hyperparameters")

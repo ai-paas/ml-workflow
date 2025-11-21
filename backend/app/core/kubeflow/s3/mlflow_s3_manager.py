@@ -115,8 +115,18 @@ class MLFlowS3Manager:
                         delete_keys.append({"Key": obj["Key"]})
 
             # 객체가 있는 경우에만 삭제 실행
+            # 일부 S3 호환 스토리지의 Content-MD5 헤더 요구사항을 피하기 위해
+            # delete_objects 대신 개별 delete_object 호출 사용
             if delete_keys:
-                self.s3_client.delete_objects(Bucket=self.bucket, Delete={"Objects": delete_keys})
+                for key_obj in delete_keys:
+                    try:
+                        self.s3_client.delete_object(Bucket=self.bucket, Key=key_obj["Key"])
+                    except Exception as delete_error:
+                        # 개별 객체 삭제 실패는 로깅만 하고 계속 진행
+                        # (이미 삭제된 객체일 수 있음)
+                        import warnings
+
+                        warnings.warn(f"S3 객체 삭제 실패 (Key: {key_obj['Key']}): {str(delete_error)}")
 
             return True
         except Exception as e:
