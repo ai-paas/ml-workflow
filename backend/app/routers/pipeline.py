@@ -103,7 +103,7 @@ def container_train(
     - 실패 시 experiment_id가 null로 반환되며, 에러는 로그에 기록됩니다
 
     ## Errors
-    - 400: GPU 개수가 0 이하이거나 유효하지 않은 값
+    - 400: GPU 개수가 0 이하이거나 유효하지 않은 값, 또는 학습 불가능한 모델 사용
     - 401: 인증되지 않은 사용자
     - 404: 모델 또는 데이터셋을 찾을 수 없음
     - 500: 파이프라인 생성 또는 실행 중 서버 내부 오류
@@ -176,6 +176,16 @@ def container_train(
 
     try:
         db_model = ModelService().get(db, model_id)
+        if db_model is None:
+            raise HTTPException(status_code=404, detail=f"모델 ID '{model_id}'를 찾을 수 없습니다.")
+
+        # 학습 가능 여부 확인
+        if not db_model.learning_enable_yn:
+            raise HTTPException(
+                status_code=400,
+                detail=f"모델 ID '{model_id}'는 학습이 불가능한 모델입니다. 학습 가능한 모델만 사용할 수 있습니다.",
+            )
+
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
         dataset_model = DatasetService().get(db, dataset_id)
@@ -243,6 +253,8 @@ def container_train(
         return {
             "experiment_id": experiment_db_obj.id,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"error occured when register pipeline : {e}")
         return {
