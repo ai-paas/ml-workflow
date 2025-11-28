@@ -103,3 +103,49 @@ class ServiceListResponse(BaseModel):
 
     total: int
     items: List[ServiceBriefSchema]
+
+
+# ============= Resource Usage 스키마 =============
+class ResourceUsage(BaseModel):
+    """리소스 사용량 정보"""
+
+    cpu_usage_millicores: Optional[float] = Field(None, description="CPU 사용량 (밀리코어 단위)")
+    cpu_request_millicores: Optional[float] = Field(None, description="CPU 요청량 (밀리코어 단위)")
+    cpu_limit_millicores: Optional[float] = Field(None, description="CPU 제한량 (밀리코어 단위)")
+    memory_usage_bytes: Optional[int] = Field(None, description="메모리 사용량 (바이트 단위)")
+    memory_request_bytes: Optional[int] = Field(None, description="메모리 요청량 (바이트 단위)")
+    memory_limit_bytes: Optional[int] = Field(None, description="메모리 제한량 (바이트 단위)")
+    gpu_usage_percent: Optional[float] = Field(None, description="GPU 사용률 (%)")
+    gpu_memory_usage_bytes: Optional[int] = Field(None, description="GPU 메모리 사용량 (바이트 단위)")
+
+
+class PodResourceUsage(BaseModel):
+    """Pod별 리소스 사용량 정보"""
+
+    pod_name: str = Field(..., description="Pod 이름")
+    namespace: str = Field(..., description="네임스페이스")
+    deployment_type: str = Field(..., description="배포 타입 (inferenceservice 또는 service)")
+    resource_usage: ResourceUsage = Field(..., description="리소스 사용량")
+    status: Optional[str] = Field(None, description="Pod 상태")
+
+
+class DeploymentResourceUsage(BaseModel):
+    """배포별 리소스 사용량 정보"""
+
+    deployment_id: str = Field(..., description="KServe 배포 ID")
+    service_name: str = Field(..., description="서비스 이름")
+    workflow_id: str = Field(..., description="워크플로우 ID")
+    component_id: str = Field(..., description="컴포넌트 ID")
+    model_name: str = Field(..., description="모델 이름")
+    pods: List[PodResourceUsage] = Field(default_factory=list, description="Pod별 리소스 사용량 목록")
+
+
+class ServiceResourceUsageResponse(BaseModel):
+    """서비스 리소스 사용량 조회 응답"""
+
+    service_id: str = Field(..., description="서비스 ID")
+    service_name: str = Field(..., description="서비스 이름")
+    deployments: List[DeploymentResourceUsage] = Field(default_factory=list, description="배포별 리소스 사용량 목록")
+    total_cpu_usage_millicores: Optional[float] = Field(None, description="전체 CPU 사용량 (밀리코어 단위)")
+    total_memory_usage_bytes: Optional[int] = Field(None, description="전체 메모리 사용량 (바이트 단위)")
+    total_gpu_usage_percent: Optional[float] = Field(None, description="전체 GPU 사용률 (%)")

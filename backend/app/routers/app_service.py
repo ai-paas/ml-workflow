@@ -12,6 +12,7 @@ from schemas.app_service import (
     ServiceCreateRequest,
     ServiceDetailSchema,
     ServiceListResponse,
+    ServiceResourceUsageResponse,
     ServiceUpdateRequest,
 )
 from schemas.user import UserSchema
@@ -396,3 +397,75 @@ def delete_service(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Service {service_id} not found")
 
     return None
+
+
+@router.get("/{service_id}/resource-usages", response_model=ServiceResourceUsageResponse)
+def get_service_resource_usages(
+    *, db: Session = SessionDepends, service_id: str, current_user: UserSchema = Depends(get_current_user)
+):
+    """
+    서비스 리소스 사용량 조회
+
+    서비스에 속한 워크플로우의 배포된 모델들의 리소스 사용량을 조회합니다.
+    k8s metrics API를 사용하여 CPU, Memory, GPU 사용량을 가져옵니다.
+
+    ## Path Parameters
+    - **service_id** (str): 조회할 서비스의 고유 ID (UUID)
+
+    ## Response (ServiceResourceUsageResponse)
+    - **service_id** (str): 서비스 고유 ID (UUID)
+    - **service_name** (str): 서비스 이름
+    - **deployments** (List[DeploymentResourceUsage]): 배포별 리소스 사용량 목록
+        - **deployment_id** (str): KServe 배포 ID
+        - **service_name** (str): 서비스 이름
+        - **workflow_id** (str): 워크플로우 ID
+        - **component_id** (str): 컴포넌트 ID
+        - **model_name** (str): 모델 이름
+        - **pods** (List[PodResourceUsage]): Pod별 리소스 사용량 목록
+            - **pod_name** (str): Pod 이름
+            - **namespace** (str): 네임스페이스
+            - **deployment_type** (str): 배포 타입 (inferenceservice 또는 service)
+            - **resource_usage** (ResourceUsage): 리소스 사용량
+                - **cpu_usage_millicores** (float, optional): CPU 사용량 (밀리코어 단위)
+                - **cpu_request_millicores** (float, optional): CPU 요청량 (밀리코어 단위)
+                - **cpu_limit_millicores** (float, optional): CPU 제한량 (밀리코어 단위)
+                - **memory_usage_bytes** (int, optional): 메모리 사용량 (바이트 단위)
+                - **memory_request_bytes** (int, optional): 메모리 요청량 (바이트 단위)
+                - **memory_limit_bytes** (int, optional): 메모리 제한량 (바이트 단위)
+                - **gpu_usage_percent** (float, optional): GPU 사용률 (%)
+                - **gpu_memory_usage_bytes** (int, optional): GPU 메모리 사용량 (바이트 단위)
+            - **status** (str, optional): Pod 상태
+    - **total_cpu_usage_millicores** (float, optional): 전체 CPU 사용량 (밀리코어 단위)
+    - **total_memory_usage_bytes** (int, optional): 전체 메모리 사용량 (바이트 단위)
+    - **total_gpu_usage_percent** (float, optional): 전체 GPU 사용률 (%)
+
+    ## Notes
+    - Metrics Server가 설치되어 있어야 실제 사용량을 조회할 수 있습니다.
+    - Metrics Server가 없는 경우 리소스 요청/제한 정보만 반환됩니다.
+    - GPU 사용량은 별도의 메트릭 수집기(dcgm-exporter 등)가 필요합니다.
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 서비스를 찾을 수 없음
+    - 500: 서버 내부 오류 또는 Kubernetes API 접근 실패
+    """
+    service = AppServiceService.get_service_by_id(db, service_id)
+
+    if not service:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Service {service_id} not found")
+
+    try:
+        resource_usages = AppServiceService.get_service_resource_usages(db, service_id)
+        if not resource_usages:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Service {service_id} not found")
+
+        return resource_usages
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get resource usages for service {service_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get resource usages: {str(e)}",
+        )

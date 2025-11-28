@@ -235,7 +235,7 @@ def list_workflows(
         ge=1,
     ),
     creator_id: Optional[int] = Query(None),
-    service_id: Optional[int] = Query(None),
+    service_id: Optional[str] = Query(None, description="서비스 ID (UUID)"),
     status: Optional[str] = Query(None),
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -250,7 +250,7 @@ def list_workflows(
     - **page_size** (int, optional): 페이지당 항목 수 (1-1000)
         - 페이지 파라미터 생략 시 전체 데이터 반환 (최대 10000개)
     - **creator_id** (int, optional): 특정 사용자가 생성한 워크플로우만 필터
-    - **service_id** (int, optional): 특정 서비스에 연결된 워크플로우만 필터
+    - **service_id** (str, optional): 특정 서비스에 연결된 워크플로우만 필터 (UUID)
     - **status** (str, optional): 워크플로우 상태 필터
         - "DRAFT": 임시저장 상태
         - "ACTIVE": 활성 상태 (배포됨)
@@ -669,7 +669,7 @@ def clone_from_template(
     db: Session = SessionDepends,
     template_id: str,  # UUID 문자열로 변경
     workflow_name: str = Query(..., description="새 워크플로우 이름"),
-    service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
+    service_id: Optional[str] = Query(None, description="연결할 서비스 ID (UUID)"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -683,7 +683,7 @@ def clone_from_template(
 
     ## Query Parameters
     - **workflow_name** (str, required): 새로 생성할 워크플로우 이름
-    - **service_id** (int, optional): 연결할 서비스 ID
+    - **service_id** (str, optional): 연결할 서비스 ID (UUID)
         - 서비스와 연결시 모니터링 가능
 
     ## Response (WorkflowReadSchema)

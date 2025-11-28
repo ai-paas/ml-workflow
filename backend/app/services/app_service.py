@@ -2,18 +2,25 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 from config.settings import get_settings
+from db.models.kserve_deployment import DeploymentStatus
 from db.models.service import Service, ServiceMonitoring, Workflow, WorkflowStatus
 from repos.app_service import service_monitoring_repository, service_repository
+from repos.kserve_deployment import kserve_deployment_repository
 from repos.workflow import workflow_repository
 from schemas.app_service import (
+    DeploymentResourceUsage,
     MonitoringMetrics,
+    PodResourceUsage,
+    ResourceUsage,
     ServiceCreateInternal,
     ServiceCreateRequest,
     ServiceMonitoringData,
+    ServiceResourceUsageResponse,
     ServiceUpdateRequest,
     WorkflowMonitoring,
 )
@@ -170,6 +177,416 @@ class AppServiceService:
         return ServiceMonitoringData(
             total_metrics=total_metrics, workflow_metrics=workflow_metrics, period_start=start_time, period_end=end_time
         )
+
+    @staticmethod
+    def get_service_resource_usages(db: Session, service_id: str) -> Optional[ServiceResourceUsageResponse]:
+        """서비스 리소스 사용량 조회
+
+        서비스에 속한 워크플로우의 배포된 모델들의 리소스 사용량을 조회합니다.
+        k8s metrics API를 사용하여 CPU, Memory, GPU 사용량을 가져옵니다.
+
+        Args:
+            db: 데이터베이스 세션
+            service_id: 서비스 ID
+
+        Returns:
+            ServiceResourceUsageResponse 또는 None (서비스가 없는 경우)
+        """
+        service = service_repository.get(db, service_id)
+        if not service:
+            return None
+
+        try:
+            from kubernetes import client
+            from kubernetes import config as k8s_config
+            from kubernetes.client.rest import ApiException
+
+            # Kubernetes 설정
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                logger.warning("Failed to load in-cluster config, trying kubeconfig")
+                try:
+                    k8s_config.load_kube_config()
+                except Exception as e:
+                    logger.error(f"Failed to load kubeconfig: {str(e)}")
+                    raise
+
+            core_v1 = client.CoreV1Api()
+            metrics_v1beta1 = client.CustomObjectsApi()
+            namespace = settings.KUBEFLOW_NAMESPACE
+
+            # Metrics Server 사용 가능 여부 플래그 (첫 번째 실패 시 이후 Pod들도 건너뛰기)
+            metrics_server_available = True  # 초기값은 True, 실패 시 False로 설정
+
+            deployments: List[DeploymentResourceUsage] = []
+            total_cpu_usage = 0.0
+            total_memory_usage = 0
+            total_gpu_usage = 0.0
+
+            # 서비스에 속한 모든 워크플로우 조회
+            for workflow in service.workflows:
+                # 워크플로우의 배포된 모델 조회
+                kserve_deployments = kserve_deployment_repository.get_by_workflow(
+                    db, workflow.id, DeploymentStatus.DEPLOYED
+                )
+
+                for kserve_deployment in kserve_deployments:
+                    pods: List[PodResourceUsage] = []
+                    deployment_cpu_usage = 0.0
+                    deployment_memory_usage = 0
+                    deployment_gpu_usage = 0.0
+
+                    # KServe InferenceService의 경우 pod 이름 패턴: {service_name}-predictor-{revision}-{random}
+                    # 일반 Service의 경우: {service_name}-{random}
+                    service_name = kserve_deployment.service_name
+
+                    try:
+                        # InferenceService인지 확인
+                        try:
+                            # KServe InferenceService 조회 시도
+                            from kserve import KServeClient
+
+                            kserve_client = KServeClient()
+                            kserve_client.get(service_name, namespace=namespace)  # InferenceService 존재 확인
+                            deployment_type = "inferenceservice"
+
+                            # InferenceService의 pod 찾기
+                            label_selector = f"serving.kserve.io/inferenceservice={service_name}"
+                            pod_list = core_v1.list_namespaced_pod(namespace=namespace, label_selector=label_selector)
+                        except Exception:
+                            # 일반 Service로 처리
+                            deployment_type = "service"
+                            # Service를 통해 pod 찾기
+                            try:
+                                service_obj = core_v1.read_namespaced_service(service_name, namespace=namespace)
+                                if service_obj.spec.selector:
+                                    label_selector = ",".join(
+                                        [f"{k}={v}" for k, v in service_obj.spec.selector.items()]
+                                    )
+                                    pod_list = core_v1.list_namespaced_pod(
+                                        namespace=namespace, label_selector=label_selector
+                                    )
+                                else:
+                                    pod_list = client.V1PodList(items=[])
+                            except ApiException as e:
+                                if e.status == 404:
+                                    logger.warning(f"Service {service_name} not found in namespace {namespace}")
+                                    pod_list = client.V1PodList(items=[])
+                                else:
+                                    raise
+
+                        # 각 pod의 리소스 사용량 조회
+                        for pod in pod_list.items:
+                            pod_name = pod.metadata.name
+                            pod_status = pod.status.phase
+
+                            # Pod의 리소스 요청/제한 정보 가져오기
+                            cpu_request = None
+                            cpu_limit = None
+                            memory_request = None
+                            memory_limit = None
+
+                            if pod.spec.containers:
+                                container = pod.spec.containers[0]  # 첫 번째 컨테이너
+                                if container.resources:
+                                    if container.resources.requests:
+                                        if "cpu" in container.resources.requests:
+                                            cpu_request_str = container.resources.requests["cpu"]
+                                            cpu_request = _parse_cpu_to_millicores(cpu_request_str)
+                                        if "memory" in container.resources.requests:
+                                            memory_request_str = container.resources.requests["memory"]
+                                            memory_request = _parse_memory_to_bytes(memory_request_str)
+                                    if container.resources.limits:
+                                        if "cpu" in container.resources.limits:
+                                            cpu_limit_str = container.resources.limits["cpu"]
+                                            cpu_limit = _parse_cpu_to_millicores(cpu_limit_str)
+                                        if "memory" in container.resources.limits:
+                                            memory_limit_str = container.resources.limits["memory"]
+                                            memory_limit = _parse_memory_to_bytes(memory_limit_str)
+
+                            # Metrics API를 통해 실제 사용량 조회
+                            cpu_usage = None
+                            memory_usage = None
+                            gpu_usage = None
+                            gpu_memory_usage = None
+
+                            # Metrics API를 통해 실제 사용량 조회
+                            # Metrics Server가 없으면 자동으로 건너뜀
+                            if metrics_server_available:
+                                try:
+                                    # Pod metrics 조회
+                                    logger.debug(
+                                        f"Attempting to get metrics for pod {pod_name} in namespace {namespace}"
+                                    )
+                                    metrics = metrics_v1beta1.get_namespaced_custom_object(
+                                        group="metrics.k8s.io",
+                                        version="v1beta1",
+                                        namespace=namespace,
+                                        plural="pods",
+                                        name=pod_name,
+                                    )
+
+                                    logger.debug(
+                                        f"Metrics response for pod {pod_name}: {json.dumps(metrics, default=str)}"
+                                    )
+
+                                    if "containers" in metrics and metrics["containers"]:
+                                        # 모든 컨테이너의 메트릭 합산
+                                        total_cpu_nanocores = 0
+                                        total_memory_bytes = 0
+
+                                        for container_metrics in metrics["containers"]:
+                                            if "usage" in container_metrics:
+                                                usage = container_metrics["usage"]
+                                                if "cpu" in usage:
+                                                    cpu_str = usage["cpu"]
+                                                    # CPU는 보통 "123456n" (나노코어) 형식
+                                                    total_cpu_nanocores += _parse_cpu_to_nanocores(cpu_str)
+                                                if "memory" in usage:
+                                                    memory_str = usage["memory"]
+                                                    total_memory_bytes += _parse_memory_to_bytes(memory_str)
+
+                                        # 나노코어를 밀리코어로 변환
+                                        if total_cpu_nanocores > 0:
+                                            cpu_usage = total_cpu_nanocores / 1_000_000.0  # 나노코어 -> 밀리코어
+                                            logger.debug(f"Pod {pod_name} CPU usage: {cpu_usage} millicores")
+
+                                        if total_memory_bytes > 0:
+                                            memory_usage = total_memory_bytes
+                                            logger.debug(f"Pod {pod_name} Memory usage: {memory_usage} bytes")
+                                    else:
+                                        logger.warning(f"No container metrics found in response for pod {pod_name}")
+
+                                except ApiException as e:
+                                    error_body = str(e.body) if e.body else ""
+                                    if e.status == 403:
+                                        logger.warning(
+                                            f"Permission denied (403) when getting metrics for pod {pod_name}. "
+                                            f"Metrics API may require additional RBAC permissions."
+                                        )
+                                    elif e.status == 404:
+                                        logger.debug(
+                                            f"Metrics not available for pod {pod_name} (404). "
+                                            f"Pod may not have metrics yet."
+                                        )
+                                    elif (
+                                        "doesn't have a resource type" in error_body.lower()
+                                        or "doesn't have a resource type" in str(e.reason).lower()
+                                    ):
+                                        # Metrics Server가 설치되지 않은 경우
+                                        logger.info(
+                                            "Metrics Server is not installed. "
+                                            "Resource usage will be null. "
+                                            "Only resource requests/limits are available."
+                                        )
+                                        metrics_server_available = False  # 이후 Pod들도 건너뛰기 위해 플래그 설정
+                                    else:
+                                        logger.warning(
+                                            f"Failed to get metrics for pod {pod_name}: {e.status} - {e.reason}"
+                                        )
+                                except Exception as e:
+                                    error_msg = str(e).lower()
+                                    if "doesn't have a resource type" in error_msg or "metrics.k8s.io" in error_msg:
+                                        logger.info(
+                                            "Metrics Server is not installed. "
+                                            "Resource usage will be null. "
+                                            "Only resource requests/limits are available."
+                                        )
+                                        metrics_server_available = False
+                                    else:
+                                        logger.warning(f"Error getting metrics for pod {pod_name}: {str(e)}")
+                                        import traceback
+
+                                        logger.debug(traceback.format_exc())
+                            else:
+                                logger.debug(
+                                    f"Metrics Server not available. Skipping metrics collection for pod {pod_name}"
+                                )
+
+                            # GPU 사용량 조회 (nvidia-smi를 pod 내에서 실행하거나 dcgm-exporter 사용)
+                            # 여기서는 기본적으로 None으로 설정하고, 필요시 별도 구현
+                            # GPU는 일반적으로 node-exporter나 dcgm-exporter를 통해 수집됨
+
+                            resource_usage = ResourceUsage(
+                                cpu_usage_millicores=cpu_usage,
+                                cpu_request_millicores=cpu_request,
+                                cpu_limit_millicores=cpu_limit,
+                                memory_usage_bytes=memory_usage,
+                                memory_request_bytes=memory_request,
+                                memory_limit_bytes=memory_limit,
+                                gpu_usage_percent=gpu_usage,
+                                gpu_memory_usage_bytes=gpu_memory_usage,
+                            )
+
+                            pods.append(
+                                PodResourceUsage(
+                                    pod_name=pod_name,
+                                    namespace=namespace,
+                                    deployment_type=deployment_type,
+                                    resource_usage=resource_usage,
+                                    status=pod_status,
+                                )
+                            )
+
+                            # 총 사용량 누적
+                            if cpu_usage:
+                                deployment_cpu_usage += cpu_usage
+                            if memory_usage:
+                                deployment_memory_usage += memory_usage
+                            if gpu_usage:
+                                deployment_gpu_usage += gpu_usage
+
+                    except ApiException as e:
+                        logger.error(f"Failed to get pods for deployment {service_name}: {e.status} - {e.reason}")
+                        continue
+                    except Exception as e:
+                        logger.error(f"Error processing deployment {service_name}: {str(e)}")
+                        continue
+
+                    if pods:
+                        deployments.append(
+                            DeploymentResourceUsage(
+                                deployment_id=kserve_deployment.id,
+                                service_name=service_name,
+                                workflow_id=workflow.id,
+                                component_id=kserve_deployment.component_id,
+                                model_name=kserve_deployment.model_name,
+                                pods=pods,
+                            )
+                        )
+
+                        total_cpu_usage += deployment_cpu_usage
+                        total_memory_usage += deployment_memory_usage
+                        total_gpu_usage += deployment_gpu_usage
+
+            return ServiceResourceUsageResponse(
+                service_id=service.id,
+                service_name=service.name,
+                deployments=deployments,
+                total_cpu_usage_millicores=total_cpu_usage if total_cpu_usage > 0 else None,
+                total_memory_usage_bytes=total_memory_usage if total_memory_usage > 0 else None,
+                total_gpu_usage_percent=total_gpu_usage if total_gpu_usage > 0 else None,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to get resource usages for service {service_id}: {str(e)}")
+            raise
+
+
+def _parse_cpu_to_nanocores(cpu_str: str) -> int:
+    """CPU 문자열을 나노코어 단위로 변환
+
+    예: "100m" -> 100000000, "1" -> 1000000000, "123456n" -> 123456
+    """
+    if not cpu_str:
+        return 0
+
+    cpu_str = cpu_str.strip()
+
+    # 나노코어 단위인 경우 (Metrics API가 반환하는 형식)
+    if cpu_str.endswith("n"):
+        try:
+            return int(cpu_str[:-1])
+        except ValueError:
+            logger.warning(f"Invalid CPU nanocores value: {cpu_str}")
+            return 0
+
+    # 밀리코어 단위인 경우
+    if cpu_str.endswith("m"):
+        try:
+            millicores = float(cpu_str[:-1])
+            return int(millicores * 1_000_000)  # 밀리코어 -> 나노코어
+        except ValueError:
+            logger.warning(f"Invalid CPU millicores value: {cpu_str}")
+            return 0
+
+    # 코어 단위인 경우 (나노코어로 변환)
+    try:
+        cores = float(cpu_str)
+        return int(cores * 1_000_000_000)  # 코어 -> 나노코어
+    except ValueError:
+        logger.warning(f"Invalid CPU value: {cpu_str}")
+        return 0
+
+
+def _parse_cpu_to_millicores(cpu_str: str) -> float:
+    """CPU 문자열을 밀리코어 단위로 변환
+
+    예: "100m" -> 100.0, "1" -> 1000.0, "0.5" -> 500.0, "123456n" -> 0.123456
+    """
+    if not cpu_str:
+        return 0.0
+
+    cpu_str = cpu_str.strip()
+
+    # 나노코어 단위인 경우 (Metrics API가 반환하는 형식)
+    if cpu_str.endswith("n"):
+        try:
+            nanocores = int(cpu_str[:-1])
+            return nanocores / 1_000_000.0  # 나노코어 -> 밀리코어
+        except ValueError:
+            logger.warning(f"Invalid CPU nanocores value: {cpu_str}")
+            return 0.0
+
+    # 밀리코어 단위인 경우
+    if cpu_str.endswith("m"):
+        try:
+            return float(cpu_str[:-1])
+        except ValueError:
+            logger.warning(f"Invalid CPU millicores value: {cpu_str}")
+            return 0.0
+
+    # 코어 단위인 경우 (밀리코어로 변환)
+    try:
+        cores = float(cpu_str)
+        return cores * 1000.0
+    except ValueError:
+        logger.warning(f"Invalid CPU value: {cpu_str}")
+        return 0.0
+
+
+def _parse_memory_to_bytes(memory_str: str) -> int:
+    """메모리 문자열을 바이트 단위로 변환
+
+    예: "100Mi" -> 104857600, "1Gi" -> 1073741824, "500M" -> 500000000
+    """
+    if not memory_str:
+        return 0
+
+    memory_str = memory_str.strip().upper()
+
+    # 단위 매핑
+    units = {
+        "KI": 1024,
+        "MI": 1024**2,
+        "GI": 1024**3,
+        "TI": 1024**4,
+        "K": 1000,
+        "M": 1000**2,
+        "G": 1000**3,
+        "T": 1000**4,
+    }
+
+    # 숫자와 단위 분리
+    match = re.match(r"^(\d+(?:\.\d+)?)([A-Z]+)?$", memory_str)
+    if not match:
+        # 바이트 단위로 직접 지정된 경우
+        try:
+            return int(memory_str)
+        except ValueError:
+            logger.warning(f"Invalid memory value: {memory_str}")
+            return 0
+
+    value_str, unit = match.groups()
+    value = float(value_str)
+
+    if unit:
+        multiplier = units.get(unit, 1)
+        return int(value * multiplier)
+
+    # 단위가 없으면 바이트로 간주
+    return int(value)
 
 
 class ServiceMonitoringService:

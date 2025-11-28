@@ -41,7 +41,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
         skip: int = 0,
         limit: int = 100,
         creator_id: Optional[int] = None,
-        service_id: Optional[int] = None,
+        service_id: Optional[str] = None,
         is_template: Optional[bool] = None,
         status: Optional[WorkflowStatus] = None,
     ) -> List[Workflow]:
@@ -91,7 +91,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
         db: Session,
         *,
         creator_id: Optional[int] = None,
-        service_id: Optional[int] = None,
+        service_id: Optional[str] = None,
         is_template: Optional[bool] = None,
         status: Optional[WorkflowStatus] = None,
         category: Optional[str] = None,
