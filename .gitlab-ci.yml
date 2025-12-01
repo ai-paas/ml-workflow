@@ -1,0 +1,54 @@
+stages:
+  - lint
+  - sonar
+
+lint_black:
+  stage: lint
+  script:
+    - pip install black
+    - black --check --line-length 120 .
+  only:
+    - merge_requests
+    - master
+    - dev
+
+lint_isort:
+  stage: lint
+  script:
+    - pip install isort
+    - isort --check --profile black --line-length 120 .  # black 프로필 추가
+  only:
+    - merge_requests
+    - master
+    - dev
+
+lint_flake8:
+  stage: lint
+  script:
+    - pip install flake8
+    - flake8 --max-line-length 120 --ignore=E203,W503,W605,E712,E266,F401,E402,F821,E711,F403 .
+  only:
+    - merge_requests
+    - master
+    - dev
+
+
+sonarqube-check:
+  stage: sonar
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - sonar-scanner
+  allow_failure: true
+  only:
+    - dev
+    - master
+    - merge_requests

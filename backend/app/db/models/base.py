@@ -47,4 +47,4 @@ class TimestampDeleteMixin:
 
 
 class TimestampMixin(TimestampCreateMixin, TimestampUpdateMixin, TimestampDeleteMixin):
-    ...
+    pass
