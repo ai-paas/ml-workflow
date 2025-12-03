@@ -5,7 +5,13 @@ from typing import Annotated, Optional
 from config.db.connect import SessionDepends
 from config.settings import get_settings
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from schemas.dataset import DatasetBaseSchema, DatasetReadSchema, DatasetRegistryBaseSchema, DatasetValidationResponse
+from schemas.dataset import (
+    DatasetBaseSchema,
+    DatasetReadSchema,
+    DatasetRegistryBaseSchema,
+    DatasetUpdateSchema,
+    DatasetValidationResponse,
+)
 from schemas.user import UserSchema
 from services.dataset import DatasetRegistryService, DatasetService
 from sqlalchemy.orm import Session
@@ -72,7 +78,7 @@ def create_dataset(
     *,
     db: Session = SessionDepends,
     name: Annotated[str, Form()],
-    description: Annotated[str, Form()],
+    description: Annotated[Optional[str], Form()] = None,
     file: UploadFile = File(...),
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -86,9 +92,10 @@ def create_dataset(
     - **name** (str, required): 데이터셋 이름
         - 데이터셋을 식별하기 위한 이름
         - Form 필드로 전달
-    - **description** (str, required): 데이터셋 설명
+    - **description** (str, optional): 데이터셋 설명
         - 데이터셋에 대한 상세 설명
         - Form 필드로 전달
+        - 생략 가능 (기본값: None)
     - **file** (UploadFile, required): 데이터셋 ZIP 파일
         - COCO128 형식의 데이터셋이 ZIP으로 압축된 파일
         - 파일 검증은 /datasets/validate API를 먼저 호출하여 수행하는 것을 권장합니다
@@ -96,6 +103,8 @@ def create_dataset(
     ## Response (DatasetReadSchema)
     - **id** (int): 데이터셋 고유 ID
     - **name** (str): 데이터셋 이름
+    - **description** (str, optional): 데이터셋 설명
+        - 데이터셋에 대한 상세 설명 (없을 수 있음)
     - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
         - id (int): 레지스트리 ID
         - artifact_path (str): 아티팩트 경로
@@ -122,6 +131,7 @@ def create_dataset(
         # 데이터셋 정보 저장
         dataset_data = DatasetBaseSchema(
             name=name,
+            description=description if description else None,
             version=1,
             subversion=1,
             train_ratio=0.8,
@@ -159,6 +169,8 @@ def read_dataset(dataset_id: int, db: Session = SessionDepends, current_user: Us
     ## Response (DatasetReadSchema)
     - **id** (int): 데이터셋 고유 ID
     - **name** (str): 데이터셋 이름
+    - **description** (str, optional): 데이터셋 설명
+        - 데이터셋에 대한 상세 설명 (없을 수 있음)
     - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
         - id (int): 레지스트리 ID
         - artifact_path (str): 아티팩트 경로
@@ -219,6 +231,8 @@ def read_datasets(
         각 항목은 다음 정보를 포함:
         - id (int): 데이터셋 고유 ID
         - name (str): 데이터셋 이름
+        - description (str, optional): 데이터셋 설명
+            - 데이터셋에 대한 상세 설명 (없을 수 있음)
         - dataset_registry (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
             - id (int): 레지스트리 ID
             - artifact_path (str): 아티팩트 경로
@@ -247,3 +261,104 @@ def read_datasets(
 
     datasets = DatasetService().get_multi(db, skip=skip, limit=page_size)
     return datasets
+
+
+@router.put("/{dataset_id}", response_model=DatasetReadSchema)
+def update_dataset(
+    *,
+    db: Session = SessionDepends,
+    dataset_id: int,
+    obj_in: DatasetUpdateSchema,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    데이터셋 정보 수정
+
+    데이터셋의 이름(name)과 설명(description)을 수정합니다.
+
+    ## Path Parameters
+    - **dataset_id** (int): 수정할 데이터셋 ID
+
+    ## Request Body (DatasetUpdateSchema)
+    - **name** (str, optional): 새로운 데이터셋 이름
+        - 생략 가능 (수정하지 않으려면 전달하지 않음)
+    - **description** (str, optional): 새로운 데이터셋 설명
+        - 생략 가능 (수정하지 않으려면 전달하지 않음)
+
+    ## Response (DatasetReadSchema)
+    - **id** (int): 데이터셋 고유 ID
+    - **name** (str): 수정된 데이터셋 이름
+    - **description** (str, optional): 수정된 데이터셋 설명
+        - 데이터셋에 대한 상세 설명 (없을 수 있음)
+    - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
+        - id (int): 레지스트리 ID
+        - artifact_path (str): 아티팩트 경로
+        - uri (str): 데이터셋 URI
+        - dataset_id (int): 연결된 데이터셋 ID
+        - created_at (datetime): 생성 시각
+        - updated_at (datetime): 수정 시각
+    - **created_at** (datetime): 데이터셋 생성 시각
+    - **updated_at** (datetime): 데이터셋 수정 시각
+
+    ## Notes
+    - name과 description 중 하나만 수정하거나 둘 다 수정할 수 있습니다
+    - 수정하지 않을 필드는 요청에서 생략하면 됩니다
+
+    ## Errors
+    - 400: 유효하지 않은 요청
+    - 401: 인증되지 않은 사용자
+    - 404: 데이터셋을 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
+    try:
+        updated_dataset = DatasetService.update(db, dataset_id=dataset_id, obj_in=obj_in)
+        return updated_dataset
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"데이터셋 수정 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"데이터셋 수정 중 오류가 발생했습니다: {str(e)}")
+
+
+@router.delete("/{dataset_id}")
+def delete_dataset(
+    *,
+    db: Session = SessionDepends,
+    dataset_id: int,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    데이터셋 삭제
+
+    데이터셋을 삭제합니다. MLflow에 저장된 정보와 S3에 저장된 파일도 함께 삭제됩니다.
+
+    ## Path Parameters
+    - **dataset_id** (int): 삭제할 데이터셋 ID
+
+    ## Response
+    - **success** (bool): 삭제 성공 여부
+    - **message** (str): 삭제 결과 메시지
+
+    ## Notes
+    - 데이터셋 삭제 시 다음 항목들이 함께 삭제됩니다:
+        - 데이터베이스의 데이터셋 레코드
+        - 데이터베이스의 데이터셋 레지스트리 레코드
+        - MLflow에 저장된 run 및 artifacts
+        - S3에 저장된 데이터셋 파일들
+    - 삭제 작업은 원자적으로 수행되며, 중간에 실패하면 모든 변경사항이 롤백됩니다
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 데이터셋을 찾을 수 없음
+    - 500: 데이터셋 삭제 중 서버 내부 오류
+    """
+    try:
+        result = DatasetService.delete(db, dataset_id)
+        return {"success": result, "message": "데이터셋이 성공적으로 삭제되었습니다."}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as e:
+        logger.error(f"데이터셋 삭제 중 오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"데이터셋 삭제 중 오류가 발생했습니다: {str(e)}")

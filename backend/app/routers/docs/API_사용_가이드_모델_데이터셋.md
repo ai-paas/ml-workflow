@@ -94,8 +94,13 @@ UI에서 모델과 데이터셋 관련 기능을 구현할 때 사용할 API 호
 **API**: `POST /api/v1/datasets`
 
 - **Content-Type**: `multipart/form-data`
-- 필수 파라미터: `name`, `description`, `file` (ZIP 파일)
+- 필수 파라미터: `name`, `file` (ZIP 파일)
+- 선택 파라미터: `description` (데이터셋 설명)
 - 응답: 생성된 데이터셋 정보 (DatasetReadSchema)
+  - `id`: 데이터셋 고유 ID
+  - `name`: 데이터셋 이름
+  - `description`: 데이터셋 설명 (optional)
+  - `dataset_registry`: 데이터셋 레지스트리 정보
 - MLflow에 자동 등록됨
 
 ### 3. 데이터셋 목록 조회
@@ -104,22 +109,36 @@ UI에서 모델과 데이터셋 관련 기능을 구현할 때 사용할 API 호
 - 쿼리 파라미터: `page`, `page_size` (선택사항)
 - 생략 시 전체 데이터 조회 (최대 10000개)
 - 응답: 데이터셋 목록 (List[DatasetReadSchema])
+  - 각 항목은 `id`, `name`, `description` (optional), `dataset_registry` 포함
 
 ### 4. 데이터셋 상세 조회
 **API**: `GET /api/v1/datasets/{dataset_id}`
 
 - 경로 파라미터: `dataset_id`
 - 응답: 데이터셋 상세 정보 (DatasetReadSchema)
+  - `id`: 데이터셋 고유 ID
+  - `name`: 데이터셋 이름
+  - `description`: 데이터셋 설명 (optional)
+  - `dataset_registry`: 데이터셋 레지스트리 정보
 - 데이터셋 레지스트리 정보 포함
+
+### 5. 데이터셋 수정
+**API**: `PUT /api/v1/datasets/{dataset_id}`
+
+- 경로 파라미터: `dataset_id`
+- 요청 본문: `name`, `description` (둘 다 선택적)
+- 응답: 수정된 데이터셋 정보 (DatasetReadSchema)
+- 수정하지 않을 필드는 요청에서 생략 가능
 
 ## 데이터셋 API 요약
 
 | 작업 | API | 메서드 | 주요 파라미터 |
 |------|-----|--------|--------------|
 | 데이터셋 파일 검증 | `/api/v1/datasets/validate` | POST | `file` |
-| 데이터셋 생성 | `/api/v1/datasets` | POST | `name`, `description`, `file` |
+| 데이터셋 생성 | `/api/v1/datasets` | POST | `name`, `file` (필수), `description` (선택) |
 | 데이터셋 목록 조회 | `/api/v1/datasets` | GET | `page`, `page_size` (선택) |
 | 데이터셋 상세 조회 | `/api/v1/datasets/{dataset_id}` | GET | `dataset_id` (경로) |
+| 데이터셋 수정 | `/api/v1/datasets/{dataset_id}` | PUT | `name`, `description` (선택) |
 
 ## 데이터셋 참고사항
 

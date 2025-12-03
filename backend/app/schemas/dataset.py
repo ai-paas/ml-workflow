@@ -8,6 +8,7 @@ from schemas.base import TimeStampSchemaMixin
 
 class DatasetBaseSchema(TimeStampSchemaMixin):
     name: str
+    description: Optional[str] = None
     version: int
     subversion: int
     train_ratio: float
@@ -18,6 +19,7 @@ class DatasetBaseSchema(TimeStampSchemaMixin):
 class DatasetReadSchema(TimeStampSchemaMixin):
     id: int
     name: str
+    description: Optional[str] = None
     dataset_registry: DatasetRegistryReadSchema
 
     class Config:
@@ -38,6 +40,13 @@ class DatasetRegistryReadSchema(TimeStampSchemaMixin):
 
     class Config:
         from_attributes = True
+
+
+class DatasetUpdateSchema(BaseModel):
+    """데이터셋 업데이트 스키마"""
+
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class DatasetValidationResponse(BaseModel):

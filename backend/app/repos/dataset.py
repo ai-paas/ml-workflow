@@ -1,10 +1,10 @@
 from db.models import Dataset, DatasetRegistry
 from repos.base import CRUDBase
-from schemas.dataset import DatasetBaseSchema, DatasetRegistryBaseSchema
+from schemas.dataset import DatasetBaseSchema, DatasetRegistryBaseSchema, DatasetUpdateSchema
 from sqlalchemy.orm import Session
 
 
-class DatasetRepository(CRUDBase[Dataset, DatasetBaseSchema, DatasetBaseSchema]):
+class DatasetRepository(CRUDBase[Dataset, DatasetBaseSchema, DatasetUpdateSchema]):
     pass
 
 
