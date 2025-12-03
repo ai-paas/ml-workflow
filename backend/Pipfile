@@ -1,0 +1,45 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[[source]]
+url = "https://pypi.surromind.ai/simple"
+verify_ssl = true
+name = "surromind"
+
+[packages]
+pydantic-settings = "*"
+pillow = "==10.4.0"
+scipy = "==1.14.1"
+alembic = "==1.13.2"
+sqlalchemy = "==2.0.31"
+pymysql = "==1.1.1"
+mlflow = "==2.17.0"
+kfp = "==2.5.0"
+kubeflow-katib = "==0.16.0"
+kserve = "==0.13.1"
+fastapi = "==0.109.2"
+huggingface-hub = "==0.26.1"
+datasets = "*"
+evaluate = "*"
+timm = "*"
+albumentations = "*"
+accelerate = "*"
+python-multipart = "*"
+boto3 = "*"
+transformers = "==4.45.2"
+torch = "==2.4.1"
+torchvision = "==0.19.1"
+python-jose = "==3.3.0"
+fastapi-cli = "==0.0.5"
+pymilvus = {extras = ["model"], version = "==2.4.4"}
+langchain = "==0.2.11"
+surrochat = {version = "==0.0.10", index = "surromind"}
+
+[dev-packages]
+pre-commit = "*"
+ipykernel = "*"
+
+[requires]
+python_version = "3.10"

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# 가상환경
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 문서
+*.md
+!README.md
+
+# Git
+.git/
+.gitignore
+
+# 스크립트
+run_gradio.sh
+
+# 로그
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
