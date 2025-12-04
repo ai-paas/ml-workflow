@@ -76,6 +76,11 @@ class Settings(BaseSettings):
         description="KServe Istio Gateway URL \
 (외부 접근용)",
     )
+    KSERVE_IMAGE_PULL_SECRET: str = Field(
+        default="harbor",
+        description="KServe InferenceService에서 사용할 imagePullSecret 이름 \
+(private registry 인증용)",
+    )
 
     # Milvus 설정
     MILVUS_DB_HOST: str = Field(..., description="Milvus 데이터베이스 호스트")
