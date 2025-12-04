@@ -1345,6 +1345,9 @@ class WorkflowExecutor:
         """
         InferenceService 삭제 컴포넌트 태스크 생성
 
+        이 컴포넌트는 Kubernetes 리소스 삭제 요청만 수행합니다.
+        삭제 완료 확인은 backend service의 finalize API에서 처리됩니다.
+
         Args:
             workflow_id: 워크플로우 ID
 
@@ -1379,7 +1382,8 @@ class WorkflowExecutor:
                 failed_count = 0
                 total_count = 0
 
-                # 1. KServe InferenceService 삭제
+                # 1. KServe InferenceService 삭제 요청
+                # 참고: 삭제 완료 확인은 backend service의 finalize API에서 처리됨
                 try:
                     api = client.CustomObjectsApi()
                     logger.info(f"Querying InferenceServices for workflow: {workflow_id}")
@@ -1396,14 +1400,14 @@ class WorkflowExecutor:
                     logger.info(f"Found {len(services)} InferenceServices for workflow {workflow_id}")
                     total_count += len(services)
 
-                    # CustomObjectsApi로 각 서비스 삭제
+                    # 각 서비스에 대해 삭제 요청 (비동기 삭제)
                     for service in services:
                         service_name = service.get("metadata", {}).get("name")
                         if service_name:
                             try:
                                 logger.info(f"Deleting InferenceService: {service_name} in namespace: {namespace}")
 
-                                # InferenceService 삭제
+                                # InferenceService 삭제 요청 (삭제 완료는 Kubernetes가 처리)
                                 api.delete_namespaced_custom_object(
                                     group="serving.kserve.io",
                                     version="v1beta1",
@@ -1413,11 +1417,13 @@ class WorkflowExecutor:
                                 )
 
                                 deleted_count += 1
-                                logger.info(f"Successfully deleted InferenceService: {service_name}")
+                                logger.info(f"Deletion requested for InferenceService: {service_name}")
 
                             except client.exceptions.ApiException as e:
                                 if e.status == 404:
-                                    logger.warning(f"InferenceService not found: {service_name}")
+                                    logger.warning(
+                                        f"InferenceService not found: {service_name} (may already be deleted)"
+                                    )
                                     # 404는 이미 없는 것이므로 failed에 카운트하지 않음
                                 else:
                                     logger.error(
@@ -1433,12 +1439,13 @@ class WorkflowExecutor:
                 except Exception as e:
                     logger.warning(f"Error cleaning up InferenceServices: {e}")
 
-                # 2. Ollama 리소스 삭제 (Deployment, Service, PVC)
+                # 2. Ollama 리소스 삭제 요청 (Deployment, Service, PVC)
+                # 참고: 삭제 완료 확인은 backend service의 finalize API에서 처리됨
                 try:
                     apps_v1 = client.AppsV1Api()
                     core_v1 = client.CoreV1Api()
 
-                    # Deployment 삭제
+                    # Deployment 삭제 요청
                     logger.info(f"Querying Deployments for workflow: {workflow_id}")
                     deployments = apps_v1.list_namespaced_deployment(
                         namespace=namespace,
@@ -1458,10 +1465,10 @@ class WorkflowExecutor:
                                 namespace=namespace,
                             )
                             deleted_count += 1
-                            logger.info(f"Successfully deleted Deployment: {deployment_name}")
+                            logger.info(f"Deletion requested for Deployment: {deployment_name}")
                         except client.exceptions.ApiException as e:
                             if e.status == 404:
-                                logger.warning(f"Deployment not found: {deployment_name}")
+                                logger.warning(f"Deployment not found: {deployment_name} (may already be deleted)")
                             else:
                                 logger.error(f"Failed to delete Deployment {deployment_name}: {e.status} - {e.reason}")
                                 failed_count += 1
@@ -1469,7 +1476,7 @@ class WorkflowExecutor:
                             logger.error(f"Unexpected error deleting Deployment {deployment_name}: {e}")
                             failed_count += 1
 
-                    # Service 삭제
+                    # Service 삭제 요청
                     logger.info(f"Querying Services for workflow: {workflow_id}")
                     services = core_v1.list_namespaced_service(
                         namespace=namespace,
@@ -1489,10 +1496,10 @@ class WorkflowExecutor:
                                 namespace=namespace,
                             )
                             deleted_count += 1
-                            logger.info(f"Successfully deleted Service: {service_name}")
+                            logger.info(f"Deletion requested for Service: {service_name}")
                         except client.exceptions.ApiException as e:
                             if e.status == 404:
-                                logger.warning(f"Service not found: {service_name}")
+                                logger.warning(f"Service not found: {service_name} (may already be deleted)")
                             else:
                                 logger.error(f"Failed to delete Service {service_name}: {e.status} - {e.reason}")
                                 failed_count += 1
@@ -1500,7 +1507,7 @@ class WorkflowExecutor:
                             logger.error(f"Unexpected error deleting Service {service_name}: {e}")
                             failed_count += 1
 
-                    # PVC 삭제 (모델의 PVC는 제외 - model-id label이 있는 PVC는 모델 삭제 시에만 삭제됨)
+                    # PVC 삭제 요청 (모델의 PVC는 제외 - model-id label이 있는 PVC는 모델 삭제 시에만 삭제됨)
                     logger.info(f"Querying PVCs for workflow: {workflow_id}")
                     pvcs = core_v1.list_namespaced_persistent_volume_claim(
                         namespace=namespace,
@@ -1539,10 +1546,10 @@ class WorkflowExecutor:
                                 namespace=namespace,
                             )
                             deleted_count += 1
-                            logger.info(f"Successfully deleted workflow PVC: {pvc_name}")
+                            logger.info(f"Deletion requested for workflow PVC: {pvc_name}")
                         except client.exceptions.ApiException as e:
                             if e.status == 404:
-                                logger.warning(f"PVC not found: {pvc_name}")
+                                logger.warning(f"PVC not found: {pvc_name} (may already be deleted)")
                             else:
                                 logger.error(f"Failed to delete PVC {pvc_name}: {e.status} - {e.reason}")
                                 failed_count += 1
@@ -1553,15 +1560,17 @@ class WorkflowExecutor:
                 except Exception as e:
                     logger.warning(f"Error cleaning up Ollama resources: {e}")
 
+                # 삭제 요청 완료 (실제 삭제 완료 확인은 backend service의 finalize API에서 처리)
                 result_data = {
                     "workflow_id": workflow_id,
                     "deleted": deleted_count,
                     "failed": failed_count,
                     "total": total_count,
-                    "status": "completed",
+                    "status": "deletion_requested",  # 삭제 요청 완료 상태
                 }
 
-                logger.info(f"Cleanup completed: {json.dumps(result_data)}")
+                logger.info(f"Cleanup deletion requests completed: {json.dumps(result_data)}")
+                logger.info("Note: Actual deletion completion will be verified by backend service finalize API")
                 return json.dumps(result_data)
 
             except Exception as e:

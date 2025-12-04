@@ -1327,8 +1327,8 @@ async def finalize_workflow_deletion(
     """
     워크플로우 삭제 완료 처리
 
-    KServe 리소스 정리가 완료되었는지 확인하고,
-    완료된 경우 DB에서 워크플로우를 삭제합니다.
+    Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
+    확인된 경우 DB에서 워크플로우를 삭제합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
@@ -1342,24 +1342,33 @@ async def finalize_workflow_deletion(
     - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 삭제 상태
         - "completed": 삭제 완료
+            - Kubernetes 리소스가 실제로 삭제되어 확인됨
+            - DB에서 워크플로우가 삭제됨
         - "in_progress": 아직 진행중
+            - Kubernetes에 리소스가 아직 존재함
+            - 완료될 때까지 대기 후 재호출 필요
         - "failed": 삭제 실패
-        - "unknown": 상태 확인 불가
+            - Kubernetes 리소스 확인 중 오류 발생
+            - error_message에 상세 오류 정보 포함
     - **deleted_from_db** (bool): DB에서 삭제 여부
         - true: 완전히 삭제됨
         - false: 아직 삭제되지 않음
     - **message** (str): 상태 메시지
 
     ## Process
-    1. Pipeline 상태 확인 (5초 타임아웃)
-    2. 완료 시: DB에서 워크플로우 삭제
-    3. 진행중: 진행 상태 반환
-    4. 실패: 오류 메시지 반환
+    1. 워크플로우 존재 여부 확인
+    2. Kubernetes 클러스터에서 리소스 직접 조회
+       - InferenceService 조회
+       - Ollama Deployment/Service 조회
+    3. 리소스가 모두 삭제된 경우: DB에서 워크플로우 삭제
+    4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
+    5. 확인 중 오류 발생: 실패 상태 반환
 
     ## Notes
     - 이미 삭제된 워크플로우 호출 시 "already deleted" 반환
-    - Pipeline 상태 확인에 실패해도 DB 조회 시도
+    - Kubernetes 리소스 확인에 실패해도 DB 조회 시도
     - 삭제는 되돌릴 수 없는 작업
+    - 리소스가 아직 존재하면 재호출하여 완료 확인 필요
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -1378,12 +1387,90 @@ async def finalize_workflow_deletion(
                 "message": "Workflow already deleted",
             }
 
-        # Pipeline 완료 확인
-        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+        # Kubernetes 클러스터에서 리소스 직접 조회하여 삭제 여부 확인
+        try:
+            from kubernetes import client
+            from kubernetes import config as k8s_config
 
-        if success:
-            # Pipeline 완료됨 - DB에서 삭제
-            logger.info(f"Cleanup pipeline completed for workflow {workflow_id}, deleting from DB")
+            # Kubernetes 설정
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                # 개발 환경에서는 kubeconfig 사용
+                try:
+                    k8s_config.load_kube_config()
+                except Exception as e:
+                    logger.error(f"Failed to load Kubernetes config: {e}")
+                    raise Exception(f"Failed to load Kubernetes config: {str(e)}")
+
+            namespace = settings.KUBEFLOW_NAMESPACE
+            label_selector = f"workflow-id={workflow_id}"
+
+            resources_exist = False
+
+            # 1. InferenceService 확인
+            try:
+                api = client.CustomObjectsApi()
+
+                result = api.list_namespaced_custom_object(
+                    group="serving.kserve.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="inferenceservices",
+                    label_selector=label_selector,
+                )
+
+                services = result.get("items", [])
+                if len(services) > 0:
+                    logger.info(f"Found {len(services)} InferenceServices still existing for workflow {workflow_id}")
+                    resources_exist = True
+            except Exception as e:
+                logger.warning(f"Error checking InferenceServices: {e}")
+
+            # 2. Ollama Deployment 확인
+            if not resources_exist:
+                try:
+                    apps_v1 = client.AppsV1Api()
+                    deployments = apps_v1.list_namespaced_deployment(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(deployments.items) > 0:
+                        logger.info(
+                            f"Found {len(deployments.items)} Deployments still existing for workflow {workflow_id}"
+                        )
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Deployments: {e}")
+
+            # 3. Ollama Service 확인
+            if not resources_exist:
+                try:
+                    core_v1 = client.CoreV1Api()
+                    services = core_v1.list_namespaced_service(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(services.items) > 0:
+                        logger.info(f"Found {len(services.items)} Services still existing for workflow {workflow_id}")
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Services: {e}")
+
+            if resources_exist:
+                # 리소스가 아직 존재함 - 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "in_progress",
+                    "deleted_from_db": False,
+                    "message": "Resources still exist in Kubernetes, waiting for cleanup",
+                }
+
+            # 리소스가 모두 삭제됨 - DB에서 워크플로우 삭제
+            logger.info(f"All resources deleted for workflow {workflow_id}, deleting from DB")
 
             delete_success = WorkflowService.delete_workflow(db, workflow_id)
 
@@ -1401,58 +1488,18 @@ async def finalize_workflow_deletion(
                     "run_id": run_id,
                     "status": "completed",
                     "deleted_from_db": False,
-                    "message": "Pipeline completed but DB deletion failed",
-                }
-        else:
-            # 아직 진행중이거나 실패
-            # 실제 상태 확인
-            try:
-                from ..core.kubeflow.kubeflow_manager import KubeflowManager
-
-                kf_manager = KubeflowManager()
-                run = kf_manager.kfp_client.get_run(run_id)
-
-                # 상태 추출
-                status_value = None
-                if hasattr(run, "state"):
-                    status_value = run.state
-                elif hasattr(run, "status"):
-                    status_value = run.status
-                elif hasattr(run, "run"):
-                    if hasattr(run.run, "status"):
-                        status_value = run.run.status
-                    elif hasattr(run.run, "state"):
-                        status_value = run.run.state
-
-                if status_value:
-                    status_upper = str(status_value).upper()
-                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
-                        return {
-                            "workflow_id": workflow_id,
-                            "run_id": run_id,
-                            "status": "failed",
-                            "deleted_from_db": False,
-                            "message": f"Cleanup pipeline failed with status: {status_value}",
-                        }
-
-                # 진행중
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "in_progress",
-                    "deleted_from_db": False,
-                    "message": "Cleanup pipeline still in progress",
+                    "message": "Resources deleted but DB deletion failed",
                 }
 
-            except Exception as e:
-                logger.error(f"Failed to check pipeline status: {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "unknown",
-                    "deleted_from_db": False,
-                    "message": f"Failed to check pipeline status: {str(e)}",
-                }
+        except Exception as k8s_error:
+            logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
+            return {
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "status": "failed",
+                "deleted_from_db": False,
+                "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
+            }
 
     except Exception as e:
         logger.error(f"Failed to finalize workflow deletion: {e}")
@@ -3500,8 +3547,8 @@ async def finalize_cleanup(
     """
     워크플로우 정리 완료 처리
 
-    KServe 리소스 정리가 완료되었는지 확인하고,
-    완료된 경우 워크플로우 상태를 업데이트합니다.
+    Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
+    확인된 경우 워크플로우 상태를 업데이트합니다.
     워크플로우는 삭제되지 않고 리소스만 정리되며, 정리 후 재실행이 가능합니다.
 
     ## Path Parameters
@@ -3518,45 +3565,43 @@ async def finalize_cleanup(
     - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 정리 상태
         - "completed": 정리 완료
-            - Pipeline이 성공적으로 완료되어 리소스가 정리됨
+            - Kubernetes 리소스가 실제로 삭제되어 확인됨
             - 워크플로우 상태가 업데이트됨 (ERROR → DRAFT)
         - "in_progress": 아직 진행중
-            - Pipeline이 아직 실행 중임
+            - Kubernetes에 리소스가 아직 존재함
             - 완료될 때까지 대기 후 재호출 필요
         - "failed": 정리 실패
-            - Pipeline 실행이 실패했거나 오류 발생
+            - Kubernetes 리소스 확인 중 오류 발생
             - error_message에 상세 오류 정보 포함
-        - "unknown": 상태 확인 불가
-            - Pipeline 상태 조회에 실패한 경우
-            - Kubeflow 연결 문제 또는 run_id 오류 가능
     - **workflow_updated** (bool): 워크플로우 상태 업데이트 여부
         - true: 워크플로우 상태가 성공적으로 업데이트됨
             - ERROR 상태였던 경우 DRAFT로 변경됨
             - 재실행 가능한 상태로 변경됨
         - false: 워크플로우 상태가 업데이트되지 않음
-            - Pipeline이 아직 진행중이거나 실패한 경우
+            - 리소스가 아직 삭제되지 않았거나 실패한 경우
             - 또는 워크플로우가 이미 DRAFT 상태인 경우
     - **message** (str): 상태 메시지
         - 정리 완료: "Cleanup completed and workflow state updated"
-        - 진행중: "Cleanup pipeline still in progress"
-        - 실패: "Cleanup pipeline failed with status: {status_value}"
-        - 상태 확인 불가: "Failed to check pipeline status: {error}"
+        - 진행중: "Resources still exist in Kubernetes, waiting for cleanup"
+        - 실패: "Failed to check Kubernetes resources: {error}"
 
     ## Process
     1. 워크플로우 존재 여부 확인
-    2. Pipeline 상태 확인 (5초 타임아웃)
-    3. 완료 시:
+    2. Kubernetes 클러스터에서 리소스 직접 조회
+       - InferenceService 조회
+       - Ollama Deployment/Service 조회
+    3. 리소스가 모두 삭제된 경우:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
        - KServe 배포 데이터(kserve_deployments) 삭제
        - 재실행 가능한 상태로 업데이트
-    4. 진행중: 진행 상태 반환 (재호출 필요)
-    5. 실패: 오류 메시지 반환
+    4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
+    5. 확인 중 오류 발생: 실패 상태 반환
 
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리됨
     - 정리 완료 후 워크플로우를 재실행할 수 있음
-    - Pipeline 상태 확인은 짧은 타임아웃(5초)으로 즉시 확인
-    - Pipeline이 아직 진행중이면 재호출하여 완료 확인 필요
+    - Kubernetes 리소스 확인은 즉시 수행됨
+    - 리소스가 아직 존재하면 재호출하여 완료 확인 필요
     - ERROR 상태의 워크플로우는 정리 완료 시 DRAFT로 변경됨
     - 이미 DRAFT 상태인 워크플로우는 상태 변경 없음
     - cleanup API 호출 후 이 API를 호출하여 완료 확인 필요
@@ -3573,7 +3618,7 @@ async def finalize_cleanup(
     - 404: 워크플로우를 찾을 수 없음
         - workflow_id가 존재하지 않거나 삭제된 경우
     - 500: 정리 처리 중 오류 발생
-        - Pipeline 상태 확인 실패 또는 워크플로우 상태 업데이트 실패
+        - Kubernetes 리소스 확인 실패 또는 워크플로우 상태 업데이트 실패
     """
     try:
         # 워크플로우 존재 여부 확인
@@ -3581,19 +3626,99 @@ async def finalize_cleanup(
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-        # Pipeline 완료 확인
-        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+        # Kubernetes 클러스터에서 리소스 직접 조회하여 삭제 여부 확인
+        try:
+            from kubernetes import client
+            from kubernetes import config as k8s_config
 
-        if success:
-            # Pipeline 완료됨 - 워크플로우 상태 업데이트 및 배포 데이터 삭제
+            # Kubernetes 설정
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                # 개발 환경에서는 kubeconfig 사용
+                try:
+                    k8s_config.load_kube_config()
+                except Exception as e:
+                    logger.error(f"Failed to load Kubernetes config: {e}")
+                    raise Exception(f"Failed to load Kubernetes config: {str(e)}")
+
+            namespace = settings.KUBEFLOW_NAMESPACE
+            label_selector = f"workflow-id={workflow_id}"
+
+            resources_exist = False
+
+            # 1. InferenceService 확인
+            try:
+                api = client.CustomObjectsApi()
+
+                result = api.list_namespaced_custom_object(
+                    group="serving.kserve.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="inferenceservices",
+                    label_selector=label_selector,
+                )
+
+                services = result.get("items", [])
+                if len(services) > 0:
+                    logger.info(f"Found {len(services)} InferenceServices still existing for workflow {workflow_id}")
+                    resources_exist = True
+            except Exception as e:
+                logger.warning(f"Error checking InferenceServices: {e}")
+
+            # 2. Ollama Deployment 확인
+            if not resources_exist:
+                try:
+                    apps_v1 = client.AppsV1Api()
+                    deployments = apps_v1.list_namespaced_deployment(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(deployments.items) > 0:
+                        logger.info(
+                            f"Found {len(deployments.items)} Deployments still existing for workflow {workflow_id}"
+                        )
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Deployments: {e}")
+
+            # 3. Ollama Service 확인
+            if not resources_exist:
+                try:
+                    core_v1 = client.CoreV1Api()
+                    services = core_v1.list_namespaced_service(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(services.items) > 0:
+                        logger.info(f"Found {len(services.items)} Services still existing for workflow {workflow_id}")
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Services: {e}")
+
+            if resources_exist:
+                # 리소스가 아직 존재함 - 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "run_id": run_id,
+                    "status": "in_progress",
+                    "workflow_updated": False,
+                    "message": "Resources still exist in Kubernetes, waiting for cleanup",
+                }
+
+            # 리소스가 모두 삭제됨 - 워크플로우 상태 업데이트 및 배포 데이터 삭제
             logger.info(
-                f"Cleanup pipeline completed for workflow {workflow_id}, \
-                    updating workflow state and cleaning up deployments"
+                f"All resources deleted for workflow {workflow_id}, "
+                f"updating workflow state and cleaning up deployments"
             )
 
             # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
+            workflow_updated = False
             if workflow.status == WorkflowStatus.ERROR:
                 workflow.status = WorkflowStatus.DRAFT
+                workflow_updated = True
 
             # KServe 배포 데이터 삭제
             deleted_count = KServeDeploymentService.delete_workflow_deployments(db, workflow_id)
@@ -3605,60 +3730,19 @@ async def finalize_cleanup(
                 "workflow_id": workflow_id,
                 "run_id": run_id,
                 "status": "completed",
-                "workflow_updated": True,
+                "workflow_updated": workflow_updated,
                 "message": "Cleanup completed and workflow state updated",
             }
-        else:
-            # 아직 진행중이거나 실패
-            # 실제 상태 확인
-            try:
-                from ..core.kubeflow.kubeflow_manager import KubeflowManager
 
-                kf_manager = KubeflowManager()
-                run = kf_manager.kfp_client.get_run(run_id)
-
-                # 상태 추출
-                status_value = None
-                if hasattr(run, "state"):
-                    status_value = run.state
-                elif hasattr(run, "status"):
-                    status_value = run.status
-                elif hasattr(run, "run"):
-                    if hasattr(run.run, "status"):
-                        status_value = run.run.status
-                    elif hasattr(run.run, "state"):
-                        status_value = run.run.state
-
-                if status_value:
-                    status_upper = str(status_value).upper()
-                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
-                        return {
-                            "workflow_id": workflow_id,
-                            "run_id": run_id,
-                            "status": "failed",
-                            "workflow_updated": False,
-                            "message": f"Cleanup pipeline failed with status: {status_value}",
-                        }
-
-                # 진행중
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "in_progress",
-                    "workflow_updated": False,
-                    "message": "Cleanup pipeline still in progress",
-                }
-
-            except Exception as e:
-                logger.error(f"Failed to check pipeline status: {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "unknown",
-                    "workflow_updated": False,
-                    "message": f"Failed to check pipeline status: {str(e)}",
-                }
-
+        except Exception as k8s_error:
+            logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
+            return {
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "status": "failed",
+                "workflow_updated": False,
+                "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
+            }
     except Exception as e:
         logger.error(f"Failed to finalize cleanup: {e}")
         raise HTTPException(
