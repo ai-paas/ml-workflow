@@ -57,6 +57,9 @@ class WorkflowExecutor:
         parameters["restapi_username"] = "surromind"  # 고정 사용자명
         parameters["restapi_password"] = settings.DEMO_PASSWORD
 
+        # KServe imagePullSecret 설정 추가
+        parameters["image_pull_secret_name"] = settings.KSERVE_IMAGE_PULL_SECRET
+
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
             logger.info(f"Creating and executing Kubeflow pipeline for workflow {workflow.id}")
@@ -283,6 +286,7 @@ class WorkflowExecutor:
                 gpu_enabled: bool = False,
                 repo_id: str = "",
                 pvc_name: str = "",
+                image_pull_secret_name: str = "harbor",
             ) -> str:
                 import json
                 import logging
@@ -719,6 +723,7 @@ class WorkflowExecutor:
                                 ],
                             )
                         ],
+                        image_pull_secrets=[client.V1LocalObjectReference(name=image_pull_secret_name)],
                     )
 
                     # InferenceService 생성
@@ -1082,6 +1087,7 @@ class WorkflowExecutor:
                 gpu_enabled=parameters.get("gpu_enabled", False),
                 repo_id=repo_id_value,
                 pvc_name=pvc_name_value,
+                image_pull_secret_name=parameters.get("image_pull_secret_name", "harbor"),
             )
 
         # END 컴포넌트
