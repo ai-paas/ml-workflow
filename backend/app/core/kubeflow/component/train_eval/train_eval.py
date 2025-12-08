@@ -34,6 +34,7 @@ def container_train_eval_component(
     lrf: str,
     namespace: str,
     train_image_url: str,
+    image_pull_secret_name: str = "harbor",
 ) -> str:
     import json
     import logging
@@ -143,8 +144,19 @@ def container_train_eval_component(
                                 command=["python", "-m", "app.train_eval"],
                                 args=container_args,
                                 resources=resources,
+                                volume_mounts=[client.V1VolumeMount(name="dshm", mount_path="/dev/shm")],
                             )
                         ],
+                        volumes=[
+                            client.V1Volume(
+                                name="dshm", empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="4Gi")
+                            )
+                        ],
+                        image_pull_secrets=(
+                            [client.V1LocalObjectReference(name=image_pull_secret_name)]
+                            if image_pull_secret_name
+                            else []
+                        ),
                     ),
                 ),
                 backoff_limit=3,

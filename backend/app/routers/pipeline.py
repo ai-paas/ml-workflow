@@ -147,6 +147,7 @@ def container_train(
         lrf: str,
         namespace: str,
         train_image_url: str,
+        image_pull_secret_name: str,
     ):
         container_train_eval_component(
             model_id=model_id,
@@ -172,6 +173,7 @@ def container_train(
             lrf=lrf,
             namespace=namespace,
             train_image_url=train_image_url,
+            image_pull_secret_name=image_pull_secret_name,
         )
 
     try:
@@ -248,6 +250,7 @@ def container_train(
                 "lrf": lrf,
                 "namespace": settings.KUBEFLOW_NAMESPACE,
                 "train_image_url": settings.TRAIN_IMAGE_URL,
+                "image_pull_secret_name": settings.KUBEFLOW_IMAGE_PULL_SECRET,
             },
         )
         return {
