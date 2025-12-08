@@ -2824,7 +2824,7 @@ async def _execute_llm_inference(
             "model": model_repo_id,
             "messages": messages,
             "stream": False,
-            "keep_alive": "24h",  # 모델을 24시간 동안 메모리에 유지
+            "keep_alive": "8760h",  # 모델을 1년(8760시간) 동안 메모리에 유지
         }
         headers = {"Content-Type": "application/json"}
         kf_manager = KubeflowManager()

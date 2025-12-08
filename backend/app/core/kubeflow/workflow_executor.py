@@ -58,7 +58,7 @@ class WorkflowExecutor:
         parameters["restapi_password"] = settings.DEMO_PASSWORD
 
         # KServe imagePullSecret 설정 추가
-        parameters["image_pull_secret_name"] = settings.KSERVE_IMAGE_PULL_SECRET
+        parameters["image_pull_secret_name"] = settings.KUBEFLOW_IMAGE_PULL_SECRET
 
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
@@ -560,7 +560,7 @@ class WorkflowExecutor:
                                     "model": ollama_model_name,
                                     "prompt": " ",  # 빈 프롬프트 (공백 1개)
                                     "stream": False,
-                                    "keep_alive": "24h",
+                                    "keep_alive": "8760h",
                                 }
                                 preload_headers = {"Content-Type": "application/json"}
 
