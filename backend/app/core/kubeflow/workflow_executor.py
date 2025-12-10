@@ -283,10 +283,11 @@ class WorkflowExecutor:
                 restapi_password: str,
                 infer_image_url: str,
                 config: str = "{}",
-                gpu_enabled: bool = False,
+                gpus: int = 0,
                 repo_id: str = "",
                 pvc_name: str = "",
                 image_pull_secret_name: str = "harbor",
+                node_name: str = "",
             ) -> str:
                 import json
                 import logging
@@ -400,9 +401,11 @@ class WorkflowExecutor:
                             },
                         )
 
-                        if gpu_enabled:
-                            ollama_resources.requests["nvidia.com/gpu"] = "1"
-                            ollama_resources.limits["nvidia.com/gpu"] = "1"
+                        if gpus > 0:
+                            gpu_count = str(gpus)
+                            ollama_resources.requests["nvidia.com/gpu"] = gpu_count
+                            ollama_resources.limits["nvidia.com/gpu"] = gpu_count
+                            logger.info(f"Allocating {gpu_count} GPU(s) for model: {ollama_model_name}")
 
                         # 2. Deployment 생성
                         deployment = client.V1Deployment(
@@ -466,10 +469,14 @@ class WorkflowExecutor:
                                                 ),
                                             )
                                         ],
+                                        node_name=node_name if node_name else None,
                                     ),
                                 ),
                             ),
                         )
+
+                        if node_name:
+                            logger.info(f"Using node_name: {node_name}")
 
                         # Deployment 생성
                         apps_v1.create_namespaced_deployment(namespace=namespace, body=deployment)
@@ -560,7 +567,7 @@ class WorkflowExecutor:
                                     "model": ollama_model_name,
                                     "prompt": " ",  # 빈 프롬프트 (공백 1개)
                                     "stream": False,
-                                    "keep_alive": "8760h",
+                                    "keep_alive": "525600m",
                                 }
                                 preload_headers = {"Content-Type": "application/json"}
 
@@ -704,9 +711,11 @@ class WorkflowExecutor:
                         limits={"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "1Gi"},  # 폭주 방지용 제한만 설정
                     )
 
-                    if gpu_enabled:
-                        resources.requests["nvidia.com/gpu"] = "1"
-                        resources.limits["nvidia.com/gpu"] = "1"
+                    if gpus > 0:
+                        gpu_count = str(gpus)
+                        resources.requests["nvidia.com/gpu"] = gpu_count
+                        resources.limits["nvidia.com/gpu"] = gpu_count
+                        logger.info(f"Allocating {gpu_count} GPU(s) for MLflow model: {model_name}")
 
                     # Predictor 스펙 생성
                     predictor_spec = V1beta1PredictorSpec(
@@ -1084,10 +1093,11 @@ class WorkflowExecutor:
                 restapi_password=parameters.get("restapi_password", ""),
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
-                gpu_enabled=parameters.get("gpu_enabled", False),
+                gpus=parameters.get("gpus", 0),
                 repo_id=repo_id_value,
                 pvc_name=pvc_name_value,
                 image_pull_secret_name=parameters.get("image_pull_secret_name", "harbor"),
+                node_name=parameters.get("node_name", ""),
             )
 
         # END 컴포넌트

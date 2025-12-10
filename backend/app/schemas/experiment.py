@@ -110,6 +110,7 @@ class TrainingStatusResponse(BaseModel):
     status: str  # RUNNING, FINISHED, FAILED
     start_time: int  # unix timestamp
     end_time: Optional[int] = None  # unix timestamp
+    elapsed_time: int  # 경과시간 (초, 자연수)
     max_epoch: int
     current_epoch: int
     loss_history: list[Any]

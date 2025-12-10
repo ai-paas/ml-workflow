@@ -50,11 +50,13 @@ def container_train(
     모델과 데이터셋을 사용하여 Kubeflow Pipeline 기반의 학습 파이프라인을 생성하고 실행합니다.
     학습 실험(Experiment)을 생성하고 하이퍼파라미터를 설정한 후, Kubeflow에서 학습 작업을 시작합니다.
 
-    ## Request Body
+    ## Query Parameters
     - **model_id** (int, required): 학습에 사용할 모델 ID
         - 모델 레지스트리에 등록된 모델의 고유 ID
     - **dataset_id** (int, required): 학습에 사용할 데이터셋 ID
         - 데이터셋 레지스트리에 등록된 데이터셋의 고유 ID
+
+    ## Request Body
     - **train_name** (str, optional): 학습 실험 이름
         - 기본값: 빈 문자열
         - 실험을 식별하기 위한 이름
@@ -424,6 +426,10 @@ async def get_training_status(
     - **start_time** (int): 학습 시작 시각 (밀리초 단위 타임스탬프)
     - **end_time** (int): 학습 종료 시각 (밀리초 단위 타임스탬프)
         - 진행 중인 경우 현재 시각
+    - **elapsed_time** (int): 경과시간 (초 단위, 자연수)
+        - start_time부터 end_time까지의 경과 시간
+        - 학습 진행 중인 경우 현재까지의 경과 시간
+        - 항상 0 이상의 정수값
     - **max_epoch** (int): 설정된 최대 에포크 수
     - **current_epoch** (int): 현재 진행 중인 에포크
     - **loss_history** (List[dict]): 손실(loss) 히스토리
@@ -543,10 +549,14 @@ class PipelineTrainingMonitor:
             elif status == "RUNNING":
                 end_time = int(datetime.now().timestamp() * 1000)
 
+            # 경과시간 계산 (초 단위, 자연수)
+            elapsed_time = max(0, (end_time - run.info.start_time) // 1000) if end_time else 0
+
             return {
                 "status": status,
                 "start_time": run.info.start_time,
                 "end_time": end_time,
+                "elapsed_time": elapsed_time,
                 "max_epoch": max_epoch,
                 "current_epoch": current_epoch,
                 "loss_history": metrics_data.get("train/total_loss", []),

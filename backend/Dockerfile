@@ -62,5 +62,7 @@ COPY . .
 
 EXPOSE 8000
 
+ENV UVICORN_TIMEOUT_KEEP_ALIVE=600
+
 # Command to run the FastAPI app
 CMD ["fastapi", "run", "app/main.py"]
