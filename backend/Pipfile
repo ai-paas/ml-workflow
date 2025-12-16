@@ -36,6 +36,7 @@ fastapi-cli = "==0.0.5"
 pymilvus = {extras = ["model"], version = "==2.4.4"}
 langchain = "==0.2.11"
 surrochat = {version = "==0.0.10", index = "surromind"}
+httpx = "*"
 
 [dev-packages]
 pre-commit = "*"

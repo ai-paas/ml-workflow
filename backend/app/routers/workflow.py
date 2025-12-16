@@ -10,6 +10,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import httpx
 import requests
 from config.db.connect import SessionDepends
 from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
@@ -1259,12 +1260,12 @@ async def delete_workflow(
     - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 현재 상태 "cleanup_in_progress"
     - **next_step** (str): 다음 단계 API 안내
-        - 형식: "Call /workflows/{workflow_id}/finalize-deletion?run_id={cleanup_run_id} to complete deletion"
+        - 형식: "Call /workflows/{workflow_id}/finalize-deletion to complete deletion"
 
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
     2. Kubeflow Pipeline: KServe InferenceService 삭제
-    3. finalize-deletion API: 완료 확인 및 DB 삭제
+    3. finalize-deletion API 호출: Kubernetes 리소스 직접 확인 및 DB 삭제
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
@@ -1302,9 +1303,7 @@ async def delete_workflow(
             "workflow_id": workflow_id,
             "cleanup_run_id": cleanup_run_id,
             "status": "cleanup_in_progress",
-            "next_step": (
-                f"Call /workflows/{workflow_id}/finalize-deletion?" f"run_id={cleanup_run_id} to complete deletion"
-            ),
+            "next_step": (f"Call /workflows/{workflow_id}/finalize-deletion to complete deletion"),
         }
 
     except HTTPException:
@@ -1321,7 +1320,6 @@ async def finalize_workflow_deletion(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -1333,13 +1331,8 @@ async def finalize_workflow_deletion(
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
 
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - delete API에서 반환된 cleanup_run_id 사용
-
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 삭제 상태
         - "completed": 삭제 완료
             - Kubernetes 리소스가 실제로 삭제되어 확인됨
@@ -1381,7 +1374,6 @@ async def finalize_workflow_deletion(
             # 이미 삭제된 경우
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "completed",
                 "deleted_from_db": True,
                 "message": "Workflow already deleted",
@@ -1463,7 +1455,6 @@ async def finalize_workflow_deletion(
                 # 리소스가 아직 존재함 - 진행중
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "in_progress",
                     "deleted_from_db": False,
                     "message": "Resources still exist in Kubernetes, waiting for cleanup",
@@ -1477,7 +1468,6 @@ async def finalize_workflow_deletion(
             if delete_success:
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "completed",
                     "deleted_from_db": True,
                     "message": "Workflow deleted successfully",
@@ -1485,7 +1475,6 @@ async def finalize_workflow_deletion(
             else:
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "completed",
                     "deleted_from_db": False,
                     "message": "Resources deleted but DB deletion failed",
@@ -1495,7 +1484,6 @@ async def finalize_workflow_deletion(
             logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "failed",
                 "deleted_from_db": False,
                 "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
@@ -1532,7 +1520,7 @@ async def execute_workflow(
     ## Request Body (WorkflowExecuteRequest)
     - **parameters** (Dict[str, Any], optional): 실행 파라미터
         - 커스텀 설정 값들을 전달할 수 있음
-        - 예: {"gpu_enabled": true, "replicas": 2}
+        - 예: {"gpus": 1, "replicas": 2}
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -2824,20 +2812,21 @@ async def _execute_llm_inference(
             "model": model_repo_id,
             "messages": messages,
             "stream": False,
-            "keep_alive": "8760h",  # 모델을 1년(8760시간) 동안 메모리에 유지
+            "keep_alive": "525600m",  # 모델을 1년(8760시간) 동안 메모리에 유지
         }
         headers = {"Content-Type": "application/json"}
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
-        # 요청 실행
+        # 요청 실행 (비동기 httpx 사용)
         # LLM 모델의 경우 모델 로딩 시간과 추론 시간을 고려하여 타임아웃을 300초(5분)로 설정
         # 큰 모델(Qwen3-30B 등)의 경우 로딩에 30초 이상 소요될 수 있음
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=300)
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=300.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
 
         response_time_ms = (time.time() - start_time) * 1000
-        result_data = response.json()
 
         # 결과 처리
         ollama_message = result_data.get("message", {})
@@ -2963,12 +2952,13 @@ async def _execute_odm_inference(
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
-        # 요청 실행
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
-        response.raise_for_status()
+        # 요청 실행 (비동기 httpx 사용)
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
 
         response_time_ms = (time.time() - start_time) * 1000
-        result_data = response.json()
 
         # KServe 응답 처리
         outputs = result_data.get("outputs", [])
@@ -3486,7 +3476,7 @@ async def cleanup_workflow_resources(
     - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 현재 상태 "cleanup_in_progress"
     - **next_step** (str): 다음 단계 API 안내
-        - 형식: "Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion"
+        - 형식: "Call /workflows/{workflow_id}/finalize-cleanup to check completion"
 
     ## Use Cases
     - 비용 절감을 위해 배포된 리소스 정리
@@ -3526,7 +3516,7 @@ async def cleanup_workflow_resources(
             "workflow_id": workflow_id,
             "cleanup_run_id": cleanup_run_id,
             "status": "cleanup_in_progress",
-            "next_step": f"Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion",
+            "next_step": f"Call /workflows/{workflow_id}/finalize-cleanup to check completion",
         }
 
     except Exception as e:
@@ -3541,7 +3531,6 @@ async def finalize_cleanup(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -3555,14 +3544,8 @@ async def finalize_cleanup(
     - **workflow_id** (str): 정리할 워크플로우 UUID
         - 워크플로우 목록 조회 API(/workflows)에서 확인 가능
 
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - cleanup API에서 반환된 cleanup_run_id 사용
-        - 형식: Kubeflow Pipeline 실행 UUID
-
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 정리 상태
         - "completed": 정리 완료
             - Kubernetes 리소스가 실제로 삭제되어 확인됨
@@ -3608,10 +3591,9 @@ async def finalize_cleanup(
 
     ## Usage Example
     1. cleanup API 호출하여 정리 파이프라인 시작
-    2. cleanup_run_id 받기
-    3. 이 API를 호출하여 완료 확인
-    4. status가 "completed"이고 workflow_updated가 true면 정리 완료
-    5. status가 "in_progress"면 잠시 후 재호출
+    2. 이 API를 호출하여 완료 확인
+    3. status가 "completed"이고 workflow_updated가 true면 정리 완료
+    4. status가 "in_progress"면 잠시 후 재호출
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -3702,7 +3684,6 @@ async def finalize_cleanup(
                 # 리소스가 아직 존재함 - 진행중
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "in_progress",
                     "workflow_updated": False,
                     "message": "Resources still exist in Kubernetes, waiting for cleanup",
@@ -3728,7 +3709,6 @@ async def finalize_cleanup(
 
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "completed",
                 "workflow_updated": workflow_updated,
                 "message": "Cleanup completed and workflow state updated",
@@ -3738,7 +3718,6 @@ async def finalize_cleanup(
             logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "failed",
                 "workflow_updated": False,
                 "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
