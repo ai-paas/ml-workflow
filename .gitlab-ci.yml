@@ -5,7 +5,7 @@ stages:
 lint_black:
   stage: lint
   script:
-    - pip install black
+    - pip install black==25.9.0
     - black --check --line-length 120 .
   only:
     - merge_requests
@@ -15,7 +15,7 @@ lint_black:
 lint_isort:
   stage: lint
   script:
-    - pip install isort
+    - pip install isort==5.12.0
     - isort --check --profile black --line-length 120 .  # black 프로필 추가
   only:
     - merge_requests
@@ -25,7 +25,7 @@ lint_isort:
 lint_flake8:
   stage: lint
   script:
-    - pip install flake8
+    - pip install flake8==6.0.0
     - flake8 --max-line-length 120 --ignore=E203,W503,W605,E712,E266,F401,E402,F821,E711,F403 .
   only:
     - merge_requests
