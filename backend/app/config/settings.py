@@ -1,15 +1,29 @@
-from enum import Enum
+import logging
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-current_directory = Path(__file__).parent
-dotenv_path = current_directory / ".env"
-load_dotenv(dotenv_path=dotenv_path)
+logger = logging.getLogger(__name__)
+
+_config_dir = Path(__file__).resolve().parent
+_base_env = _config_dir / ".env"
+load_dotenv(_base_env)
+
+_profile = os.environ.get("ENV", "").strip()
+if _profile:
+    _profile_path = _config_dir / f".env.{_profile}"
+    if _profile_path.is_file():
+        load_dotenv(_profile_path, override=True)
+    else:
+        logger.warning(
+            "ENV=%s 이지만 프로파일 파일이 없습니다: %s — .env 만 사용합니다.",
+            _profile,
+            _profile_path,
+        )
 
 
 class Settings(BaseSettings):
@@ -19,9 +33,9 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        case_sensitive=True,  # 대소문자 구분 허용
-        env_file=".env",  # settings env file name
-        env_file_encoding="utf-8",  # setting env file encoding
+        case_sensitive=True,
+        env_file=None,
+        env_file_encoding="utf-8",
     )
 
     # Kubeflow 설정

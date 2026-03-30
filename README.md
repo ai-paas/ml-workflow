@@ -19,16 +19,39 @@ https://surromind.atlassian.net/jira/software/c/projects/PAAS/boards/600/backlog
 
 # DB Migration
 
-alembic.ini 파일이 존재하는 경로에서 아래 명령어 실행
+리포지토리 루트에서 Makefile을 사용하는 것을 권장합니다 (`backend/app`에서 `PYTHONPATH=.` 규약).
+
 ```shell
-alembic upgrade head
+make alembic-upgrade-head
+make alembic-upgrade-head ENV=staging
 ```
 
-# DB Data Initialization
-root directorty에서 migration할 버전을 확인하고 마이그레이션
-`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v1`
-`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v v2`
-`PYTHONPATH=backend/app python -m backend.app.config.db.data_initializer -v all`
+저수준 실행: `backend/app` 디렉터리에서 `PYTHONPATH=. alembic upgrade head` (또는 `alembic.ini`가 있는 경로에서 동일).
+
+자동 생성 리비전(접속 가능한 DB 필요):
+
+```shell
+make alembic-autogen-file msg="변경 요약"
+```
+
+# DB Data Initialization (시드)
+
+참조 데이터는 `make db-seed`로 동기화합니다. 모드는 `MODE=ensure`(기본), `upsert`, `reset`입니다.
+
+```shell
+make db-seed
+make db-seed MODE=upsert
+make db-seed MODE=reset CONFIRM=1
+make db-seed ENV=staging
+```
+
+저수준 실행:
+
+```shell
+cd backend/app && PYTHONPATH=. python -m config.db.data_initializer --mode ensure
+```
+
+프로파일 파일은 `config/.env` 후 `ENV`가 있으면 `config/.env.{ENV}` 순으로 로드됩니다. 자세한 규약은 `docs/db-operations/DB_시드_Alembic_Makefile_설계.md`를 참고하세요.
 
 ## 🚀 개발환경 설정 (backend server)
 - 대상 디렉토리 : backend

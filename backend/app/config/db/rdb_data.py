@@ -16,82 +16,25 @@ USER_DATA = [
 ]
 
 MODEL_FORMAT_DATA = [
-    {
-        "name": ModelFormatEnum.TRANSFORMERS.value,
-        "description": "Huggingface transformers",
-    }
-]
-
-MODEL_FORMAT_DATA_2 = [
-    {
-        "name": ModelFormatEnum.PYTORCH.value,
-        "description": "Pytorch",
-    },
-    {
-        "name": ModelFormatEnum.KERAS.value,
-        "description": "Keras",
-    },
-    {
-        "name": ModelFormatEnum.ONNX.value,
-        "description": "ONNX",
-    },
-]
-
-MODEL_FORMAT_DATA_3 = [
-    {
-        "name": ModelFormatEnum.TENSORFLOW.value,
-        "description": "TensorFlow",
-    },
-    {
-        "name": ModelFormatEnum.YOLOX.value,
-        "description": "YOLOX Object Detection",
-    },
-]
-
-MODEL_FORMAT_DATA_4 = [
-    {
-        "name": ModelFormatEnum.GGUF.value,
-        "description": "GGUF format for Ollama",
-    },
+    {"name": ModelFormatEnum.TRANSFORMERS.value, "description": "Huggingface transformers"},
+    {"name": ModelFormatEnum.PYTORCH.value, "description": "Pytorch"},
+    {"name": ModelFormatEnum.KERAS.value, "description": "Keras"},
+    {"name": ModelFormatEnum.ONNX.value, "description": "ONNX"},
+    {"name": ModelFormatEnum.TENSORFLOW.value, "description": "TensorFlow"},
+    {"name": ModelFormatEnum.YOLOX.value, "description": "YOLOX Object Detection"},
+    {"name": ModelFormatEnum.GGUF.value, "description": "GGUF format for Ollama"},
 ]
 
 MODEL_PROVIDER_DATA = [
-    {
-        "name": ModelProviderEnum.HUGGINGFACE.value,
-        "description": "huggingface",
-    },
-    {
-        "name": ModelProviderEnum.CUSTOM.value,
-        "description": "user uploaded",
-    },
-]
-
-MODEL_PROVIDER_DATA_2 = [
-    {
-        "name": ModelProviderEnum.OLLAMA.value,
-        "description": "Ollama",
-    },
+    {"name": ModelProviderEnum.HUGGINGFACE.value, "description": "huggingface"},
+    {"name": ModelProviderEnum.CUSTOM.value, "description": "user uploaded"},
+    {"name": ModelProviderEnum.OLLAMA.value, "description": "Ollama"},
 ]
 
 MODEL_TYPE_DATA = [
-    {
-        "name": ModelTypeEnum.ODM.value,
-        "description": "Object Detection Model",
-    }
-]
-
-MODEL_TYPE_DATA_2 = [
-    {
-        "name": ModelTypeEnum.LLM.value,
-        "description": "Large Language Model",
-    },
-]
-
-MODEL_TYPE_DATA_3 = [
-    {
-        "name": ModelTypeEnum.EMBEDDING.value,
-        "description": "Embedding Model",
-    },
+    {"name": ModelTypeEnum.ODM.value, "description": "Object Detection Model"},
+    {"name": ModelTypeEnum.LLM.value, "description": "Large Language Model"},
+    {"name": ModelTypeEnum.EMBEDDING.value, "description": "Embedding Model"},
 ]
 
 HYPERPARAMETER_TYPE_DATA = [

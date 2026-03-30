@@ -1,12 +1,32 @@
+"""DB 참조 데이터 시드. 실행 전 `cd backend/app` + `PYTHONPATH=.` 규약을 따른다."""
+
+from __future__ import annotations
+
 import argparse
+import os
+import sys
 import traceback
+from typing import Any, Literal
+
+
+# settings / rdb_data import 전에 프로파일 적용 (§9.1)
+def _apply_env_from_argv() -> None:
+    i = 0
+    while i < len(sys.argv):
+        if sys.argv[i] == "--env" and i + 1 < len(sys.argv):
+            os.environ["ENV"] = sys.argv[i + 1].strip()
+            break
+        i += 1
+
+
+_apply_env_from_argv()
 
 from config.settings import get_settings
 from db.models.experiment import HyperparameterType
 from db.models.knowledge_base import ChunkType, Language, SearchMethod
 from db.models.model import ModelFormat, ModelProvider, ModelType
 from db.models.user import UserModel
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, delete, insert, select, update
 from sqlalchemy.orm import sessionmaker
 
 from .rdb_data import (
@@ -14,242 +34,129 @@ from .rdb_data import (
     HYPERPARAMETER_TYPE_DATA,
     LANGUAGE_DATA,
     MODEL_FORMAT_DATA,
-    MODEL_FORMAT_DATA_2,
-    MODEL_FORMAT_DATA_3,
-    MODEL_FORMAT_DATA_4,
     MODEL_PROVIDER_DATA,
-    MODEL_PROVIDER_DATA_2,
     MODEL_TYPE_DATA,
-    MODEL_TYPE_DATA_2,
-    MODEL_TYPE_DATA_3,
     SEARCH_METHOD_DATA,
     USER_DATA,
 )
 
+ResetKind = Literal["user_usernames", "full"]
+
 settings = get_settings()
 
 
-def initialize_user(db) -> None:
-    """
-    사용자 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(UserModel.__table__).values(USER_DATA))
-    print(f"UserModel 테이블에 {len(USER_DATA)}개 데이터 삽입 완료")
+class _SeedSpec:
+    __slots__ = ("model", "rows", "natural_key", "reset_kind")
+
+    def __init__(
+        self,
+        model: Any,
+        rows: list[dict[str, Any]],
+        natural_key: str,
+        reset_kind: ResetKind = "full",
+    ) -> None:
+        self.model = model
+        self.rows = rows
+        self.natural_key = natural_key
+        self.reset_kind = reset_kind
 
 
-def initialize_model_format(db) -> None:
-    """
-    모델 포맷 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelFormat.__table__).values(MODEL_FORMAT_DATA))
-    print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA)}개 데이터 삽입 완료")
+# §5.3 실행 순서
+SEED_SPECS: tuple[_SeedSpec, ...] = (
+    _SeedSpec(UserModel, USER_DATA, "username", "user_usernames"),
+    _SeedSpec(ModelFormat, MODEL_FORMAT_DATA, "name"),
+    _SeedSpec(ModelProvider, MODEL_PROVIDER_DATA, "name"),
+    _SeedSpec(ModelType, MODEL_TYPE_DATA, "name"),
+    _SeedSpec(HyperparameterType, HYPERPARAMETER_TYPE_DATA, "param_name"),
+    _SeedSpec(ChunkType, CHUNK_TYPE_DATA, "name"),
+    _SeedSpec(Language, LANGUAGE_DATA, "name"),
+    _SeedSpec(SearchMethod, SEARCH_METHOD_DATA, "name"),
+)
 
 
-def initialize_model_provider(db) -> None:
-    """
-    모델 제공자 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelProvider.__table__).values(MODEL_PROVIDER_DATA))
-    print(f"ModelProvider 테이블에 {len(MODEL_PROVIDER_DATA)}개 데이터 삽입 완료")
+def _ensure_spec(session, spec: _SeedSpec) -> int:
+    added = 0
+    nk = spec.natural_key
+    for row in spec.rows:
+        key_val = row[nk]
+        exists = session.scalar(select(spec.model.id).where(getattr(spec.model, nk) == key_val))
+        if exists is None:
+            session.execute(insert(spec.model.__table__).values(**row))
+            added += 1
+    print(f"{spec.model.__tablename__}: ensure — {added}행 삽입 (자연키 {nk})")
+    return added
 
 
-def initialize_model_type(db) -> None:
-    """
-    모델 타입 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelType.__table__).values(MODEL_TYPE_DATA))
-    print(f"ModelType 테이블에 {len(MODEL_TYPE_DATA)}개 데이터 삽입 완료")
+def _upsert_spec(session, spec: _SeedSpec) -> None:
+    nk = spec.natural_key
+    for row in spec.rows:
+        key_val = row[nk]
+        pk = session.scalar(select(spec.model.id).where(getattr(spec.model, nk) == key_val))
+        payload = {k: v for k, v in row.items() if k != nk}
+        if pk is None:
+            session.execute(insert(spec.model.__table__).values(**row))
+        elif payload:
+            session.execute(update(spec.model).where(spec.model.id == pk).values(**payload))
+    print(f"{spec.model.__tablename__}: upsert 완료")
 
 
-def add_model_format_2(db) -> None:
-    """
-    모델 포맷 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelFormat.__table__).values(MODEL_FORMAT_DATA_2))
-    print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA_2)}개 데이터 삽입 완료")
+def _reset_spec(session, spec: _SeedSpec) -> None:
+    if spec.reset_kind == "user_usernames":
+        names = [r[spec.natural_key] for r in spec.rows]
+        session.execute(delete(spec.model).where(getattr(spec.model, spec.natural_key).in_(names)))
+    else:
+        session.execute(delete(spec.model))
+    if spec.rows:
+        session.execute(insert(spec.model.__table__), spec.rows)
+    print(f"{spec.model.__tablename__}: reset — 시드 {len(spec.rows)}행 반영")
 
 
-def add_model_format_3(db) -> None:
-    """
-    TensorFlow와 YOLOX 모델 포맷 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelFormat.__table__).values(MODEL_FORMAT_DATA_3))
-    print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA_3)}개 데이터 삽입 완료")
-
-
-def add_model_format_4(db) -> None:
-    """
-    GGUF 모델 포맷 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelFormat.__table__).values(MODEL_FORMAT_DATA_4))
-    print(f"ModelFormat 테이블에 {len(MODEL_FORMAT_DATA_4)}개 데이터 삽입 완료")
-
-
-def add_model_provider_2(db) -> None:
-    """
-    Ollama 모델 제공자 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelProvider.__table__).values(MODEL_PROVIDER_DATA_2))
-    print(f"ModelProvider 테이블에 {len(MODEL_PROVIDER_DATA_2)}개 데이터 삽입 완료")
-
-
-def add_model_type_2(db) -> None:
-    """
-    LLM 모델 타입 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelType.__table__).values(MODEL_TYPE_DATA_2))
-    print(f"ModelType 테이블에 {len(MODEL_TYPE_DATA_2)}개 데이터 삽입 완료")
-
-
-def add_model_type_3(db) -> None:
-    """
-    Embedding 모델 타입 데이터를 추가합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ModelType.__table__).values(MODEL_TYPE_DATA_3))
-    print(f"ModelType 테이블에 {len(MODEL_TYPE_DATA_3)}개 데이터 삽입 완료")
-
-
-def initialize_hyperparameter_type(db) -> None:
-    """
-    하이퍼파라미터 타입 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(HyperparameterType.__table__).values(HYPERPARAMETER_TYPE_DATA))
-    print(f"HyperparameterType 테이블에 {len(HYPERPARAMETER_TYPE_DATA)}개 데이터 삽입 완료")
-
-
-def initialize_chunk_type(db) -> None:
-    """
-    청크 타입 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(ChunkType.__table__).values(CHUNK_TYPE_DATA))
-    print(f"ChunkType 테이블에 {len(CHUNK_TYPE_DATA)}개 데이터 삽입 완료")
-
-
-def initialize_language(db) -> None:
-    """
-    언어 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(Language.__table__).values(LANGUAGE_DATA))
-    print(f"Language 테이블에 {len(LANGUAGE_DATA)}개 데이터 삽입 완료")
-
-
-def initialize_search_method(db) -> None:
-    """
-    검색 방법 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    db.execute(insert(SearchMethod.__table__).values(SEARCH_METHOD_DATA))
-    print(f"SearchMethod 테이블에 {len(SEARCH_METHOD_DATA)}개 데이터 삽입 완료")
-
-
-def initialize_v1(db) -> None:
-    """
-    v1 버전의 모든 기본 데이터를 초기화합니다.
-    Args:
-        db: DB 세션
-    """
-    initialize_user(db)
-    initialize_model_format(db)
-    initialize_model_provider(db)
-    initialize_model_type(db)
+def apply_mode(session, mode: str) -> None:
+    if mode == "ensure":
+        for spec in SEED_SPECS:
+            _ensure_spec(session, spec)
+    elif mode == "upsert":
+        for spec in SEED_SPECS:
+            _upsert_spec(session, spec)
+    elif mode == "reset":
+        for spec in SEED_SPECS:
+            _reset_spec(session, spec)
+    else:
+        raise ValueError(f"지원하지 않는 mode: {mode}")
 
 
 def create_db_session():
-    """데이터베이스 세션을 생성합니다."""
     engine = create_engine(settings.get_db_uri)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     return SessionLocal()
 
 
-def main():
-    """데이터 초기화를 실행합니다."""
-    parser = argparse.ArgumentParser(description="데이터베이스 초기화 스크립트")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="데이터베이스 참조 데이터 시드")
     parser.add_argument(
-        "--version",
-        "-v",
-        choices=["v1", "v2", "v3", "v4", "v5", "v6", "v7", "all"],
-        default="all",
-        help="초기화할 데이터 버전을 선택합니다 (v1, v2, v3, v4, v5, v6, v7, all)",
+        "--mode",
+        choices=("ensure", "upsert", "reset"),
+        default="ensure",
+        help="ensure: 없으면 삽입 | upsert: 없으면 삽입, 있으면 시드 컬럼만 갱신 | reset: 시드 정책에 따라 삭제 후 삽입",
     )
-
+    parser.add_argument(
+        "--env",
+        metavar="PROFILE",
+        help="모듈 import 시 sys.argv에서 읽어 ENV로 설정. 예: staging → config/.env.staging",
+    )
     args = parser.parse_args()
 
     db = create_db_session()
     try:
-        print("데이터 초기화를 시작합니다...")
-
-        if args.version in ["v1", "all"]:
-            print("V1 데이터 초기화 중...")
-            initialize_v1(db)
-            print("V1 데이터 초기화 완료")
-
-        if args.version in ["v2", "all"]:
-            print("V2 데이터 초기화 중...")
-            add_model_format_2(db)
-            print("V2 데이터 초기화 완료")
-
-        if args.version in ["v3", "all"]:
-            print("V3 데이터 초기화 중...")
-            initialize_hyperparameter_type(db)
-            print("V3 데이터 초기화 완료")
-
-        if args.version in ["v4", "all"]:
-            print("V4 데이터 초기화 중...")
-            add_model_format_3(db)
-            print("V4 데이터 초기화 완료")
-
-        if args.version in ["v5", "all"]:
-            print("V5 데이터 초기화 중...")
-            add_model_format_4(db)
-            add_model_provider_2(db)
-            add_model_type_2(db)
-            print("V5 데이터 초기화 완료")
-
-        if args.version in ["v6", "all"]:
-            print("V6 데이터 초기화 중...")
-            add_model_type_3(db)
-            print("V6 데이터 초기화 완료")
-
-        if args.version in ["v7", "all"]:
-            print("V7 데이터 초기화 중...")
-            initialize_chunk_type(db)
-            initialize_language(db)
-            initialize_search_method(db)
-            print("V7 데이터 초기화 완료")
-
+        print(f"시드 시작 (mode={args.mode})…")
+        apply_mode(db, args.mode)
         db.commit()
-        print("데이터 초기화가 완료되었습니다.")
+        print("시드 완료.")
     except Exception as e:
         traceback.print_exc()
-        print(f"데이터 초기화 중 오류가 발생했습니다: {str(e)}")
+        print(f"시드 실패: {e}")
         db.rollback()
+        raise SystemExit(1) from e
     finally:
         db.close()
 
