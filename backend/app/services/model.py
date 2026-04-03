@@ -7,12 +7,13 @@ import uuid
 from enum import Enum
 from typing import Any, Optional
 
-from config.db.enums import ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
-from db.models.model import Model
-from fastapi import UploadFile
+from db.models.model import Model, ModelTaskType
+from fastapi import HTTPException, UploadFile
+from fastapi import status as http_status
 from huggingface_hub import snapshot_download
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -91,6 +92,29 @@ def is_yolox_local_model(model_name: str) -> bool:
     return "yolox" in model_name.lower()
 
 
+OPT_ELIGIBLE_REPO_IDS: set[str] = {
+    "facebook/detr-resnet-50",
+    "facebook/detr-resnet-101",
+}
+
+
+def is_optimization_eligible(repo_id: str | None) -> bool:
+    """repo_id를 기준으로 최적화/경량화 가능 여부를 판별한다."""
+    if not repo_id:
+        return False
+    return repo_id in OPT_ELIGIBLE_REPO_IDS
+
+
+def determine_model_visibility(
+    parent_model_id: int | None,
+    opt_enable_yn: bool,
+) -> str:
+    """parent_model_id와 opt_enable_yn을 기반으로 CATALOG / CUSTOM을 결정한다."""
+    if parent_model_id is not None or opt_enable_yn:
+        return ModelVisibility.CUSTOM.value
+    return ModelVisibility.CATALOG.value
+
+
 class ModelService:
     @staticmethod
     def get(db: Session, pk: int) -> Optional[Model]:
@@ -112,6 +136,7 @@ class ModelService:
         filters: dict[str, Any],
         skip: int = 0,
         limit: int = 100,
+        visibility: str | None = None,
     ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모델 목록을 조회합니다.
@@ -119,36 +144,37 @@ class ModelService:
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             skip: 건너뛸 레코드 수
             limit: 반환할 최대 레코드 수
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
-        # 페이지네이션 적용
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         paginated_models = models[skip : skip + limit]
         return [self.get(db, model.id) for model in paginated_models]
 
-    def filter_all(self, db: Session, filters: dict[str, Any], max_limit: int = 10000) -> list[ModelReadSchema]:
+    def filter_all(
+        self,
+        db: Session,
+        filters: dict[str, Any],
+        max_limit: int = 10000,
+        visibility: str | None = None,
+    ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모든 모델 목록을 조회합니다 (페이지네이션 없음).
 
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             max_limit: 최대 반환 레코드 수 (기본값: 10000)
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         limited_models = models[:max_limit]
         return [self.get(db, model.id) for model in limited_models]
 
@@ -363,6 +389,198 @@ class ModelService:
             # 예상치 못한 에러
             db.rollback()
             raise RuntimeError(f"모델 삭제 중 오류 발생: {str(e)}")
+
+    @staticmethod
+    def register_model(
+        db: Session,
+        *,
+        name: str,
+        provider_id: int,
+        type_id: int,
+        format_id: int,
+        description: str | None = None,
+        repo_id: str | None = None,
+        parent_model_id: int | None = None,
+        task: str | None = None,
+        parameter: str | None = None,
+        sample_code: str | None = None,
+        model_registry_schema: ModelRegistryRequestSchema | None = None,
+        file: UploadFile | None = None,
+    ):
+        """POST /api/v1/models 와 POST /api/v1/models/auto-generate 공통 등록 로직"""
+        if task is not None:
+            try:
+                task_enum = ModelTaskType(task)
+                task = task_enum.value
+            except ValueError:
+                valid_tasks = [e.value for e in ModelTaskType]
+                raise HTTPException(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
+                )
+
+        is_yolox = False
+        if repo_id:
+            is_yolox = is_yolox_remote_model(repo_id)
+        if not is_yolox:
+            is_yolox = is_yolox_local_model(name)
+
+        learning_enable_yn = is_yolox
+        opt_enable_yn = is_optimization_eligible(repo_id)
+
+        model = ModelBaseSchema(
+            name=name,
+            description=description,
+            repo_id=repo_id,
+            provider_id=provider_id,
+            type_id=type_id,
+            format_id=format_id,
+            parent_model_id=parent_model_id,
+            learning_enable_yn=learning_enable_yn,
+            opt_enable_yn=opt_enable_yn,
+            version=1,
+            subversion=1,
+            task=task,
+            parameter=parameter,
+            sample_code=sample_code,
+        )
+
+        custom_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.CUSTOM.value)
+        huggingface_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.HUGGINGFACE.value)
+        ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
+        gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
+        embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
+
+        try:
+            if (
+                ollama_model_provider
+                and gguf_format
+                and provider_id == ollama_model_provider.id
+                and format_id == gguf_format.id
+            ):
+                if not repo_id:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="repo_id is required for Ollama models",
+                    )
+
+                model_obj = model_repository.create(db, obj_in=model)
+                model_id = model_obj.id
+
+                pvc_name = None
+                try:
+                    sanitized_model_name = name.replace("/", "-")
+                    pvc_name = OllamaModelService.download_ollama_model_to_pvc(
+                        db=db,
+                        model_id=model_id,
+                        model_name=sanitized_model_name,
+                        repo_id=repo_id,
+                    )
+                    logger.info(f"Started Ollama model download pipeline for model_id: {model_id}, PVC: {pvc_name}")
+                except Exception as download_error:
+                    logger.error(f"Failed to start Ollama model download pipeline: {download_error}")
+
+                model_registry_repository.create(
+                    db,
+                    obj_in=ModelRegistryBaseSchema(
+                        artifact_path="",
+                        uri=repo_id,
+                        reference_model_id=model_id,
+                        run_id=None,
+                        pvc=pvc_name,
+                    ),
+                )
+                db.commit()
+
+                if embedding_type and type_id == embedding_type.id:
+                    logger.info(f"Auto-deploying Ollama embedding model: {model_id} (repo_id: {repo_id})")
+                    try:
+                        sanitized_model_name = name.replace("/", "-")
+                        ModelBaseDeploymentService.deploy_ollama_embedding_model(
+                            db=db,
+                            model_id=model_id,
+                            model_name=sanitized_model_name,
+                            repo_id=repo_id,
+                            gpu_enabled=False,
+                        )
+                        logger.info(f"Successfully initiated deployment for embedding model: {model_id}")
+                    except Exception as deploy_error:
+                        logger.error(f"Failed to deploy embedding model {model_id}: {deploy_error}")
+
+                return model_repository.get(db, model_id)
+
+            elif huggingface_model_provider and provider_id == huggingface_model_provider.id:
+                if not repo_id:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="repo_id is required for HuggingFace models",
+                    )
+                return HuggingFaceModelService().create(db, model_schema=model)
+
+            elif custom_model_provider and provider_id == custom_model_provider.id:
+                return CustomModelService().create(
+                    db, model_schema=model, model_registry_schema=model_registry_schema, file=file
+                )
+
+            else:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported provider_id: {provider_id}",
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise e
+
+    @staticmethod
+    def resolve_predefined_model_ids(db: Session, config: dict[str, str]) -> dict[str, int]:
+        """사전 정의 모델 config에서 provider_name, type_name, format_name을 DB ID로 변환"""
+        provider = ModelProviderService.get_by_name(db, config["provider_name"])
+        if not provider:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 제공자 '{config['provider_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        model_type = ModelTypeService.get_by_name(db, config["type_name"])
+        if not model_type:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 타입 '{config['type_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        model_format = ModelFormatService.get_by_name(db, config["format_name"])
+        if not model_format:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 포맷 '{config['format_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        return {
+            "provider_id": provider.id,
+            "type_id": model_type.id,
+            "format_id": model_format.id,
+        }
+
+    @staticmethod
+    def download_weight_file(url: str, filename: str) -> UploadFile:
+        """URL에서 모델 가중치 파일을 다운로드하여 UploadFile로 반환"""
+        import io
+        import urllib.request
+
+        try:
+            logger.info(f"Downloading weight file from {url}")
+            response = urllib.request.urlopen(url, timeout=600)
+            file_obj = io.BytesIO(response.read())
+            logger.info(f"Downloaded weight file: {filename} ({file_obj.getbuffer().nbytes} bytes)")
+            return UploadFile(filename=filename, file=file_obj)
+        except Exception as e:
+            raise HTTPException(
+                status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"모델 가중치 파일 다운로드 실패 ({url}): {str(e)}",
+            )
 
 
 class HuggingFaceModelService:
@@ -1108,3 +1326,81 @@ class OllamaModelService:
             namespace=settings.KUBEFLOW_NAMESPACE,
             storage_size=storage_size,
         )
+
+
+PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
+    "hustvl/yolos-tiny": {
+        "name": "hustvl/yolos-tiny",
+        "description": "hustvl/yolos-tiny",
+        "repo_id": "hustvl/yolos-tiny",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+    },
+    "hustvl/yolos-small": {
+        "name": "hustvl/yolos-small",
+        "description": "hustvl/yolos-small",
+        "repo_id": "hustvl/yolos-small",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+    },
+    "facebook/detr-resnet-50": {
+        "name": "facebook/detr-resnet-50",
+        "description": "facebook/detr-resnet-50",
+        "repo_id": "facebook/detr-resnet-50",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+    },
+    "facebook/detr-resnet-101": {
+        "name": "facebook/detr-resnet-101",
+        "description": "facebook/detr-resnet-101",
+        "repo_id": "facebook/detr-resnet-101",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+    },
+    "ahmgam/medllama3-v20:latest": {
+        "name": "ahmgam-medllama3-v20-latest",
+        "description": "ahmgam-medllama3-v20-latest",
+        "repo_id": "ahmgam/medllama3-v20:latest",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+    },
+    "facebook/esm2_t33_650M_UR50D": {
+        "name": "facebook/esm2_t33_650M_UR50D",
+        "description": "facebook/esm2_t33_650M_UR50D",
+        "repo_id": "facebook/esm2_t33_650M_UR50D",
+        "task": "feature-extraction",
+        "provider_name": "huggingface",
+        "type_name": "pLM",
+        "format_name": "transformers",
+    },
+    "yolox_s": {
+        "name": "yolox_s",
+        "description": "yolox_s",
+        "task": "object-detection",
+        "provider_name": "custom",
+        "type_name": "ODM",
+        "format_name": "yolox",
+        "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth",
+        "weight_filename": "yolox_s.pth",
+    },
+    "yolox_m": {
+        "name": "yolox_m",
+        "description": "yolox_m",
+        "task": "object-detection",
+        "provider_name": "custom",
+        "type_name": "ODM",
+        "format_name": "yolox",
+        "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth",
+        "weight_filename": "yolox_m.pth",
+    },
+}

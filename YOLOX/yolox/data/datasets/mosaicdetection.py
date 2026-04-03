@@ -50,7 +50,7 @@ class MosaicDetection(Dataset):
         enable_mixup=True,
         mosaic_prob=1.0,
         mixup_prob=1.0,
-        *args
+        *args,
     ):
         """
 

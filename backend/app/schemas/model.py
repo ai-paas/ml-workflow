@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from enum import Enum as PyEnum
 from typing import Optional
 
 from db.models.model import ModelTaskType
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 
 
@@ -16,11 +17,12 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     format_id: int
     parent_model_id: int | None = None
     learning_enable_yn: bool
+    opt_enable_yn: bool = False
     version: int
     subversion: int
     task: Optional[str] = Field(
         None,
-        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection' 중 하나",
+        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection', 'feature-extraction' 중 하나",
     )
     parameter: str | None = None
     sample_code: str | None = None
@@ -34,6 +36,30 @@ class ModelBaseSchema(TimeStampSchemaMixin):
         if v not in valid_values:
             raise ValueError(f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_values)}")
         return v
+
+
+class PredefinedModelKey(str, PyEnum):
+    """사전 정의된 모델 키"""
+
+    YOLOS_TINY = "hustvl/yolos-tiny"
+    YOLOS_SMALL = "hustvl/yolos-small"
+    DETR_RESNET_50 = "facebook/detr-resnet-50"
+    DETR_RESNET_101 = "facebook/detr-resnet-101"
+    MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
+    ESM2 = "facebook/esm2_t33_650M_UR50D"
+    YOLOX_S = "yolox_s"
+    YOLOX_M = "yolox_m"
+
+
+class AutoGenerateModelRequest(BaseModel):
+    model_key: PredefinedModelKey = Field(
+        ...,
+        description="등록할 사전 정의 모델 키. 사용 가능한 값: "
+        "'hustvl/yolos-tiny', 'hustvl/yolos-small', "
+        "'facebook/detr-resnet-50', 'facebook/detr-resnet-101', "
+        "'ahmgam/medllama3-v20:latest', 'facebook/esm2_t33_650M_UR50D', "
+        "'yolox_s', 'yolox_m'",
+    )
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):
@@ -119,6 +145,17 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
     task: Optional[str] = None
     parameter: str | None = None
     sample_code: str | None = None
+    learning_enable_yn: bool
+    opt_enable_yn: bool
+    visibility: str = ""
+
+    @model_validator(mode="after")
+    def compute_visibility(self) -> "ModelBriefReadSchema":
+        if self.parent_model_id is not None or self.opt_enable_yn:
+            self.visibility = "CUSTOM"
+        else:
+            self.visibility = "CATALOG"
+        return self
 
     class Config:
         from_attributes = True
@@ -140,6 +177,18 @@ class ModelReadSchema(TimeStampSchemaMixin):
 
     parent_model: Optional[ModelReadParentSchema]
     child_models: Optional[list[ModelReadChildSchema]]
+
+    learning_enable_yn: bool
+    opt_enable_yn: bool
+    visibility: str = ""
+
+    @model_validator(mode="after")
+    def compute_visibility(self) -> "ModelReadSchema":
+        if self.parent_model_id is not None or self.opt_enable_yn:
+            self.visibility = "CUSTOM"
+        else:
+            self.visibility = "CATALOG"
+        return self
 
     class Config:
         from_attributes = True

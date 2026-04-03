@@ -12,6 +12,7 @@ class ModelTaskType(PyEnum):
     EMBEDDING = "embedding"
     TEXT_GENERATION = "text-generation"
     OBJECT_DETECTION = "object-detection"
+    FEATURE_EXTRACTION = "feature-extraction"
 
 
 class Model(BaseModel, TimestampMixin):
@@ -26,6 +27,7 @@ class Model(BaseModel, TimestampMixin):
     format_id: Mapped[int] = mapped_column(ForeignKey("model_format.id"))
     parent_model_id: Mapped[int] = mapped_column(ForeignKey("model.id"), nullable=True)
     learning_enable_yn: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    opt_enable_yn: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     train_image_registry_id: Mapped[int] = mapped_column(ForeignKey("train_image_registry.id"), nullable=True)
     inference_image_registry_id: Mapped[int] = mapped_column(ForeignKey("inference_image_registry.id"), nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)

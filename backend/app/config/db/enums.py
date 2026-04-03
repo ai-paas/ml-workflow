@@ -35,6 +35,17 @@ class ModelTypeEnum(str, Enum):
     ODM = "ODM"
     LLM = "LLM"
     EMBEDDING = "Embedding"
+    PLM = "pLM"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class ModelVisibility(str, Enum):
+    """모델 가시성 구분 Enum"""
+
+    CATALOG = "CATALOG"
+    CUSTOM = "CUSTOM"
 
     def __str__(self) -> str:
         return self.value
