@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from db.models.model import ModelTaskType
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from schemas.base import TimeStampCreateUpdateSchema, TimeStampSchemaMixin
 
 
@@ -16,6 +16,7 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     format_id: int
     parent_model_id: int | None = None
     learning_enable_yn: bool
+    opt_enable_yn: bool = False
     version: int
     subversion: int
     task: Optional[str] = Field(
@@ -119,6 +120,17 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
     task: Optional[str] = None
     parameter: str | None = None
     sample_code: str | None = None
+    learning_enable_yn: bool
+    opt_enable_yn: bool
+    visibility: str = ""
+
+    @model_validator(mode="after")
+    def compute_visibility(self) -> "ModelBriefReadSchema":
+        if self.parent_model_id is not None or self.opt_enable_yn:
+            self.visibility = "CUSTOM"
+        else:
+            self.visibility = "CATALOG"
+        return self
 
     class Config:
         from_attributes = True
@@ -140,6 +152,18 @@ class ModelReadSchema(TimeStampSchemaMixin):
 
     parent_model: Optional[ModelReadParentSchema]
     child_models: Optional[list[ModelReadChildSchema]]
+
+    learning_enable_yn: bool
+    opt_enable_yn: bool
+    visibility: str = ""
+
+    @model_validator(mode="after")
+    def compute_visibility(self) -> "ModelReadSchema":
+        if self.parent_model_id is not None or self.opt_enable_yn:
+            self.visibility = "CUSTOM"
+        else:
+            self.visibility = "CATALOG"
+        return self
 
     class Config:
         from_attributes = True

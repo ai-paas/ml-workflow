@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
-from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
 from config.settings import get_settings
 from db.models.model import ModelTaskType
 from db.models.model_base_deployment import BaseDeploymentStatus
@@ -28,6 +28,7 @@ from services.model import (
     ModelService,
     ModelTypeService,
     OllamaModelService,
+    is_optimization_eligible,
     is_yolox_local_model,
     is_yolox_remote_model,
 )
@@ -195,6 +196,8 @@ def create_model(
     # YOLOX 모델인 경우에만 learning_enable_yn을 true로 설정
     learning_enable_yn = is_yolox
 
+    opt_enable_yn = is_optimization_eligible(repo_id)
+
     model = ModelBaseSchema(
         name=name,
         description=description,
@@ -204,6 +207,7 @@ def create_model(
         format_id=format_id,
         parent_model_id=parent_model_id,
         learning_enable_yn=learning_enable_yn,
+        opt_enable_yn=opt_enable_yn,
         version=1,
         subversion=1,
         task=task,
@@ -524,14 +528,17 @@ def read_models(
         default=None,
         description="모델 포맷 ID로 필터링",
     ),
+    visibility: Optional[str] = Query(
+        default=None,
+        description="목록 구분 필터: 'catalog' 또는 'custom'",
+    ),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     모델 목록 조회
 
     등록된 모델들의 목록을 페이지네이션하여 조회합니다.
-    model_type_id, model_provider_id, model_format_id를 사용하여 필터링할 수 있습니다.
-    특히 embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요.
+    model_type_id, model_provider_id, model_format_id, visibility를 사용하여 필터링할 수 있습니다.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작)
@@ -541,59 +548,50 @@ def read_models(
         - 생략 시: 전체 데이터 조회
         - 범위: 1-1000
     - **model_type_id** (int, optional): 모델 타입 ID로 필터링
-        - 예: Embedding 모델만 조회하려면 Embedding 타입의 ID 사용
         - `GET /api/v1/models/types` API로 타입 목록 조회 가능
     - **model_provider_id** (int, optional): 모델 제공자 ID로 필터링
         - `GET /api/v1/models/providers` API로 제공자 목록 조회 가능
     - **model_format_id** (int, optional): 모델 포맷 ID로 필터링
         - `GET /api/v1/models/formats` API로 포맷 목록 조회 가능
+    - **visibility** (str, optional): 목록 구분 필터
+        - `catalog`: 카탈로그 모델만 반환 (초기 등록 모델, 최적화 비대상)
+        - `custom`: 커스텀 모델만 반환 (최적화 가능/완료, 학습 완료 모델)
+        - 생략 시: 전체 모델 반환
 
     ## Response (List[ModelBriefReadSchema])
-    - **items** (List[ModelBriefReadSchema]): 모델 목록
-        각 항목은 다음 정보를 포함:
-        - id (int): 모델 고유 ID
-        - name (str): 모델 이름
-        - description (str, optional): 모델 설명
-        - repo_id (str): 모델 저장소 ID
-        - provider_info (ModelProviderReadSchema): 모델 제공자 정보
-            - id (int): 제공자 ID
-            - name (str): 제공자 이름
-            - description (str): 제공자 설명
-        - type_info (ModelTypeReadSchema): 모델 타입 정보
-            - id (int): 타입 ID
-            - name (str): 타입 이름
-            - description (str): 타입 설명
-        - format_info (ModelFormatReadSchema): 모델 포맷 정보
-            - id (int): 포맷 ID
-            - name (str): 포맷 이름
-            - description (str): 포맷 설명
-        - parent_model_id (int, optional): 부모 모델 ID
-        - task (str, optional): 모델 태스크
-        - parameter (str, optional): 모델 파라미터
-        - sample_code (str, optional): 샘플 코드
-        - registry (ModelRegistryReadSchema): 모델 레지스트리 정보
-            - id (int): 레지스트리 ID
-            - artifact_path (str): 아티팩트 경로
-            - uri (str): 모델 URI
-            - run_id (str, optional): MLflow 실행 ID
-            - reference_model_id (int): 참조 모델 ID
-            - created_at (datetime): 생성 시각
-            - updated_at (datetime): 수정 시각
-        - created_at (datetime): 모델 생성 시각
-        - updated_at (datetime): 모델 수정 시각
+    각 항목은 다음 정보를 포함:
+    - **id** (int): 모델 고유 ID
+    - **name** (str): 모델 이름
+    - **description** (str, optional): 모델 설명
+    - **repo_id** (str, optional): 모델 저장소 ID
+    - **provider_info** (ModelProviderReadSchema): 모델 제공자 정보
+        - id, name, description
+    - **type_info** (ModelTypeReadSchema): 모델 타입 정보
+        - id, name, description
+    - **format_info** (ModelFormatReadSchema): 모델 포맷 정보
+        - id, name, description
+    - **parent_model_id** (int, optional): 부모 모델 ID
+    - **task** (str, optional): 모델 태스크
+    - **parameter** (str, optional): 모델 파라미터
+    - **sample_code** (str, optional): 샘플 코드
+    - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
+        - id, artifact_path, uri, run_id, reference_model_id, created_at, updated_at
+    - **learning_enable_yn** (bool): 학습 파이프라인 사용 가능 여부
+    - **opt_enable_yn** (bool): 최적화/경량화 대상 여부
+    - **visibility** (str): 모델 분류 (`CATALOG` 또는 `CUSTOM`)
+    - **created_at** (datetime): 모델 생성 시각
+    - **updated_at** (datetime): 모델 수정 시각
 
     ## Notes
-    - page와 page_size를 모두 생략하면 전체 데이터를 조회 (최대 10000개)
+    - page와 page_size를 모두 생략하면 전체 데이터를 조회합니다 (최대 10000개)
     - page와 page_size 중 하나라도 생략하면 전체 데이터를 조회합니다
-    - 페이지네이션 사용 시 page와 page_size를 모두 제공해야 합니다
-    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id)는 함께 사용할 수 있습니다
-    - Embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요
+    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id, visibility)는 함께 사용할 수 있습니다
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: visibility 값이 유효하지 않음 ('catalog' 또는 'custom'만 허용)
     - 500: 서버 내부 오류
     """
-    # 필터링 조건 구성
     filters = {}
     if model_type_id is not None:
         filters["type_id"] = model_type_id
@@ -602,16 +600,22 @@ def read_models(
     if model_format_id is not None:
         filters["format_id"] = model_format_id
 
-    # 필터가 있는 경우 filter 메서드 사용, 없는 경우 get_multi 사용
-    if filters:
-        # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
+    visibility_filter = None
+    if visibility is not None:
+        visibility_upper = visibility.upper()
+        if visibility_upper not in (ModelVisibility.CATALOG.value, ModelVisibility.CUSTOM.value):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"visibility는 'catalog' 또는 'custom'이어야 합니다. 입력 값: {visibility}",
+            )
+        visibility_filter = visibility_upper
+
+    if filters or visibility_filter:
         if page is None or page_size is None:
-            return ModelService().filter_all(db, filters=filters)
-        # 페이지네이션 적용
+            return ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
         skip = page_size * (page - 1)
-        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size)
+        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter)
     else:
-        # 필터가 없는 경우 기존 로직 사용
         if page is None or page_size is None:
             return ModelService().get_multi(db, skip=0, limit=10000)
         skip = page_size * (page - 1)

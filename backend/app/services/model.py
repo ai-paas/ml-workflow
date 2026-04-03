@@ -7,7 +7,7 @@ import uuid
 from enum import Enum
 from typing import Any, Optional
 
-from config.db.enums import ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelProviderEnum, ModelTypeEnum, ModelVisibility
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
@@ -91,6 +91,29 @@ def is_yolox_local_model(model_name: str) -> bool:
     return "yolox" in model_name.lower()
 
 
+OPT_ELIGIBLE_REPO_IDS: set[str] = {
+    "facebook/detr-resnet-50",
+    "facebook/detr-resnet-101",
+}
+
+
+def is_optimization_eligible(repo_id: str | None) -> bool:
+    """repo_id를 기준으로 최적화/경량화 가능 여부를 판별한다."""
+    if not repo_id:
+        return False
+    return repo_id in OPT_ELIGIBLE_REPO_IDS
+
+
+def determine_model_visibility(
+    parent_model_id: int | None,
+    opt_enable_yn: bool,
+) -> str:
+    """parent_model_id와 opt_enable_yn을 기반으로 CATALOG / CUSTOM을 결정한다."""
+    if parent_model_id is not None or opt_enable_yn:
+        return ModelVisibility.CUSTOM.value
+    return ModelVisibility.CATALOG.value
+
+
 class ModelService:
     @staticmethod
     def get(db: Session, pk: int) -> Optional[Model]:
@@ -112,6 +135,7 @@ class ModelService:
         filters: dict[str, Any],
         skip: int = 0,
         limit: int = 100,
+        visibility: str | None = None,
     ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모델 목록을 조회합니다.
@@ -119,36 +143,37 @@ class ModelService:
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             skip: 건너뛸 레코드 수
             limit: 반환할 최대 레코드 수
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
-        # 페이지네이션 적용
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         paginated_models = models[skip : skip + limit]
         return [self.get(db, model.id) for model in paginated_models]
 
-    def filter_all(self, db: Session, filters: dict[str, Any], max_limit: int = 10000) -> list[ModelReadSchema]:
+    def filter_all(
+        self,
+        db: Session,
+        filters: dict[str, Any],
+        max_limit: int = 10000,
+        visibility: str | None = None,
+    ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모든 모델 목록을 조회합니다 (페이지네이션 없음).
 
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             max_limit: 최대 반환 레코드 수 (기본값: 10000)
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         limited_models = models[:max_limit]
         return [self.get(db, model.id) for model in limited_models]
 
