@@ -12,6 +12,7 @@ class ModelTaskType(PyEnum):
     EMBEDDING = "embedding"
     TEXT_GENERATION = "text-generation"
     OBJECT_DETECTION = "object-detection"
+    FEATURE_EXTRACTION = "feature-extraction"
 
 
 class Model(BaseModel, TimestampMixin):

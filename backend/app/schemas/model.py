@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum as PyEnum
 from typing import Optional
 
 from db.models.model import ModelTaskType
@@ -21,7 +22,7 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     subversion: int
     task: Optional[str] = Field(
         None,
-        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection' 중 하나",
+        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection', 'feature-extraction' 중 하나",
     )
     parameter: str | None = None
     sample_code: str | None = None
@@ -35,6 +36,30 @@ class ModelBaseSchema(TimeStampSchemaMixin):
         if v not in valid_values:
             raise ValueError(f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_values)}")
         return v
+
+
+class PredefinedModelKey(str, PyEnum):
+    """사전 정의된 모델 키"""
+
+    YOLOS_TINY = "hustvl/yolos-tiny"
+    YOLOS_SMALL = "hustvl/yolos-small"
+    DETR_RESNET_50 = "facebook/detr-resnet-50"
+    DETR_RESNET_101 = "facebook/detr-resnet-101"
+    MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
+    ESM2 = "facebook/esm2_t33_650M_UR50D"
+    YOLOX_S = "yolox_s"
+    YOLOX_M = "yolox_m"
+
+
+class AutoGenerateModelRequest(BaseModel):
+    model_key: PredefinedModelKey = Field(
+        ...,
+        description="등록할 사전 정의 모델 키. 사용 가능한 값: "
+        "'hustvl/yolos-tiny', 'hustvl/yolos-small', "
+        "'facebook/detr-resnet-50', 'facebook/detr-resnet-101', "
+        "'ahmgam/medllama3-v20:latest', 'facebook/esm2_t33_650M_UR50D', "
+        "'yolox_s', 'yolox_m'",
+    )
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):

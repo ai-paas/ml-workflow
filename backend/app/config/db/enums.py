@@ -35,6 +35,7 @@ class ModelTypeEnum(str, Enum):
     ODM = "ODM"
     LLM = "LLM"
     EMBEDDING = "Embedding"
+    PLM = "pLM"
 
     def __str__(self) -> str:
         return self.value

@@ -11,6 +11,7 @@ from db.models.model_base_deployment import BaseDeploymentStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from repos.model_base_deployment import model_base_deployment_repository
 from schemas.model import (
+    AutoGenerateModelRequest,
     ModelBaseSchema,
     ModelBriefReadSchema,
     ModelFormatReadSchema,
@@ -18,9 +19,11 @@ from schemas.model import (
     ModelReadSchema,
     ModelRegistryRequestSchema,
     ModelTypeReadSchema,
+    PredefinedModelKey,
 )
 from schemas.user import UserSchema
 from services.model import (
+    PREDEFINED_MODEL_CONFIGS,
     CustomModelService,
     HuggingFaceModelService,
     ModelFormatService,
@@ -160,45 +163,22 @@ def create_model(
     - 500: 모델 등록 중 서버 내부 오류
     """
 
-    # task 값 검증 (Enum 사용)
-    if task is not None:
-        try:
-            # 문자열을 Enum으로 변환
-            task_enum = ModelTaskType(task)
-            task = task_enum.value  # Enum 값을 문자열로 변환하여 저장
-        except ValueError:
-            valid_tasks = [e.value for e in ModelTaskType]
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
-            )
-
+    parsed_registry_schema = None
     try:
         if model_registry_schema:
             model_registry_schema_json = json.loads(model_registry_schema)
             logger.info(model_registry_schema_json)
-            model_registry_schema = ModelRegistryRequestSchema(**model_registry_schema_json)
-            logger.info(model_registry_schema)
+            parsed_registry_schema = ModelRegistryRequestSchema(**model_registry_schema_json)
+            logger.info(parsed_registry_schema)
     except Exception as e:
         logger.error(f"model_registry schema error : {e}")
         logger.error(f"model_registry_schema = {model_registry_schema}")
-        logger.error(f"model_registry_schema_json = {model_registry_schema_json}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="model_registry_schema is unprocessable entity"
         )
-    # YOLOX 모델인지 확인 (repo_id 또는 name으로 확인)
-    is_yolox = False
-    if repo_id:
-        is_yolox = is_yolox_remote_model(repo_id)
-    if not is_yolox:
-        is_yolox = is_yolox_local_model(name)
 
-    # YOLOX 모델인 경우에만 learning_enable_yn을 true로 설정
-    learning_enable_yn = is_yolox
-
-    opt_enable_yn = is_optimization_eligible(repo_id)
-
-    model = ModelBaseSchema(
+    return ModelService.register_model(
+        db,
         name=name,
         description=description,
         repo_id=repo_id,
@@ -206,105 +186,82 @@ def create_model(
         type_id=type_id,
         format_id=format_id,
         parent_model_id=parent_model_id,
-        learning_enable_yn=learning_enable_yn,
-        opt_enable_yn=opt_enable_yn,
-        version=1,
-        subversion=1,
         task=task,
         parameter=parameter,
         sample_code=sample_code,
+        model_registry_schema=parsed_registry_schema,
+        file=file,
     )
-    custom_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.CUSTOM.value)
-    huggingface_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.HUGGINGFACE.value)
-    ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
-    gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
-    embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
+
+
+@router.post("/auto-generate", response_model=ModelBriefReadSchema)
+def auto_generate_model(
+    *,
+    db: Session = SessionDepends,
+    request: AutoGenerateModelRequest,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    사전 정의 모델 자동 등록
+
+    사전 정의된 모델 목록에서 선택하여 자동으로 등록합니다.
+    `POST /api/v1/models`와 동일한 등록 프로세스를 수행하되,
+    모델의 provider, type, format 등의 메타 정보가 자동으로 설정됩니다.
+
+    ## Request Body (JSON)
+    - **model_key** (str, required): 등록할 사전 정의 모델 키
+        - `hustvl/yolos-tiny`: YOLOS Tiny (object-detection, HuggingFace, pytorch)
+        - `hustvl/yolos-small`: YOLOS Small (object-detection, HuggingFace, pytorch)
+        - `facebook/detr-resnet-50`: DETR ResNet-50 (object-detection, HuggingFace, pytorch)
+        - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
+        - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
+        - `facebook/esm2_t33_650M_UR50D`: ESM-2 Protein LM (feature-extraction, HuggingFace, transformers)
+        - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
+        - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
+
+    ## Response (ModelBriefReadSchema)
+    `POST /api/v1/models`와 동일한 응답 형식
+
+    ## Notes
+    - 각 모델의 provider_id, type_id, format_id는 DB에서 이름으로 자동 조회됩니다
+    - `facebook/esm2_t33_650M_UR50D` 모델은 model_type `pLM`이 DB에 등록되어 있어야 합니다
+    - `yolox_s`, `yolox_m`은 GitHub에서 가중치 파일(.pth)을 자동 다운로드하여 MLflow에 등록합니다
+
+    ## Errors
+    - 400: 모델 키에 해당하는 provider/type/format을 DB에서 찾을 수 없음
+    - 401: 인증되지 않은 사용자
+    - 422: 유효하지 않은 model_key
+    - 500: 모델 등록 중 서버 내부 오류 (가중치 다운로드 실패 포함)
+    """
+    model_key = request.model_key.value
+    config = PREDEFINED_MODEL_CONFIGS.get(model_key)
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"유효하지 않은 model_key: {model_key}",
+        )
+
+    ids = ModelService.resolve_predefined_model_ids(db, config)
+
+    file = None
+    if "weight_url" in config:
+        file = ModelService.download_weight_file(config["weight_url"], config["weight_filename"])
 
     try:
-        # Ollama + GGUF인 경우: 단순히 meta 정보만 DB에 등록
-        if (
-            ollama_model_provider
-            and gguf_format
-            and provider_id == ollama_model_provider.id
-            and format_id == gguf_format.id
-        ):
-            if not repo_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for Ollama models"
-                )
-
-            # 모델과 레지스트리 생성 (MLflow 없이)
-            from repos.model import model_registry_repository, model_repository
-            from schemas.model import ModelRegistryBaseSchema
-
-            model_obj = model_repository.create(db, obj_in=model)
-            model_id = model_obj.id
-
-            # Ollama 모델을 PVC에 다운로드하는 파이프라인 실행
-            pvc_name = None
-            try:
-                sanitized_model_name = name.replace("/", "-")
-                pvc_name = OllamaModelService.download_ollama_model_to_pvc(
-                    db=db,
-                    model_id=model_id,
-                    model_name=sanitized_model_name,
-                    repo_id=repo_id,
-                )
-                logger.info(f"Started Ollama model download pipeline for model_id: {model_id}, PVC: {pvc_name}")
-            except Exception as download_error:
-                logger.error(f"Failed to start Ollama model download pipeline: {download_error}")
-                # 다운로드 실패해도 모델 등록은 진행 (비동기이므로)
-
-            # ModelRegistry 생성 (uri는 repo_id 사용, pvc는 다운로드 파이프라인에서 생성된 PVC 이름)
-            model_registry_repository.create(
-                db,
-                obj_in=ModelRegistryBaseSchema(
-                    artifact_path="",  # Ollama는 artifact_path 불필요
-                    uri=repo_id,  # repo_id를 uri로 사용 (예: ahmgam/medllama3-v20)
-                    reference_model_id=model_id,
-                    run_id=None,  # MLflow run_id 없음
-                    pvc=pvc_name,  # PVC 이름 저장
-                ),
-            )
-            db.commit()
-
-            # Embedding 타입이고 Ollama인 경우 자동 배포
-            if embedding_type and type_id == embedding_type.id:
-                logger.info(f"Auto-deploying Ollama embedding model: {model_id} (repo_id: {repo_id})")
-                try:
-                    sanitized_model_name = name.replace("/", "-")
-                    ModelBaseDeploymentService.deploy_ollama_embedding_model(
-                        db=db,
-                        model_id=model_id,
-                        model_name=sanitized_model_name,
-                        repo_id=repo_id,
-                        gpu_enabled=False,  # 기본값, 필요시 파라미터로 받을 수 있음
-                    )
-                    logger.info(f"Successfully initiated deployment for embedding model: {model_id}")
-                except Exception as deploy_error:
-                    logger.error(f"Failed to deploy embedding model {model_id}: {deploy_error}")
-                    # 배포 실패해도 모델 등록은 성공으로 처리 (비동기 배포이므로)
-
-            return model_repository.get(db, model_id)
-        elif provider_id == huggingface_model_provider.id:  # HuggingFace
-            if not repo_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for HuggingFace models"
-                )
-            return HuggingFaceModelService().create(db, model_schema=model)
-        elif provider_id == custom_model_provider.id:  # Custom
-            return CustomModelService().create(
-                db, model_schema=model, model_registry_schema=model_registry_schema, file=file
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported provider_id: {provider_id}"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise e
+        return ModelService.register_model(
+            db,
+            name=config["name"],
+            description=config["description"],
+            repo_id=config.get("repo_id"),
+            provider_id=ids["provider_id"],
+            type_id=ids["type_id"],
+            format_id=ids["format_id"],
+            task=config["task"],
+            file=file,
+        )
+    finally:
+        if file and hasattr(file, "file"):
+            file.file.close()
 
 
 @router.get("/types", response_model=list[ModelTypeReadSchema] | ModelTypeReadSchema)

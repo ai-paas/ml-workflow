@@ -35,6 +35,7 @@ MODEL_TYPE_DATA = [
     {"name": ModelTypeEnum.ODM.value, "description": "Object Detection Model"},
     {"name": ModelTypeEnum.LLM.value, "description": "Large Language Model"},
     {"name": ModelTypeEnum.EMBEDDING.value, "description": "Embedding Model"},
+    {"name": ModelTypeEnum.PLM.value, "description": "Protein Language Model"},
 ]
 
 HYPERPARAMETER_TYPE_DATA = [
