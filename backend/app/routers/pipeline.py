@@ -202,7 +202,8 @@ def container_train(
         kubeflow_experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
         kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
-        # kf.create_pipeline(sample_pipeline, pipeline_name )
+        if not kubeflow_experiment:
+            kubeflow_experiment = kf.create_experiment(kubeflow_experiment_name)
         experiment_db_obj = ExperimentService().create(
             db,
             obj_in=ExperimentBaseSchema(
@@ -365,6 +366,8 @@ def register_model(
         mlflow_experiment_name = settings.MLFLOW_EXPERIMENT_NAME
 
         kubeflow_experiment = kf.get_experiment_by_name(experiment_name=kubeflow_experiment_name)
+        if not kubeflow_experiment:
+            kubeflow_experiment = kf.create_experiment(kubeflow_experiment_name)
 
         experiment_db_obj = ExperimentService().get(db, experiment_id)
         parent_model_id = experiment_db_obj.reference_model_id

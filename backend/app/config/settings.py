@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     MILVUS_DB_NAME: str = Field(..., description="Milvus 데이터베이스 이름")
     MILVUS_ADMIN_PORT: str = Field(default="8000", description="Milvus Admin 포트")
 
+    # Harbor 설정
+    HARBOR_URL: str = Field(..., description="Harbor 레지스트리 URL")
+    HARBOR_USERNAME: str = Field(..., description="Harbor 사용자명")
+    HARBOR_PASSWORD: str = Field(..., description="Harbor 비밀번호")
+    HARBOR_REPOSITORY: str = Field(..., description="Harbor 리포지토리명")
+    BACKEND_PROJECT_NAME: str = Field(..., description="Harbor 백엔드 프로젝트명")
+    TRAIN_PROJECT_NAME: str = Field(..., description="Harbor 학습 프로젝트명")
+    INFERENCE_PROJECT_NAME: str = Field(..., description="Harbor 추론 프로젝트명")
+
     # 기타 설정
 
     @field_validator("MLFLOW_S3_BUCKET")
