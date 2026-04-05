@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
 
 
 # Copy only the Pipfile and Pipfile.lock to leverage Docker cache
-COPY Pipfile Pipfile.lock ./
+COPY backend/Pipfile backend/Pipfile.lock ./
 
 # Install the dependencies via pipenv
 RUN pipenv install --deploy --system
@@ -58,7 +58,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 WORKDIR /app
 
 # Copy the FastAPI app code into the container
-COPY . .
+COPY ./backend/ .
 
 EXPOSE 8000
 
