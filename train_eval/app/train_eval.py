@@ -415,17 +415,14 @@ class CustomTrainModel:
 
             dist_url = "auto" if args.dist_url is None else args.dist_url
             with mlflow.start_run(run_name=self.train_name) as run:
-                # 클래스 수를 MLflow에 로깅
                 mlflow.log_param("num_classes", num_classes)
                 mlflow.log_param("model_architecture", matched_exp_name)
                 logger.info(f"MLflow에 num_classes={num_classes} 로깅 완료")
 
-                # train.py의 launch 실행
                 os.environ["MLFLOW_NESTED_RUN"] = "TRUE"
                 os.environ["MLFLOW_RUN_ID"] = run.info.run_id
                 self.update_experiment(
                     experiment_id=self.experiment_id,
-                    status="RUNNING",
                     mlflow_run_id=run.info.run_id,
                     restapi_url=self.restapi_url,
                     restapi_token=self.get_token_from_restapi(
@@ -442,29 +439,11 @@ class CustomTrainModel:
                     args=(exp, args),
                 )
 
-                # 학습 완료 후 평가 실행
                 logger.info("학습 완료! 평가를 시작합니다.")
                 self.evaluate_after_training(run, temp_exp_path, matched_exp_name, modifications)
 
-            self.update_experiment(
-                experiment_id=self.experiment_id,
-                status="COMPLETED",
-                restapi_url=self.restapi_url,
-                restapi_token=self.get_token_from_restapi(
-                    url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                ),
-            )
-
         except Exception as e:
             logger.error(f"학습 중 오류: {e}")
-            self.update_experiment(
-                experiment_id=self.experiment_id,
-                status="FAILED",
-                restapi_url=self.restapi_url,
-                restapi_token=self.get_token_from_restapi(
-                    url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                ),
-            )
             raise
 
     def evaluate_after_training(self, run, temp_exp_path, matched_exp_name, modifications):

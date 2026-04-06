@@ -6,12 +6,18 @@ from datetime import datetime
 import mlflow
 from config.db.session import SessionLocal
 from config.settings import get_settings
-from db.models.experiment import ExperimentMetricsModel
+from db.models.experiment import ExperimentMetricsModel, ExperimentModel
 from services.experiment import ExperimentService
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+MLFLOW_TO_EXPERIMENT_STATUS = {
+    "RUNNING": "RUNNING",
+    "FINISHED": "COMPLETED",
+    "FAILED": "FAILED",
+}
 
 POLL_INTERVAL = 3
 RUN_ID_WAIT_INTERVAL = 5
@@ -119,6 +125,26 @@ def _upsert_metrics(experiment_id: int, metrics: dict):
         db.close()
 
 
+def _update_experiment_status(experiment_id: int, mlflow_status: str):
+    """MLflow run 상태를 기반으로 experiment.status를 업데이트한다."""
+    new_status = MLFLOW_TO_EXPERIMENT_STATUS.get(mlflow_status)
+    if new_status is None:
+        return
+
+    db = SessionLocal()
+    try:
+        experiment = db.execute(select(ExperimentModel).where(ExperimentModel.id == experiment_id)).scalar_one_or_none()
+        if experiment and experiment.status != new_status:
+            experiment.status = new_status
+            db.commit()
+            logger.info(f"Experiment {experiment_id} status updated to {new_status}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update experiment status for {experiment_id}: {e}")
+    finally:
+        db.close()
+
+
 FINAL_COLLECT_DELAY = 5
 
 
@@ -139,6 +165,8 @@ def poll_training_metrics(experiment_id: int):
             _upsert_metrics(experiment_id, metrics)
 
             status = run.info.status
+            _update_experiment_status(experiment_id, status)
+
             if status in ("FINISHED", "FAILED"):
                 time.sleep(FINAL_COLLECT_DELAY)
                 run = client.get_run(mlflow_run_id)
