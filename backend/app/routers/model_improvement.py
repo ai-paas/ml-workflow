@@ -2,7 +2,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from schemas.model_improvement import (
+    CreateImprovementRequest,
+    CreateImprovementResponse,
+    ImprovementStatusResponse,
+    TaskTypeResponse,
+)
 from schemas.user import UserSchema
 from utils.authentication import get_current_user
 
@@ -22,35 +27,6 @@ _VALID_TASK_TYPE_NAMES = {t["name"] for t in _TASK_TYPES}
 _VALID_CATEGORIES = {"optimization", "lightweight"}
 
 _mock_tasks: dict[str, dict] = {}
-
-
-class CreateImprovementRequest(BaseModel):
-    source_model_id: int
-    task_type: str
-
-
-class CreateImprovementResponse(BaseModel):
-    task_id: str
-    status: str
-    source_model_id: int
-    created_at: str
-
-
-class ImprovementStatusResponse(BaseModel):
-    task_id: str
-    status: str
-    source_model_id: int
-    created_at: str
-    updated_at: str
-    message: str | None = None
-    result_model_id: int | None = None
-    error: str | None = None
-
-
-class TaskTypeResponse(BaseModel):
-    name: str
-    category: str
-    description: str | None = None
 
 
 @router.post("", response_model=CreateImprovementResponse, status_code=202)
