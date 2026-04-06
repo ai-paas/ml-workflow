@@ -32,8 +32,6 @@ from services.model import (
     ModelTypeService,
     OllamaModelService,
     is_optimization_eligible,
-    is_yolox_local_model,
-    is_yolox_remote_model,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session

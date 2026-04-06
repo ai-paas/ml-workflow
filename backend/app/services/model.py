@@ -121,6 +121,17 @@ class ModelService:
         """ID로 Model 객체 조회"""
         return model_repository.get(db, pk)
 
+    @staticmethod
+    def get_latest_child_model(db: Session, parent_model_id: int) -> Optional[Model]:
+        """
+        parent_model_id의 자식 모델 중 가장 최근 생성된 것을 반환한다.
+        등록 파이프라인 완료 후 등록된 모델 ID 확인에 사용.
+        """
+        children = model_repository.get_by_parent_model_id(db, parent_model_id)
+        if not children:
+            return None
+        return max(children, key=lambda m: m.id)
+
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[ModelReadSchema]:
         return model_repository.get_multi(db, skip=skip, limit=limit)
 
@@ -419,13 +430,8 @@ class ModelService:
                     detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
                 )
 
-        is_yolox = False
-        if repo_id:
-            is_yolox = is_yolox_remote_model(repo_id)
-        if not is_yolox:
-            is_yolox = is_yolox_local_model(name)
-
-        learning_enable_yn = is_yolox
+        format_obj = model_format_repository.get(db, format_id)
+        learning_enable_yn = format_obj is not None and format_obj.name == ModelFormatEnum.YOLOX.value
         opt_enable_yn = is_optimization_eligible(repo_id)
 
         model = ModelBaseSchema(

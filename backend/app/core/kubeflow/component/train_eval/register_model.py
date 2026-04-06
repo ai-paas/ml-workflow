@@ -24,6 +24,7 @@ def register_model_component(
     type_name: str,  # Enum 값 전달
     yolox_format_name: str,  # Enum 값 전달
     pytorch_format_name: str,  # Enum 값 전달
+    mlflow_run_id: str = "",  # 학습 실험의 MLflow run ID (직접 전달)
 ):
     import glob
     import json
@@ -227,18 +228,16 @@ def register_model_component(
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(mlflow_experiment_name)
 
-        # 실험 정보 조회 (mlflow_run_id, reference_model_id)
-        experiment_info = api_client.get_experiment_info(experiment_id)
-        if not experiment_info:
-            raise Exception("실험 정보를 조회할 수 없습니다.")
-
-        run_id = experiment_info.get("mlflow_run_id")
-        reference_model_id = experiment_info.get("reference_model_id")
+        # mlflow_run_id: 파이프라인 파라미터로 직접 전달받거나, 없으면 REST API fallback
+        run_id = mlflow_run_id if mlflow_run_id else None
+        reference_model_id = parent_model_id
 
         if not run_id:
-            raise Exception("실험 run ID를 조회할 수 없습니다.")
-        if not reference_model_id:
-            raise Exception("실험의 reference_model_id를 조회할 수 없습니다.")
+            experiment_info = api_client.get_experiment_info(experiment_id)
+            if experiment_info:
+                run_id = experiment_info.get("mlflow_run_id")
+            if not run_id:
+                raise Exception("실험 run ID를 조회할 수 없습니다.")
 
         # 아티팩트 다운로드
         local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id)
