@@ -127,8 +127,19 @@ def create_dataset(
     - 401: 인증되지 않은 사용자
     - 500: 데이터셋 등록 중 서버 내부 오류
     """
+    max_size_bytes = settings.DATASET_MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"업로드 파일 크기({file_size / (1024 * 1024):.1f}MB)가 "
+            f"최대 허용 크기({settings.DATASET_MAX_UPLOAD_SIZE_MB}MB)를 초과했습니다.",
+        )
+
     try:
-        # 데이터셋 정보 저장
         dataset_data = DatasetBaseSchema(
             name=name,
             description=description if description else None,

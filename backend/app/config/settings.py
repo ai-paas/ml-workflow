@@ -72,6 +72,9 @@ class Settings(BaseSettings):
         모델 파일과 실험 결과를 저장하는 데 사용됩니다.",
     )
 
+    # 데이터셋 업로드 설정
+    DATASET_MAX_UPLOAD_SIZE_MB: int = Field(default=500, description="데이터셋 최대 업로드 크기 (MB)")
+
     # Innogrid Object Storage 설정
     INNOGRID_OBJECT_STORAGE_ENDPOINT: str = Field(..., description="Innogrid Object Storage 엔드포인트")
     INNOGRID_OBJECT_STORAGE_ACCESS_KEY: str = Field(..., description="Innogrid Object Storage 액세스 키")
