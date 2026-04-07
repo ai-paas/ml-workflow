@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
+#
+# Modified by Surromind, 2024-2026
+# Changes: Added weights_only=False to torch.load calls in resume_train()
+#          for PyTorch >= 2.6 compatibility with fine-tuned checkpoints.
 
 import datetime
 import os
