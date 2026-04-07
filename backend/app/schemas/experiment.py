@@ -177,7 +177,6 @@ class ExperimentMetricsSchema(BaseModel):
     accuracy: float | None = None
     precision: float | None = None
     recall: float | None = None
-    train_msg: str | None = None
 
     class Config:
         from_attributes = True
@@ -196,7 +195,6 @@ class ExperimentMetricsSchema(BaseModel):
             accuracy=m.accuracy,
             precision=m.precision_value,
             recall=m.recall,
-            train_msg=m.train_msg,
         )
 
 

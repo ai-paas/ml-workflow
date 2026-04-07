@@ -81,16 +81,6 @@ def _collect_metrics(client, run) -> dict:
     ap_history = client.get_metric_history(run_id, "val/best_ap")
     average_precision = ap_history[-1].value if ap_history else None
 
-    status = run.info.status
-    if status == "FINISHED":
-        train_msg = "학습이 완료되었습니다."
-    elif status == "FAILED":
-        train_msg = "학습이 실패하였습니다."
-    elif not epoch_history:
-        train_msg = "메트릭 기록 대기 중입니다."
-    else:
-        train_msg = f"학습 진행 중 (epoch {current_epoch})"
-
     return {
         "elapsed_time": elapsed_time,
         "end_time": end_time,
@@ -98,8 +88,19 @@ def _collect_metrics(client, run) -> dict:
         "loss": latest_loss,
         "loss_history": json.dumps(loss_history),
         "average_precision": average_precision,
-        "train_msg": train_msg,
     }
+
+
+def _resolve_train_msg(run, current_epoch: int) -> str:
+    status = run.info.status
+    if status == "FINISHED":
+        return "학습이 완료되었습니다."
+    elif status == "FAILED":
+        return "학습이 실패하였습니다."
+    elif current_epoch == 0:
+        return "메트릭 기록 대기 중입니다."
+    else:
+        return f"학습 진행 중 (epoch {current_epoch})"
 
 
 def _upsert_metrics(experiment_id: int, metrics: dict):
@@ -125,22 +126,48 @@ def _upsert_metrics(experiment_id: int, metrics: dict):
         db.close()
 
 
-def _update_experiment_status(experiment_id: int, mlflow_status: str):
-    """MLflow run 상태를 기반으로 experiment.status를 업데이트한다."""
-    new_status = MLFLOW_TO_EXPERIMENT_STATUS.get(mlflow_status)
-    if new_status is None:
-        return
-
+def _update_experiment(experiment_id: int, mlflow_status: str | None = None, train_msg: str | None = None):
+    """experiment.status와 train_msg를 업데이트한다."""
     db = SessionLocal()
     try:
         experiment = db.execute(select(ExperimentModel).where(ExperimentModel.id == experiment_id)).scalar_one_or_none()
-        if experiment and experiment.status != new_status:
-            experiment.status = new_status
+        if experiment is None:
+            return
+
+        changed = False
+        if mlflow_status is not None:
+            new_status = MLFLOW_TO_EXPERIMENT_STATUS.get(mlflow_status)
+            if new_status and experiment.status != new_status:
+                experiment.status = new_status
+                changed = True
+
+        if train_msg is not None and experiment.train_msg != train_msg:
+            experiment.train_msg = train_msg
+            changed = True
+
+        if changed:
             db.commit()
-            logger.info(f"Experiment {experiment_id} status updated to {new_status}")
+            logger.info(f"Experiment {experiment_id} updated: status={experiment.status}, train_msg={train_msg}")
     except Exception as e:
         db.rollback()
-        logger.error(f"Failed to update experiment status for {experiment_id}: {e}")
+        logger.error(f"Failed to update experiment for {experiment_id}: {e}")
+    finally:
+        db.close()
+
+
+def _fail_experiment(experiment_id: int, train_msg: str):
+    """experiment를 FAILED 상태로 설정하고 train_msg를 기록한다."""
+    db = SessionLocal()
+    try:
+        experiment = db.execute(select(ExperimentModel).where(ExperimentModel.id == experiment_id)).scalar_one_or_none()
+        if experiment and experiment.status not in ("COMPLETED", "FAILED"):
+            experiment.status = "FAILED"
+            experiment.train_msg = train_msg
+            db.commit()
+            logger.info(f"Experiment {experiment_id} marked as FAILED: {train_msg}")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to mark experiment {experiment_id} as FAILED: {e}")
     finally:
         db.close()
 
@@ -154,6 +181,10 @@ def poll_training_metrics(experiment_id: int):
 
     mlflow_run_id, max_epoch = _wait_for_run_id(experiment_id)
     if mlflow_run_id is None:
+        _fail_experiment(
+            experiment_id,
+            f"학습 시작 전 오류가 발생했습니다. MLflow run이 {RUN_ID_WAIT_MAX}초 내에 생성되지 않았습니다.",
+        )
         return
 
     while True:
@@ -165,7 +196,8 @@ def poll_training_metrics(experiment_id: int):
             _upsert_metrics(experiment_id, metrics)
 
             status = run.info.status
-            _update_experiment_status(experiment_id, status)
+            train_msg = _resolve_train_msg(run, metrics["current_epoch"])
+            _update_experiment(experiment_id, mlflow_status=status, train_msg=train_msg)
 
             if status in ("FINISHED", "FAILED"):
                 time.sleep(FINAL_COLLECT_DELAY)
@@ -175,6 +207,7 @@ def poll_training_metrics(experiment_id: int):
                 if status == "FINISHED" and final_metrics["current_epoch"] < max_epoch:
                     final_metrics["current_epoch"] = max_epoch
                 _upsert_metrics(experiment_id, final_metrics)
+                _update_experiment(experiment_id, train_msg=_resolve_train_msg(run, final_metrics["current_epoch"]))
                 break
 
         except Exception as e:

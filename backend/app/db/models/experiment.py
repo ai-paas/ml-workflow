@@ -21,6 +21,7 @@ class ExperimentModel(BaseModel, TimestampMixin):
     registration_status: Mapped[str] = mapped_column(String(50), default="NOT_REQUESTED")
     registered_model_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     model_register_msg: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    train_msg: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     reference_model: Mapped["Model"] = relationship("Model")
     dataset: Mapped["Dataset"] = relationship("Dataset")
@@ -47,7 +48,6 @@ class ExperimentMetricsModel(BaseModel):
     accuracy: Mapped[float | None] = mapped_column(Double, nullable=True)
     precision_value: Mapped[float | None] = mapped_column(Double, nullable=True)
     recall: Mapped[float | None] = mapped_column(Double, nullable=True)
-    train_msg: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
     experiment: Mapped["ExperimentModel"] = relationship("ExperimentModel", back_populates="metrics")
 

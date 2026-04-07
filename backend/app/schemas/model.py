@@ -46,20 +46,10 @@ class PredefinedModelKey(str, PyEnum):
     DETR_RESNET_50 = "facebook/detr-resnet-50"
     DETR_RESNET_101 = "facebook/detr-resnet-101"
     MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
+    BGE_M3 = "bge-m3"
     ESM2 = "facebook/esm2_t33_650M_UR50D"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
-
-
-class AutoGenerateModelRequest(BaseModel):
-    model_key: PredefinedModelKey = Field(
-        ...,
-        description="등록할 사전 정의 모델 키. 사용 가능한 값: "
-        "'hustvl/yolos-tiny', 'hustvl/yolos-small', "
-        "'facebook/detr-resnet-50', 'facebook/detr-resnet-101', "
-        "'ahmgam/medllama3-v20:latest', 'facebook/esm2_t33_650M_UR50D', "
-        "'yolox_s', 'yolox_m'",
-    )
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):

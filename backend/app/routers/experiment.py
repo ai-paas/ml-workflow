@@ -217,6 +217,7 @@ async def get_experiment(
             registration_status=getattr(experiment, "registration_status", "NOT_REQUESTED") or "NOT_REQUESTED",
             registered_model_id=getattr(experiment, "registered_model_id", None),
             model_register_msg=getattr(experiment, "model_register_msg", None),
+            train_msg=getattr(experiment, "train_msg", None),
             reference_model={"id": ref_model.id, "name": ref_model.name} if ref_model else None,
             dataset={"id": ds.id, "name": ds.name} if ds else None,
             hyperparameters=hp_list,

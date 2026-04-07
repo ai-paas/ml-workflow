@@ -1380,6 +1380,15 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
     },
+    "bge-m3": {
+        "name": "bge-m3",
+        "description": "bge-m3",
+        "repo_id": "bge-m3",
+        "task": "embedding",
+        "provider_name": "ollama",
+        "type_name": "Embedding",
+        "format_name": "gguf",
+    },
     "facebook/esm2_t33_650M_UR50D": {
         "name": "facebook/esm2_t33_650M_UR50D",
         "description": "facebook/esm2_t33_650M_UR50D",
