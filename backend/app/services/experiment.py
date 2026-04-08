@@ -43,7 +43,6 @@ class ExperimentService:
     def update_internal(db: Session, *, experiment_id: int, obj_in: ExperimentInternalUpdateRequest):
         """내부 통신 전용 실험 업데이트 메서드"""
         db_obj = experiment_repository.get(db, experiment_id)
-        # 내부 업데이트는 status, mlflow_run_id, kubeflow_run_id만 업데이트 가능
         update_data = {}
         if obj_in.status is not None:
             update_data["status"] = obj_in.status
@@ -51,6 +50,8 @@ class ExperimentService:
             update_data["mlflow_run_id"] = obj_in.mlflow_run_id
         if obj_in.kubeflow_run_id is not None:
             update_data["kubeflow_run_id"] = obj_in.kubeflow_run_id
+        if obj_in.registration_kubeflow_run_id is not None:
+            update_data["registration_kubeflow_run_id"] = obj_in.registration_kubeflow_run_id
 
         if update_data:
             for key, value in update_data.items():

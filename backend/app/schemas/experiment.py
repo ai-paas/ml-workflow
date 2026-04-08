@@ -1,3 +1,5 @@
+import json
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel
@@ -28,6 +30,7 @@ class ExperimentBaseSchema(TimeStampSchemaMixin):
     kubeflow_run_id: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     status: str
+    registration_kubeflow_run_id: Optional[str] = None
 
 
 class ExperimentReadSchema(TimeStampSchemaMixin):
@@ -70,6 +73,7 @@ class ExperimentInternalUpdateRequest(BaseModel):
     status: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     kubeflow_run_id: Optional[str] = None
+    registration_kubeflow_run_id: Optional[str] = None
 
 
 class HyperparameterTypeBaseSchema(BaseModel):
@@ -107,10 +111,10 @@ class HyperparameterReadSchema(BaseModel):
 
 # Training Status 관련 Pydantic 모델들
 class TrainingStatusResponse(BaseModel):
-    status: str  # RUNNING, FINISHED, FAILED
-    start_time: int  # unix timestamp
-    end_time: Optional[int] = None  # unix timestamp
-    elapsed_time: int  # 경과시간 (초, 자연수)
+    status: str
+    start_time: int
+    end_time: Optional[int] = None
+    elapsed_time: int
     max_epoch: int
     current_epoch: int
     loss_history: list[Any]
@@ -119,3 +123,117 @@ class TrainingStatusResponse(BaseModel):
     average_precision_75_history: list[Any]
     best_average_precision_history: list[Any]
     average_precision_50_95_history: list[Any]
+
+
+# ── 학습 요청 Body 스키마 ──
+
+
+class TrainingRequest(BaseModel):
+    """POST /pipeline/training 요청 바디"""
+
+    model_id: int
+    dataset_id: int
+    train_name: str = ""
+    description: str = ""
+    gpus: str = "1"
+    batch_size: str = "32"
+    epochs: str = "5"
+    save_period: str = "1"
+    weight_decay: str = "5e-4"
+    lr0: str = "0.01"
+    lrf: str = "0.05"
+
+
+# ── 모델 등록 요청/응답 스키마 ──
+
+
+class ModelRegistrationRequest(BaseModel):
+    """POST /pipeline/model/registration 요청 바디"""
+
+    model_name: str
+    description: str
+    experiment_id: int
+
+
+class ModelRegistrationResponse(BaseModel):
+    """POST /pipeline/model/registration 응답"""
+
+    accepted: bool
+    experiment_id: int
+    message: str
+
+
+# ── Experiment 메트릭 스키마 ──
+
+
+class ExperimentMetricsSchema(BaseModel):
+    elapsed_time: int | None = None
+    end_time: datetime | None = None
+    max_epoch: int = 0
+    current_epoch: int = 0
+    loss: float | None = None
+    loss_history: list[dict] | None = None
+    average_precision: float | None = None
+    accuracy: float | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+    class Config:
+        from_attributes = True
+
+    @classmethod
+    def from_orm_model(cls, m) -> "ExperimentMetricsSchema":
+        """ORM의 precision_value -> API의 precision으로 매핑"""
+        return cls(
+            elapsed_time=m.elapsed_time,
+            end_time=m.end_time,
+            max_epoch=m.max_epoch,
+            current_epoch=m.current_epoch,
+            loss=m.loss,
+            loss_history=json.loads(m.loss_history) if m.loss_history else None,
+            average_precision=m.average_precision,
+            accuracy=m.accuracy,
+            precision=m.precision_value,
+            recall=m.recall,
+        )
+
+
+# ── Experiment 목록/상세 응답 스키마 ──
+
+
+class ExperimentListResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    reference_model_id: int
+    dataset_id: int
+    status: str
+    registration_status: str = "NOT_REQUESTED"
+    registered_model_id: int | None = None
+    elapsed_time: int | None = None
+    end_time: datetime | None = None
+    reference_model: dict | None = None
+    dataset: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ExperimentDetailResponse(ExperimentListResponse):
+    mlflow_run_id: str | None = None
+    train_msg: str | None = None
+    model_register_msg: str | None = None
+    max_epoch: int = 0
+    hyperparameters: list = []
+    current_epoch: int = 0
+    loss: float | None = None
+    loss_history: list[dict] | None = None
+    average_precision: float | None = None
+    accuracy: float | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+    class Config:
+        from_attributes = True

@@ -1,5 +1,5 @@
 # First stage: build
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 as builder
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
 
 WORKDIR /app
 
@@ -23,11 +23,13 @@ RUN pip3 install --no-cache-dir pipenv
 COPY train_eval/Pipfile train_eval/Pipfile.lock ./
 
 # Install the dependencies via pipenv
-RUN pipenv install --deploy --system
+RUN pipenv install --deploy --system && \
+    python3 -c "import torch; print(f'torch {torch.__version__} OK')" || \
+    (echo "pipenv failed to install torch, falling back to pip3" && pip3 install torch==2.7.1)
 
 # Copy YOLOX folder for installation
 COPY YOLOX ./YOLOX
-RUN cd YOLOX && pip install --no-build-isolation --use-pep517 -v -e .
+RUN cd YOLOX && python3 -m pip install --no-build-isolation --use-pep517 -v -e .
 
 
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
@@ -69,4 +71,4 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 COPY ./train_eval/ .
 COPY YOLOX ./YOLOX
 
-ENTRYPOINT python -m app.train_eval
+ENTRYPOINT ["python", "-m", "app.train_eval"]

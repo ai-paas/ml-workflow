@@ -159,7 +159,7 @@ def container_train_eval_component(
                         ),
                     ),
                 ),
-                backoff_limit=3,
+                backoff_limit=0,
                 ttl_seconds_after_finished=1800,  # Job 완료 후 30분 뒤 자동 삭제
             ),
         )
@@ -169,11 +169,9 @@ def container_train_eval_component(
         batch_v1.create_namespaced_job(namespace=namespace, body=job)
         logger.info(f"Created Job: {job_name}")
 
-        # Job 완료 대기 (최대 2시간)
-        max_wait = 7200  # 120분
-        wait_interval = 15  # 15초 간격
+        max_wait = 7200
+        wait_interval = 15
         elapsed = 0
-        job_completed = False
 
         while elapsed < max_wait:
             try:
@@ -181,36 +179,20 @@ def container_train_eval_component(
 
                 if job_status.status.succeeded:
                     logger.info(f"Job {job_name} completed successfully")
-                    job_completed = True
-                    break
-                elif job_status.status.failed:
-                    logger.error(f"Job {job_name} failed")
-                    raise RuntimeError(f"Job {job_name} failed")
+                    return json.dumps({"job_name": job_name, "status": "completed"})
 
-                time.sleep(wait_interval)
-                elapsed += wait_interval
+                if job_status.status.failed:
+                    logger.error(f"Job {job_name} failed (failed pod count: {job_status.status.failed})")
+                    return json.dumps({"status": "failed", "error": f"Job {job_name} failed"})
 
             except client.exceptions.ApiException as e:
-                # Job이 삭제된 경우 (404) - ttlSecondsAfterFinished에 의해 자동 삭제된 것으로 간주
-                if e.status == 404:
-                    logger.info(
-                        f"Job {job_name} not found (likely deleted after completion by ttlSecondsAfterFinished)"
-                    )
-                    job_completed = True
-                    break
-                else:
-                    logger.warning(f"Error checking job status: {e.status} - {e.reason}")
-                    time.sleep(wait_interval)
-                    elapsed += wait_interval
-            except Exception as e:
-                logger.warning(f"Error checking job status: {e}")
-                time.sleep(wait_interval)
-                elapsed += wait_interval
+                logger.warning(f"K8s API error while checking job {job_name}: {e.status} - {e.reason}")
 
-        if not job_completed:
-            raise RuntimeError(f"Job {job_name} did not complete within {max_wait} seconds")
+            time.sleep(wait_interval)
+            elapsed += wait_interval
 
-        return json.dumps({"job_name": job_name, "status": "completed"})
+        logger.error(f"Job {job_name} did not complete within {max_wait} seconds")
+        return json.dumps({"status": "failed", "error": f"Job {job_name} timed out"})
 
     except Exception as e:
         logger.error(f"Failed to create training job: {str(e)}")

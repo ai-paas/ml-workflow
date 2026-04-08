@@ -11,7 +11,6 @@ from db.models.model_base_deployment import BaseDeploymentStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
 from repos.model_base_deployment import model_base_deployment_repository
 from schemas.model import (
-    AutoGenerateModelRequest,
     ModelBaseSchema,
     ModelBriefReadSchema,
     ModelFormatReadSchema,
@@ -32,8 +31,6 @@ from services.model import (
     ModelTypeService,
     OllamaModelService,
     is_optimization_eligible,
-    is_yolox_local_model,
-    is_yolox_remote_model,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
@@ -198,7 +195,10 @@ def create_model(
 def auto_generate_model(
     *,
     db: Session = SessionDepends,
-    request: AutoGenerateModelRequest,
+    model_key: PredefinedModelKey = Query(
+        ...,
+        description="등록할 사전 정의 모델 키 (Swagger 드롭다운에서 선택)",
+    ),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -208,13 +208,14 @@ def auto_generate_model(
     `POST /api/v1/models`와 동일한 등록 프로세스를 수행하되,
     모델의 provider, type, format 등의 메타 정보가 자동으로 설정됩니다.
 
-    ## Request Body (JSON)
-    - **model_key** (str, required): 등록할 사전 정의 모델 키
+    ## Query Parameters
+    - **model_key** (str, required): 등록할 사전 정의 모델 키 (드롭다운 선택)
         - `hustvl/yolos-tiny`: YOLOS Tiny (object-detection, HuggingFace, pytorch)
         - `hustvl/yolos-small`: YOLOS Small (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-50`: DETR ResNet-50 (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
         - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
+        - `bge-m3`: BGE-M3 Embedding (embedding, Ollama, gguf)
         - `facebook/esm2_t33_650M_UR50D`: ESM-2 Protein LM (feature-extraction, HuggingFace, transformers)
         - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
@@ -225,6 +226,7 @@ def auto_generate_model(
     ## Notes
     - 각 모델의 provider_id, type_id, format_id는 DB에서 이름으로 자동 조회됩니다
     - `facebook/esm2_t33_650M_UR50D` 모델은 model_type `pLM`이 DB에 등록되어 있어야 합니다
+    - `bge-m3`는 Ollama Embedding 모델로, PVC 다운로드 및 자동 배포가 수행됩니다
     - `yolox_s`, `yolox_m`은 GitHub에서 가중치 파일(.pth)을 자동 다운로드하여 MLflow에 등록합니다
 
     ## Errors
@@ -233,7 +235,7 @@ def auto_generate_model(
     - 422: 유효하지 않은 model_key
     - 500: 모델 등록 중 서버 내부 오류 (가중치 다운로드 실패 포함)
     """
-    model_key = request.model_key.value
+    model_key = model_key.value
     config = PREDEFINED_MODEL_CONFIGS.get(model_key)
     if not config:
         raise HTTPException(

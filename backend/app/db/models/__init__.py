@@ -1,6 +1,6 @@
 from .base import Base
 from .dataset import Dataset, DatasetRegistry
-from .experiment import ExperimentModel, Hyperparameter, HyperparameterType
+from .experiment import ExperimentMetricsModel, ExperimentModel, Hyperparameter, HyperparameterType
 from .knowledge_base import (
     ChunkType,
     KnowledgeBase,

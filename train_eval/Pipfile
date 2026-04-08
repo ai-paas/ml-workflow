@@ -20,6 +20,7 @@ onnx = "==1.18.0"
 onnx-simplifier = "==0.4.10"
 mlflow = "==2.17.0"
 python-dotenv = "*"
+boto3 = "*"
 
 [dev-packages]
 

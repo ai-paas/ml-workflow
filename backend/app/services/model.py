@@ -121,6 +121,17 @@ class ModelService:
         """ID로 Model 객체 조회"""
         return model_repository.get(db, pk)
 
+    @staticmethod
+    def get_latest_child_model(db: Session, parent_model_id: int) -> Optional[Model]:
+        """
+        parent_model_id의 자식 모델 중 가장 최근 생성된 것을 반환한다.
+        등록 파이프라인 완료 후 등록된 모델 ID 확인에 사용.
+        """
+        children = model_repository.get_by_parent_model_id(db, parent_model_id)
+        if not children:
+            return None
+        return max(children, key=lambda m: m.id)
+
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[ModelReadSchema]:
         return model_repository.get_multi(db, skip=skip, limit=limit)
 
@@ -419,13 +430,8 @@ class ModelService:
                     detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
                 )
 
-        is_yolox = False
-        if repo_id:
-            is_yolox = is_yolox_remote_model(repo_id)
-        if not is_yolox:
-            is_yolox = is_yolox_local_model(name)
-
-        learning_enable_yn = is_yolox
+        format_obj = model_format_repository.get(db, format_id)
+        learning_enable_yn = format_obj is not None and format_obj.name == ModelFormatEnum.YOLOX.value
         opt_enable_yn = is_optimization_eligible(repo_id)
 
         model = ModelBaseSchema(
@@ -1374,6 +1380,15 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
     },
+    "bge-m3": {
+        "name": "bge-m3",
+        "description": "bge-m3",
+        "repo_id": "bge-m3",
+        "task": "embedding",
+        "provider_name": "ollama",
+        "type_name": "Embedding",
+        "format_name": "gguf",
+    },
     "facebook/esm2_t33_650M_UR50D": {
         "name": "facebook/esm2_t33_650M_UR50D",
         "description": "facebook/esm2_t33_650M_UR50D",
@@ -1402,5 +1417,41 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "format_name": "yolox",
         "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth",
         "weight_filename": "yolox_m.pth",
+    },
+    "qwq:32b": {
+        "name": "qwq-32b",
+        "description": "qwq-32b",
+        "repo_id": "qwq:32b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+    },
+    "qwen3:32b": {
+        "name": "qwen3-32b",
+        "description": "qwen3-32b",
+        "repo_id": "qwen3:32b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+    },
+    "qwen3:30b": {
+        "name": "qwen3-30b",
+        "description": "qwen3-30b",
+        "repo_id": "qwen3:30b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+    },
+    "gpt-oss:20b": {
+        "name": "gpt-oss-20b",
+        "description": "gpt-oss-20b",
+        "repo_id": "gpt-oss:20b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
     },
 }
