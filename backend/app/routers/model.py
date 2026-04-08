@@ -216,16 +216,18 @@ def auto_generate_model(
         - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
         - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
         - `bge-m3`: BGE-M3 Embedding (embedding, Ollama, gguf)
-        - `facebook/esm2_t33_650M_UR50D`: ESM-2 Protein LM (feature-extraction, HuggingFace, transformers)
         - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
+        - `qwq:32b`: QwQ-32B (text-generation, Ollama, gguf)
+        - `qwen3:32b`: Qwen3-32B (text-generation, Ollama, gguf)
+        - `qwen3:30b`: Qwen3-30B (text-generation, Ollama, gguf)
+        - `gpt-oss:20b`: GPT-OSS-20B (text-generation, Ollama, gguf)
 
     ## Response (ModelBriefReadSchema)
     `POST /api/v1/models`와 동일한 응답 형식
 
     ## Notes
     - 각 모델의 provider_id, type_id, format_id는 DB에서 이름으로 자동 조회됩니다
-    - `facebook/esm2_t33_650M_UR50D` 모델은 model_type `pLM`이 DB에 등록되어 있어야 합니다
     - `bge-m3`는 Ollama Embedding 모델로, PVC 다운로드 및 자동 배포가 수행됩니다
     - `yolox_s`, `yolox_m`은 GitHub에서 가중치 파일(.pth)을 자동 다운로드하여 MLflow에 등록합니다
 
