@@ -50,6 +50,10 @@ class PredefinedModelKey(str, PyEnum):
     ESM2 = "facebook/esm2_t33_650M_UR50D"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
+    QWQ_32B = "qwq:32b"
+    QWEN3_32B = "qwen3:32b"
+    QWEN3_30B = "qwen3:30b"
+    GPT_OSS_20B = "gpt-oss:20b"
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):
