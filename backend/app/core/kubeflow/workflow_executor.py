@@ -452,7 +452,11 @@ class WorkflowExecutor:
                                                     client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
                                                 ],
                                                 volume_mounts=[
-                                                    client.V1VolumeMount(name="model-data", mount_path="/root/.ollama")
+                                                    client.V1VolumeMount(
+                                                        name="model-data",
+                                                        mount_path="/root/.ollama",
+                                                        read_only=True,
+                                                    )
                                                 ],
                                                 readiness_probe=client.V1Probe(
                                                     http_get=client.V1HTTPGetAction(path="/api/tags", port=11434),
@@ -465,7 +469,8 @@ class WorkflowExecutor:
                                             client.V1Volume(
                                                 name="model-data",
                                                 persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                                                    claim_name=pvc_name
+                                                    claim_name=pvc_name,
+                                                    read_only=True,
                                                 ),
                                             )
                                         ],

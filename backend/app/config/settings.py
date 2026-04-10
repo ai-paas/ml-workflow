@@ -93,6 +93,7 @@ class Settings(BaseSettings):
         description="KServe Istio Gateway URL \
 (외부 접근용)",
     )
+
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
         default="harbor",
         description="Kubeflow Pipeline에서 사용할 imagePullSecret 이름 \
