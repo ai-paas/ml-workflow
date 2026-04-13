@@ -316,3 +316,6 @@ pyrightconfig.json
 
 # Session files (Gradio UI)
 .session.json
+
+# Credentials (접속 정보 등 민감 파일)
+.credentials.md
