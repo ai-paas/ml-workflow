@@ -1,7 +1,7 @@
 from typing import Optional
 
 from db.models.base import BaseModel, TimestampCreateMixin, TimestampMixin, TimestampUpdateMixin
-from sqlalchemy import BigInteger, Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
@@ -13,9 +13,6 @@ class Dataset(BaseModel, TimestampMixin):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     subversion: Mapped[int] = mapped_column(Integer, nullable=False)
-    train_ratio: Mapped[float] = mapped_column(Float, nullable=False)
-    validation_ratio: Mapped[float] = mapped_column(Float, nullable=False)
-    test_ratio: Mapped[float] = mapped_column(Float, nullable=False)
 
     dataset_registry: Mapped["DatasetRegistry"] = relationship("DatasetRegistry", back_populates="dataset")
 

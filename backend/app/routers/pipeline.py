@@ -89,7 +89,16 @@ def container_train(
         aws_access_key_id: str,
         aws_secret_access_key: str,
         model_artifact_path: str,
-        dataset_artifact_uri: str,
+        dataset_download_ref: str,
+        dataset_storage_type: str,
+        dataset_s3_endpoint_url: str,
+        dataset_s3_access_key: str,
+        dataset_s3_secret_key: str,
+        dataset_s3_bucket: str,
+        datalake_api_url: str,
+        datalake_api_username: str,
+        datalake_api_password: str,
+        datalake_bucket_name: str,
         mlflow_experiment_name: str,
         train_name: str,
         restapi_url: str,
@@ -116,7 +125,16 @@ def container_train(
             model_artifact_path=model_artifact_path,
             model_uri=model_uri,
             train_name=train_name,
-            dataset_artifact_uri=dataset_artifact_uri,
+            dataset_download_ref=dataset_download_ref,
+            dataset_storage_type=dataset_storage_type,
+            dataset_s3_endpoint_url=dataset_s3_endpoint_url,
+            dataset_s3_access_key=dataset_s3_access_key,
+            dataset_s3_secret_key=dataset_s3_secret_key,
+            dataset_s3_bucket=dataset_s3_bucket,
+            datalake_api_url=datalake_api_url,
+            datalake_api_username=datalake_api_username,
+            datalake_api_password=datalake_api_password,
+            datalake_bucket_name=datalake_bucket_name,
             mlflow_experiment_name=mlflow_experiment_name,
             restapi_url=restapi_url,
             restapi_username=restapi_username,
@@ -147,9 +165,8 @@ def container_train(
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
         dataset_model = DatasetService().get(db, dataset_id)
-        dataset_artifact_uri = os.path.join(
-            dataset_model.dataset_registry.artifact_path, dataset_model.dataset_registry.uri
-        )
+        dataset_download_ref = dataset_model.dataset_registry.uri
+        dataset_storage_type = settings.DATASET_STORAGE_TYPE
         kf = KubeflowManager()
         client = kf.get_kfp_client()
         kubeflow_experiment_name = settings.KUBEFLOW_EXPERIMENT_NAME
@@ -188,9 +205,18 @@ def container_train(
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
                 "mlflow_experiment_name": mlflow_experiment_name,
                 "mlflow_s3_endpoint_url": settings.MLFLOW_S3_ENDPOINT_URL,
-                "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,
-                "aws_secret_access_key": settings.AWS_SECRET_ACCESS_KEY,
-                "dataset_artifact_uri": dataset_artifact_uri,
+                "aws_access_key_id": settings.MLFLOW_S3_ACCESS_KEY_ID,
+                "aws_secret_access_key": settings.MLFLOW_S3_SECRET_ACCESS_KEY,
+                "dataset_download_ref": dataset_download_ref,
+                "dataset_storage_type": dataset_storage_type,
+                "dataset_s3_endpoint_url": settings.S3_ENDPOINT,
+                "dataset_s3_access_key": settings.S3_ACCESS_KEY,
+                "dataset_s3_secret_key": settings.S3_SECRET_KEY,
+                "dataset_s3_bucket": settings.S3_BUCKET,
+                "datalake_api_url": settings.DATALAKE_API_URL,
+                "datalake_api_username": settings.DATALAKE_API_USERNAME,
+                "datalake_api_password": settings.DATALAKE_API_PASSWORD,
+                "datalake_bucket_name": settings.DATALAKE_BUCKET_NAME,
                 "train_name": train_name,
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
@@ -375,8 +401,8 @@ def register_model(
                 "mlflow_tracking_uri": settings.MLFLOW_TRACKING_URI,
                 "mlflow_experiment_name": mlflow_experiment_name,
                 "mlflow_s3_endpoint_url": settings.MLFLOW_S3_ENDPOINT_URL,
-                "aws_access_key_id": settings.AWS_ACCESS_KEY_ID,
-                "aws_secret_access_key": settings.AWS_SECRET_ACCESS_KEY,
+                "aws_access_key_id": settings.MLFLOW_S3_ACCESS_KEY_ID,
+                "aws_secret_access_key": settings.MLFLOW_S3_SECRET_ACCESS_KEY,
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,

@@ -11,9 +11,6 @@ class DatasetBaseSchema(TimeStampSchemaMixin):
     description: Optional[str] = None
     version: int
     subversion: int
-    train_ratio: float
-    validation_ratio: float
-    test_ratio: float
 
 
 class DatasetReadSchema(TimeStampSchemaMixin):
