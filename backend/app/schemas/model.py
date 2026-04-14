@@ -47,7 +47,7 @@ class PredefinedModelKey(str, PyEnum):
     DETR_RESNET_101 = "facebook/detr-resnet-101"
     MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
     BGE_M3 = "bge-m3"
-    ESM2 = "facebook/esm2_t33_650M_UR50D"
+    # ESM2 = "facebook/esm2_t33_650M_UR50D"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
     QWQ_32B = "qwq:32b"
