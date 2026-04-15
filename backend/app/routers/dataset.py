@@ -145,9 +145,6 @@ def create_dataset(
             description=description if description else None,
             version=1,
             subversion=1,
-            train_ratio=0.8,
-            validation_ratio=0.1,
-            test_ratio=0.1,
         )
 
         # DatasetService를 통해 DB에 저장

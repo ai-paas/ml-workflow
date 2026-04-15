@@ -55,36 +55,28 @@ class CustomTrainModel:
         aws_access_key_id: str,
         aws_secret_access_key: str,
         mlflow_experiment_name: str,
-        dataset_artifact_uri: str,
-        restapi_url: str,
-        restapi_username: str,
-        restapi_password: str,
-        gpu_limit: str,
-        batch_size: str,
-        epochs: str,
-        save_period: str,
-        weight_decay: str,
-        lr0: str,
-        lrf: str,
+        dataset_download_ref: str,
+        dataset_storage_type: str,
+        dataset_s3_endpoint_url: str = "",
+        dataset_s3_access_key: str = "",
+        dataset_s3_secret_key: str = "",
+        dataset_s3_bucket: str = "",
+        datalake_api_url: str = "",
+        datalake_api_username: str = "",
+        datalake_api_password: str = "",
+        datalake_bucket_name: str = "",
+        restapi_url: str = "",
+        restapi_username: str = "",
+        restapi_password: str = "",
+        gpu_limit: str = "1",
+        batch_size: str = "8",
+        epochs: str = "10",
+        save_period: str = "1",
+        weight_decay: str = "0.0005",
+        lr0: str = "0.01",
+        lrf: str = "0.01",
         **kwargs,
     ):
-        """
-        커스텀 모델 학습 클래스 초기화
-
-        Args:
-            train_name: 학습 실행명
-            model_name: 모델명
-            model_uri: 모델 URI
-            mlflow_tracking_uri: MLflow 추적 URI
-            mlflow_s3_endpoint_url: MLflow S3 엔드포인트 URL
-            aws_access_key_id: AWS 액세스 키 ID
-            aws_secret_access_key: AWS 시크릿 액세스 키
-            mlflow_experiment_name: MLflow 실험명
-            dataset_artifact_uri: 데이터셋 아티팩트 URI
-            restapi_url: REST API URL
-            restapi_username: REST API 사용자명
-            restapi_password: REST API 비밀번호
-        """
         self.train_name = train_name
         self.model_id = model_id
         self.experiment_id = experiment_id
@@ -95,7 +87,16 @@ class CustomTrainModel:
         self.aws_access_key_id = aws_access_key_id
         self.aws_secret_access_key = aws_secret_access_key
         self.mlflow_experiment_name = mlflow_experiment_name
-        self.dataset_artifact_uri = dataset_artifact_uri
+        self.dataset_download_ref = dataset_download_ref
+        self.dataset_storage_type = dataset_storage_type
+        self.dataset_s3_endpoint_url = dataset_s3_endpoint_url
+        self.dataset_s3_access_key = dataset_s3_access_key
+        self.dataset_s3_secret_key = dataset_s3_secret_key
+        self.dataset_s3_bucket = dataset_s3_bucket
+        self.datalake_api_url = datalake_api_url
+        self.datalake_api_username = datalake_api_username
+        self.datalake_api_password = datalake_api_password
+        self.datalake_bucket_name = datalake_bucket_name
         self.restapi_url = restapi_url
         self.restapi_username = restapi_username
         self.restapi_password = restapi_password
@@ -126,19 +127,83 @@ class CustomTrainModel:
 
         self.client = MlflowClient(tracking_uri=self.mlflow_tracking_uri)
 
+    def _download_from_s3(self) -> str:
+        """boto3를 통해 S3 호환 스토리지에서 데이터셋 다운로드"""
+        import boto3
+
+        object_key = self.dataset_download_ref
+        filename = Path(object_key).name
+
+        download_dir = tempfile.mkdtemp()
+        local_path = os.path.join(download_dir, filename)
+
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=self.dataset_s3_endpoint_url,
+            aws_access_key_id=self.dataset_s3_access_key,
+            aws_secret_access_key=self.dataset_s3_secret_key,
+        )
+
+        logger.info(f"S3에서 다운로드: s3://{self.dataset_s3_bucket}/{object_key} → {local_path}")
+        s3_client.download_file(self.dataset_s3_bucket, object_key, local_path)
+        logger.info(f"S3 다운로드 완료: {local_path}")
+        return download_dir
+
+    def _download_from_hubconnect(self) -> str:
+        """Hub-Connect REST API를 통해 데이터레이크에서 데이터셋 다운로드"""
+        import httpx
+
+        object_key = self.dataset_download_ref
+        filename = Path(object_key).name
+
+        download_dir = tempfile.mkdtemp()
+        local_path = os.path.join(download_dir, filename)
+
+        with httpx.Client(timeout=600.0) as client:
+            token_resp = client.post(
+                f"{self.datalake_api_url}/api/v1/auth/login",
+                data={
+                    "username": self.datalake_api_username,
+                    "password": self.datalake_api_password,
+                    "grant_type": "password",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            token_resp.raise_for_status()
+            token = token_resp.json()["access_token"]
+
+            logger.info(f"Hub-Connect에서 다운로드: {self.datalake_bucket_name}/{object_key} → {local_path}")
+            with client.stream(
+                "GET",
+                f"{self.datalake_api_url}/api/v1/buckets/{self.datalake_bucket_name}/objects/{object_key}",
+                headers={"Authorization": f"Bearer {token}"},
+            ) as resp:
+                resp.raise_for_status()
+                with open(local_path, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=8192):
+                        f.write(chunk)
+
+        logger.info(f"Hub-Connect 다운로드 완료: {local_path}")
+        return download_dir
+
     def preprocess(self):
         """모델 학습을 위한 전처리"""
         try:
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
 
-            # 모델 아티팩트 다운로드
+            # 모델 아티팩트 다운로드 (MLflow — 모델은 여전히 MLflow에서 관리)
             self.model_artifacts_dir = mlflow.artifacts.download_artifacts(artifact_uri=self.model_artifact_path)
             logger.info(f"모델 아티팩트: {self.model_artifacts_dir}")
 
-            # 데이터셋 아티팩트 다운로드 및 압축 해제
-            self.dataset_artifacts_dir = mlflow.artifacts.download_artifacts(artifact_uri=self.dataset_artifact_uri)
-            logger.info(f"데이터셋 아티팩트 다운로드: {self.dataset_artifacts_dir}")
+            # 데이터셋 다운로드 (스토리지 유형에 따라 분기)
+            if self.dataset_storage_type == "s3":
+                self.dataset_artifacts_dir = self._download_from_s3()
+            elif self.dataset_storage_type == "hubconnect":
+                self.dataset_artifacts_dir = self._download_from_hubconnect()
+            else:
+                raise ValueError(f"지원하지 않는 storage_type: {self.dataset_storage_type}")
+            logger.info(f"데이터셋 다운로드 완료: {self.dataset_artifacts_dir}")
 
             # 데이터셋 zip 파일 찾기
             dataset_zip = list(Path(self.dataset_artifacts_dir).glob("*.zip"))[0]
@@ -916,7 +981,18 @@ def main():
     parser.add_argument("--mlflow_s3_endpoint_url", type=str, required=True, help="MLflow S3 엔드포인트 URL")
     parser.add_argument("--aws_access_key_id", type=str, required=True, help="AWS 액세스 키 ID")
     parser.add_argument("--aws_secret_access_key", type=str, required=True, help="AWS 시크릿 액세스 키")
-    parser.add_argument("--dataset_artifact_uri", type=str, required=True, help="데이터셋 아티팩트 URI")
+    parser.add_argument("--dataset_download_ref", type=str, required=True, help="다운로드할 데이터셋 오브젝트 키")
+    parser.add_argument(
+        "--dataset_storage_type", type=str, required=True, choices=["s3", "hubconnect"], help="데이터셋 저장소 유형"
+    )
+    parser.add_argument("--dataset_s3_endpoint_url", type=str, default="")
+    parser.add_argument("--dataset_s3_access_key", type=str, default="")
+    parser.add_argument("--dataset_s3_secret_key", type=str, default="")
+    parser.add_argument("--dataset_s3_bucket", type=str, default="")
+    parser.add_argument("--datalake_api_url", type=str, default="")
+    parser.add_argument("--datalake_api_username", type=str, default="")
+    parser.add_argument("--datalake_api_password", type=str, default="")
+    parser.add_argument("--datalake_bucket_name", type=str, default="")
     parser.add_argument("--restapi_url", type=str, required=True, help="REST API URL")
     parser.add_argument("--restapi_username", type=str, required=True, help="REST API 사용자명")
     parser.add_argument("--restapi_password", type=str, required=True, help="REST API 비밀번호")
@@ -943,7 +1019,16 @@ def main():
         mlflow_s3_endpoint_url=args.mlflow_s3_endpoint_url,
         aws_access_key_id=args.aws_access_key_id,
         aws_secret_access_key=args.aws_secret_access_key,
-        dataset_artifact_uri=args.dataset_artifact_uri,
+        dataset_download_ref=args.dataset_download_ref,
+        dataset_storage_type=args.dataset_storage_type,
+        dataset_s3_endpoint_url=args.dataset_s3_endpoint_url,
+        dataset_s3_access_key=args.dataset_s3_access_key,
+        dataset_s3_secret_key=args.dataset_s3_secret_key,
+        dataset_s3_bucket=args.dataset_s3_bucket,
+        datalake_api_url=args.datalake_api_url,
+        datalake_api_username=args.datalake_api_username,
+        datalake_api_password=args.datalake_api_password,
+        datalake_bucket_name=args.datalake_bucket_name,
         restapi_url=args.restapi_url,
         restapi_username=args.restapi_username,
         restapi_password=args.restapi_password,

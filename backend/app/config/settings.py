@@ -64,8 +64,8 @@ class Settings(BaseSettings):
 
     # MLflow S3 설정
     MLFLOW_S3_ENDPOINT_URL: str = Field(..., description="MLflow S3 엔드포인트 URL")
-    AWS_ACCESS_KEY_ID: str = Field(..., description="AWS 액세스 키 ID")
-    AWS_SECRET_ACCESS_KEY: str = Field(..., description="AWS 시크릿 액세스 키")
+    MLFLOW_S3_ACCESS_KEY_ID: str = Field(..., description="MLflow S3 액세스 키 ID")
+    MLFLOW_S3_SECRET_ACCESS_KEY: str = Field(..., description="MLflow S3 시크릿 액세스 키")
     MLFLOW_S3_BUCKET: str = Field(
         ...,
         description="MLflow 아티팩트 저장용 S3 버킷 이름. \
@@ -75,11 +75,23 @@ class Settings(BaseSettings):
     # 데이터셋 업로드 설정
     DATASET_MAX_UPLOAD_SIZE_MB: int = Field(default=500, description="데이터셋 최대 업로드 크기 (MB)")
 
-    # Innogrid Object Storage 설정
-    INNOGRID_OBJECT_STORAGE_ENDPOINT: str = Field(..., description="Innogrid Object Storage 엔드포인트")
-    INNOGRID_OBJECT_STORAGE_ACCESS_KEY: str = Field(..., description="Innogrid Object Storage 액세스 키")
-    INNOGRID_OBJECT_STORAGE_SECRET_KEY: str = Field(..., description="Innogrid Object Storage 시크릿 키")
-    INNOGRID_OBJECT_STORAGE_BUCKET: str = Field(..., description="Innogrid Object Storage 버킷 이름")
+    # S3 호환 스토리지 설정 (데이터셋 저장용)
+    S3_ENDPOINT: str = Field(..., description="S3 호환 스토리지 엔드포인트 URL")
+    S3_ACCESS_KEY: str = Field(..., description="S3 액세스 키")
+    S3_SECRET_KEY: str = Field(..., description="S3 시크릿 키")
+    S3_BUCKET: str = Field(..., description="S3 버킷 이름")
+
+    # 데이터셋 스토리지 설정
+    DATASET_STORAGE_TYPE: str = Field(
+        default="s3",
+        description="데이터셋 저장소 유형 (s3 | hubconnect)",
+    )
+
+    # Hub-Connect API 설정 (DATASET_STORAGE_TYPE=hubconnect 시 사용)
+    DATALAKE_API_URL: str = Field(default="", description="Hub-Connect API 기본 URL")
+    DATALAKE_API_USERNAME: str = Field(default="", description="Hub-Connect API 인증 사용자명")
+    DATALAKE_API_PASSWORD: str = Field(default="", description="Hub-Connect API 인증 비밀번호")
+    DATALAKE_BUCKET_NAME: str = Field(default="aipaas-datasets", description="데이터레이크 버킷 이름")
 
     # API 및 인증 설정
     REST_API_URL: str = Field(..., description="REST API 기본 URL")

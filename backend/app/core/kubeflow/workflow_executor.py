@@ -48,8 +48,8 @@ class WorkflowExecutor:
         # 환경 변수에서 설정된 실제 MLFLOW_EXPERIMENT_NAME을 사용
         parameters["mlflow_experiment_name"] = settings.MLFLOW_EXPERIMENT_NAME
         parameters["mlflow_s3_endpoint_url"] = settings.MLFLOW_S3_ENDPOINT_URL
-        parameters["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
-        parameters["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+        parameters["aws_access_key_id"] = settings.MLFLOW_S3_ACCESS_KEY_ID
+        parameters["aws_secret_access_key"] = settings.MLFLOW_S3_SECRET_ACCESS_KEY
         parameters["mlflow_s3_bucket"] = settings.MLFLOW_S3_BUCKET
 
         # REST API 설정을 parameters에 추가 (DB 업데이트용)

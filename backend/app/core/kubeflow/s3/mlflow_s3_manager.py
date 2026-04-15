@@ -19,8 +19,8 @@ class MLFlowS3Manager:
         """
         if not hasattr(self, "initialized"):
             self.endpoint = settings.MLFLOW_S3_ENDPOINT_URL
-            self.access_key = settings.AWS_ACCESS_KEY_ID
-            self.secret_key = settings.AWS_SECRET_ACCESS_KEY
+            self.access_key = settings.MLFLOW_S3_ACCESS_KEY_ID
+            self.secret_key = settings.MLFLOW_S3_SECRET_ACCESS_KEY
             self.bucket = settings.MLFLOW_S3_BUCKET
             self.s3_client = boto3.client(
                 "s3",
