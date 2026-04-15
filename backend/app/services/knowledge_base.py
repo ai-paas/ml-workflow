@@ -524,6 +524,7 @@ class KnowledgeBaseService:
         *,
         knowledge_base_id: int,
         query: str,
+        top_k: Optional[int] = None,
     ) -> KnowledgeBaseSearchResponseSchema:
         """Knowledge Base 검색 테스트
 
@@ -531,6 +532,7 @@ class KnowledgeBaseService:
             db: 데이터베이스 세션
             knowledge_base_id: Knowledge Base ID
             query: 검색할 쿼리 텍스트
+            top_k: 검색 결과 상위 N건 (None이면 KB 기본값 사용)
 
         Returns:
             검색 결과 스키마
@@ -574,7 +576,8 @@ class KnowledgeBaseService:
             # 6. MilvusSearchManager를 사용하여 검색
             # 현재는 vector/dense 검색만 지원 (dense_search 사용)
             # keyword, hybrid는 향후 지원 예정
-            search_manager = MilvusSearchManager(collection_name=kb.collection_name, top_k=kb.top_k)
+            effective_top_k = top_k if top_k is not None else kb.top_k
+            search_manager = MilvusSearchManager(collection_name=kb.collection_name, top_k=effective_top_k)
             search_results = search_manager.dense_search(dense_query_vector.reshape(1, -1))
 
             # 7. 검색 결과 파싱

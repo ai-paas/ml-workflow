@@ -14,7 +14,6 @@ from schemas.workflow import (
     WorkflowCreateRequest,
     WorkflowDefinition,
     WorkflowTemplateCreateRequest,
-    WorkflowUpdateDefinition,
     WorkflowUpdateInternal,
     WorkflowUpdateRequest,
 )
@@ -70,44 +69,30 @@ class WorkflowService:
 
     @staticmethod
     def _create_components_and_connections(db: Session, workflow_id: str, definition: WorkflowDefinition):
-        """컴포넌트와 연결 정보 생성"""
-        # 타입별 컴포넌트 매핑 (같은 타입이 여러 개일 수 있으므로 리스트로 관리)
-        component_type_map: Dict[ComponentType, List[str]] = {}  # type -> [component_ids]
+        """컴포넌트와 연결 정보 생성 (ref_id 기반)"""
+        ref_id_map: Dict[str, str] = {}  # ref_id → 실제 component_id
 
-        # 컴포넌트 생성
         for comp_data in definition.components:
             component = workflow_component_repository.create_component(
                 db, workflow_id=workflow_id, component_data=comp_data
             )
-            # 타입별로 컴포넌트 ID 저장
-            if comp_data.type not in component_type_map:
-                component_type_map[comp_data.type] = []
-            component_type_map[comp_data.type].append(component.id)
+            ref_id_map[comp_data.ref_id] = component.id
 
-        # 연결 정보 생성
         for conn_data in definition.connections:
-            # 타입으로 소스/타겟 컴포넌트 찾기
-            source_components = component_type_map.get(conn_data.source_component_type, [])
-            target_components = component_type_map.get(conn_data.target_component_type, [])
+            source_id = ref_id_map.get(conn_data.source_ref_id)
+            target_id = ref_id_map.get(conn_data.target_ref_id)
 
-            if not source_components:
-                logger.warning(f"Source component type {conn_data.source_component_type} not found")
+            if not source_id or not target_id:
+                logger.warning(f"Invalid ref_id in connection: {conn_data}")
                 continue
-            if not target_components:
-                logger.warning(f"Target component type {conn_data.target_component_type} not found")
-                continue
-
-            # 첫 번째 매칭되는 컴포넌트 사용 (같은 타입이 여러 개인 경우 첫 번째)
-            source_component_id = source_components[0]
-            target_component_id = target_components[0]
 
             component_connection_repository.create_connection(
                 db,
                 workflow_id=workflow_id,
-                source_component_id=source_component_id,
-                target_component_id=target_component_id,
-                connection_type="DATA",  # 기본값 사용
-                config=None,  # config는 사용하지 않음
+                source_component_id=source_id,
+                target_component_id=target_id,
+                connection_type="DATA",
+                config=None,
             )
 
     @staticmethod
@@ -176,53 +161,20 @@ class WorkflowService:
             return None
 
         try:
-            # 업데이트할 필드만 수정
             update_data = workflow_data.dict(exclude_unset=True)
 
-            # 템플릿인 경우 service_id는 수정할 수 없음
             if workflow.is_template and "service_id" in update_data:
                 update_data.pop("service_id")
 
-            # workflow_definition이 업데이트되면 컴포넌트와 연결도 업데이트
             if "workflow_definition" in update_data and update_data["workflow_definition"]:
-                # 기존 컴포넌트와 연결 삭제
                 component_connection_repository.delete_by_workflow_id(db, workflow_id)
                 workflow_component_repository.delete_by_workflow_id(db, workflow_id)
 
-                # WorkflowUpdateDefinition을 WorkflowDefinition으로 변환 (기본값 사용)
-                update_def = WorkflowUpdateDefinition(**update_data["workflow_definition"])
-
-                # ComponentUpdateRequest를 ComponentCreateRequest로 변환 (기본값 사용)
-                components = []
-                for comp_update in update_def.components:
-                    components.append(
-                        ComponentCreateRequest(
-                            name=comp_update.name,
-                            type=comp_update.type,
-                            model_id=comp_update.model_id,
-                            knowledge_base_id=comp_update.knowledge_base_id,
-                            prompt_id=comp_update.prompt_id,
-                        )
-                    )
-
-                # ConnectionUpdateRequest를 ConnectionCreateRequest로 변환 (기본값 사용)
-                connections = []
-                for conn_update in update_def.connections:
-                    connections.append(
-                        ConnectionCreateRequest(
-                            source_component_type=conn_update.source_component_type,
-                            target_component_type=conn_update.target_component_type,
-                        )
-                    )
-
-                definition = WorkflowDefinition(components=components, connections=connections)
+                definition = WorkflowDefinition(**update_data["workflow_definition"])
                 WorkflowService._create_components_and_connections(db, workflow_id, definition)
 
-            # workflow_definition은 DB에 저장하지 않으므로 update_data에서 무조건 제거
             update_data.pop("workflow_definition", None)
 
-            # base의 update 메서드 사용
-            # UpdateSchemaType을 받으므로 WorkflowUpdateInternal 생성
             update_request = WorkflowUpdateInternal(**update_data)
             workflow = workflow_repository.update(db, db_obj=workflow, obj_in=update_request)
 
@@ -361,8 +313,11 @@ class WorkflowService:
                 workflow_id=workflow.id,
                 name=template_component.name,
                 type=template_component.type,
-                config=None,  # config는 사용하지 않음
+                description=template_component.description,
+                config=template_component.config,
                 model_id=template_component.model_id,
+                knowledge_base_id=template_component.knowledge_base_id,
+                prompt_id=template_component.prompt_id,
             )
             db.add(new_component)
             db.flush()

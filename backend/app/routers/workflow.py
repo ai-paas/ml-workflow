@@ -7,6 +7,8 @@ import logging
 import math
 import tempfile
 import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +28,7 @@ from repos.prompt import prompt_repository
 from repos.workflow import workflow_repository
 from schemas.user import UserSchema
 from schemas.workflow import (
+    ComponentCreateRequest,
     ComponentTestErrorResult,
     ComponentTestResult,
     ComponentTypeInfo,
@@ -34,8 +37,10 @@ from schemas.workflow import (
     ModelComponentTestResult,
     ModelLLMTestResult,
     ModelODMTestResult,
+    ValidationCheckResponse,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
+    WorkflowDefinition,
     WorkflowExecuteRequest,
     WorkflowExecuteResponse,
     WorkflowListSchema,
@@ -48,6 +53,8 @@ from schemas.workflow import (
     WorkflowTemplateReadSchema,
     WorkflowTemplateUpdateRequest,
     WorkflowUpdateRequest,
+    WorkflowValidateRequest,
+    WorkflowValidateResponse,
 )
 from services.app_service import ServiceMonitoringService
 from services.knowledge_base import KnowledgeBaseService
@@ -152,14 +159,17 @@ def create_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
     - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 프론트 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
+            - config (dict, optional): 컴포넌트별 세부 설정
         - connections (List[ConnectionCreateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowBaseSchema)
     - **id** (str): 워크플로우 UUID
@@ -198,18 +208,14 @@ def create_workflow(
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if workflow_data.workflow_definition:
-            _validate_workflow_definition(db, workflow_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, workflow_data.workflow_definition)
 
-        # create_workflow는 항상 is_template=False로 생성됨
         workflow = WorkflowService.create_workflow(db=db, workflow_data=workflow_data, creator_id=current_user.id)
 
-        # 기본 스키마로 변환
         return WorkflowBaseSchema.model_validate(workflow)
 
     except HTTPException:
-        # _validate_workflow_definition 등에서 발생한 HTTPException을 그대로 전달
         raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -320,6 +326,36 @@ def list_workflows(
     return WorkflowListSchema(total=total_count, items=items)
 
 
+# ============= Workflow Validation Endpoint =============
+
+
+@router.post("/validate", response_model=WorkflowValidateResponse)
+def validate_workflow_definition_endpoint(
+    *,
+    db: Session = SessionDepends,
+    body: WorkflowValidateRequest,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    워크플로우 정의 사전 검증
+
+    워크플로우 생성 전에 workflow_definition이 유효한지 사전 체크합니다.
+    DB에 아무것도 생성하지 않고 항목별 결과를 반환합니다.
+
+    ## Request Body (WorkflowValidateRequest)
+    - **workflow_definition** (WorkflowDefinition): 검증할 워크플로우 정의
+
+    ## Response (WorkflowValidateResponse)
+    - **valid** (bool): 전체 검증 통과 여부
+    - **checks** (List[ValidationCheckResponse]): 검증 항목별 결과 리스트
+    """
+    checks = _validate_workflow_definition_checks(db, body.workflow_definition)
+    return WorkflowValidateResponse(
+        valid=all(c.passed for c in checks),
+        checks=[ValidationCheckResponse(rule=c.rule, passed=c.passed, message=c.message) for c in checks],
+    )
+
+
 # ============= Template Management =============
 # NOTE: 템플릿 라우트는 /{workflow_id} 보다 먼저 정의되어야 합니다.
 # FastAPI는 위에서 아래로 순서대로 라우트를 매칭하므로,
@@ -394,11 +430,9 @@ def create_workflow_template(
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if template_data.workflow_definition:
-            _validate_workflow_definition(db, template_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, template_data.workflow_definition)
 
-        # is_template은 WorkflowService.create_workflow_template 내부에서 true로 설정됨
         template = WorkflowService.create_workflow_template(
             db=db, template_data=template_data, creator_id=current_user.id
         )
@@ -776,16 +810,16 @@ def update_workflow_template(
     - **category** (str, optional): 새 카테고리
     - **status** (str, optional): 새 상태 (DRAFT/ACTIVE/ERROR)
         - 템플릿은 일반적으로 DRAFT 상태 유지 (실행 불가)
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 템플릿 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 템플릿 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowTemplateReadSchema)
     - **id** (str): 템플릿 UUID
@@ -831,9 +865,8 @@ def update_workflow_template(
         if not template or not template.is_template:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
 
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if template_data.workflow_definition:
-            _validate_workflow_definition(db, template_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, template_data.workflow_definition)
 
         # WorkflowTemplateUpdateRequest를 WorkflowUpdateRequest로 변환 (service_id는 None으로 설정)
         workflow_update_data = WorkflowUpdateRequest(
@@ -1080,8 +1113,9 @@ def update_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
         - 모니터링 및 서비스 관리용 서비스 ID
         - null로 설정 시 서비스 연결 해제
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 워크플로우 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 워크플로우 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 프론트 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
                 - "START": 워크플로우 시작점
@@ -1094,9 +1128,9 @@ def update_workflow(
                 - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
                 - MODEL 타입인 경우 선택, 다른 타입은 null
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowReadSchema)
     - **id** (str): 워크플로우 UUID
@@ -1138,9 +1172,8 @@ def update_workflow(
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if workflow_data.workflow_definition:
-            _validate_workflow_definition(db, workflow_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, workflow_data.workflow_definition)
 
         workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
 
@@ -2327,150 +2360,249 @@ async def inference_workflow_model(
 
 
 def _get_workflow_execution_order(workflow: Workflow) -> List[WorkflowComponent]:
-    """
-    워크플로우의 실행 순서를 결정 (START -> KNOWLEDGE_BASE -> MODEL -> END)
-
-    Args:
-        workflow: 워크플로우
-
-    Returns:
-        실행 순서대로 정렬된 컴포넌트 리스트
-    """
-    # START 컴포넌트 찾기
-    start_components = [c for c in workflow.components if c.type == ComponentType.START]
-    if not start_components:
-        return []
-
-    # 컴포넌트 ID -> 컴포넌트 매핑
+    """위상 정렬(Kahn's algorithm) 기반 실행 순서 결정"""
     component_map = {c.id: c for c in workflow.components}
 
-    # 연결 정보로 그래프 구성 (source -> target)
-    graph = {}
+    in_degree = {c.id: 0 for c in workflow.components}
+    graph: Dict[str, List[str]] = {}
     for conn in workflow.component_connections:
-        if conn.source_component_id not in graph:
-            graph[conn.source_component_id] = []
-        graph[conn.source_component_id].append(conn.target_component_id)
+        graph.setdefault(conn.source_component_id, []).append(conn.target_component_id)
+        in_degree[conn.target_component_id] = in_degree.get(conn.target_component_id, 0) + 1
 
-    # BFS로 워크플로우 순회
-    visited = set()
-    execution_order = []
+    queue = deque([cid for cid, deg in in_degree.items() if deg == 0])
+    execution_order: List[WorkflowComponent] = []
 
-    def traverse(component_id: str):
-        if component_id in visited:
-            return
-        visited.add(component_id)
-
-        component = component_map.get(component_id)
-        if not component:
-            return
-
-        # START, END는 제외하고 KNOWLEDGE_BASE와 MODEL만 추가
-        if component.type in [ComponentType.KNOWLEDGE_BASE, ComponentType.MODEL]:
+    while queue:
+        current_id = queue.popleft()
+        component = component_map.get(current_id)
+        if component and component.type in (ComponentType.KNOWLEDGE_BASE, ComponentType.MODEL):
             execution_order.append(component)
 
-        # 다음 컴포넌트로 이동
-        for next_id in graph.get(component_id, []):
-            traverse(next_id)
-
-    # 모든 START 컴포넌트에서 시작
-    for start_component in start_components:
-        traverse(start_component.id)
+        for next_id in graph.get(current_id, []):
+            in_degree[next_id] -= 1
+            if in_degree[next_id] == 0:
+                queue.append(next_id)
 
     return execution_order
+
+
+# ============= Config Defaults & Effective Config =============
+
+DEFAULT_LLM_CONFIG = {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 2048,
+}
+
+DEFAULT_KB_CONFIG = {
+    "top_k": 3,
+}
+
+CONFIG_TO_OLLAMA_OPTIONS = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "max_tokens": "num_predict",
+}
+
+
+def _get_effective_config(component: WorkflowComponent) -> dict:
+    """실행 시 config 기본값 병합"""
+    if component.type == ComponentType.MODEL:
+        defaults = DEFAULT_LLM_CONFIG.copy()
+    elif component.type == ComponentType.KNOWLEDGE_BASE:
+        defaults = DEFAULT_KB_CONFIG.copy()
+    else:
+        return {}
+
+    if component.config:
+        defaults.update(component.config)
+    return defaults
 
 
 # ============= Workflow Validation Helper Functions =============
 
 
-def _validate_workflow_definition(db: Session, definition: Any) -> None:
-    """
-    워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+@dataclass
+class ValidationCheckResult:
+    rule: str
+    passed: bool
+    message: Optional[str] = None
 
-    Args:
-        db: 데이터베이스 세션
-        definition: WorkflowDefinition 또는 WorkflowUpdateDefinition
 
-    Raises:
-        HTTPException: 검증 실패 시
-    """
+def _has_cycle(definition: WorkflowDefinition) -> bool:
+    """순환 참조 검증 (DFS)"""
+    graph: Dict[str, List[str]] = {}
+    for conn in definition.connections:
+        graph.setdefault(conn.source_ref_id, []).append(conn.target_ref_id)
+
+    visited: set = set()
+    rec_stack: set = set()
+
+    def dfs(node: str) -> bool:
+        visited.add(node)
+        rec_stack.add(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                if dfs(neighbor):
+                    return True
+            elif neighbor in rec_stack:
+                return True
+        rec_stack.discard(node)
+        return False
+
+    for node in {c.ref_id for c in definition.components}:
+        if node not in visited:
+            if dfs(node):
+                return True
+    return False
+
+
+def _validate_workflow_definition_checks(
+    db: Session,
+    definition: WorkflowDefinition,
+) -> List[ValidationCheckResult]:
+    """모든 검증 규칙을 순회하며 항목별 결과를 수집"""
+    results: List[ValidationCheckResult] = []
+    component_map = {c.ref_id: c for c in definition.components}
+
+    # 1. ref_id 유효성
+    ref_id_errors = []
+    for conn in definition.connections:
+        if conn.source_ref_id not in component_map:
+            ref_id_errors.append(conn.source_ref_id)
+        if conn.target_ref_id not in component_map:
+            ref_id_errors.append(conn.target_ref_id)
+    results.append(
+        ValidationCheckResult(
+            rule="ref_id_validity",
+            passed=len(ref_id_errors) == 0,
+            message=f"유효하지 않은 ref_id: {', '.join(ref_id_errors)}" if ref_id_errors else None,
+        )
+    )
+
+    # 2. 자기 자신 연결
+    self_conns = [c for c in definition.connections if c.source_ref_id == c.target_ref_id]
+    results.append(
+        ValidationCheckResult(
+            rule="no_self_connection",
+            passed=len(self_conns) == 0,
+            message="컴포넌트가 자기 자신에게 연결될 수 없습니다." if self_conns else None,
+        )
+    )
+
+    # 3. 순환 참조
+    has_cycle = _has_cycle(definition)
+    results.append(
+        ValidationCheckResult(
+            rule="no_cycle",
+            passed=not has_cycle,
+            message="순환 참조가 감지되었습니다." if has_cycle else None,
+        )
+    )
+
+    # 4. OD+LLM 혼합
+    model_types = set()
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and comp.model_id:
+            model = ModelService.get(db, comp.model_id)
+            if model and model.type_info:
+                model_types.add(model.type_info.name)
+    has_od = ModelTypeEnum.ODM.value in model_types
+    has_llm = ModelTypeEnum.LLM.value in model_types
+    results.append(
+        ValidationCheckResult(
+            rule="no_od_llm_mix",
+            passed=not (has_od and has_llm),
+            message="하나의 워크플로우에 OD 모델과 LLM 모델을 혼합할 수 없습니다." if (has_od and has_llm) else None,
+        )
+    )
+
+    # 5. OD+KB 공존
+    has_kb = any(c.type == ComponentType.KNOWLEDGE_BASE for c in definition.components)
+    results.append(
+        ValidationCheckResult(
+            rule="no_od_with_kb",
+            passed=not (has_od and has_kb),
+            message=(
+                "ML 워크플로우(OD 모델)에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
+                if (has_od and has_kb)
+                else None
+            ),
+        )
+    )
+
+    # 6. MODEL 수 제한
+    model_count = sum(1 for c in definition.components if c.type == ComponentType.MODEL)
+    results.append(
+        ValidationCheckResult(
+            rule="model_count_limit",
+            passed=model_count <= 3,
+            message=f"MODEL 컴포넌트는 최대 3개까지 허용됩니다. (현재 {model_count}개)" if model_count > 3 else None,
+        )
+    )
+
+    # 7. 연결 타입 규칙 (KB→KB, END→*, *→START)
+    conn_type_errors = []
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        tgt = component_map.get(conn.target_ref_id)
+        if not src or not tgt:
+            continue
+        if src.type == ComponentType.KNOWLEDGE_BASE and tgt.type == ComponentType.KNOWLEDGE_BASE:
+            conn_type_errors.append("KNOWLEDGE_BASE → KNOWLEDGE_BASE 연결은 허용되지 않습니다.")
+        if src.type == ComponentType.END:
+            conn_type_errors.append("END 컴포넌트에서 나가는 연결은 허용되지 않습니다.")
+        if tgt.type == ComponentType.START:
+            conn_type_errors.append("START 컴포넌트로 들어오는 연결은 허용되지 않습니다.")
+    results.append(
+        ValidationCheckResult(
+            rule="connection_type_rules",
+            passed=len(conn_type_errors) == 0,
+            message="; ".join(conn_type_errors) if conn_type_errors else None,
+        )
+    )
+
+    # 8. 컴포넌트 필수 속성 검증
+    required_field_errors = []
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and not comp.model_id:
+            required_field_errors.append(f"{comp.ref_id}: MODEL 컴포넌트에는 model_id가 필수입니다.")
+        if comp.type == ComponentType.KNOWLEDGE_BASE and not comp.knowledge_base_id:
+            required_field_errors.append(f"{comp.ref_id}: KNOWLEDGE_BASE 컴포넌트에는 knowledge_base_id가 필수입니다.")
+    results.append(
+        ValidationCheckResult(
+            rule="required_fields",
+            passed=len(required_field_errors) == 0,
+            message="; ".join(required_field_errors) if required_field_errors else None,
+        )
+    )
+
+    # 9. config 유효성 (Pydantic validator가 이미 처리하지만, validate API 용도로 명시 검증)
+    config_errors = []
+    for comp in definition.components:
+        try:
+            ComponentCreateRequest.model_validate(comp.model_dump())
+        except Exception as e:
+            config_errors.append(f"{comp.ref_id}: {str(e)}")
+    results.append(
+        ValidationCheckResult(
+            rule="config_validation",
+            passed=len(config_errors) == 0,
+            message="; ".join(config_errors) if config_errors else None,
+        )
+    )
+
+    return results
+
+
+def _validate_workflow_definition_or_raise(db: Session, definition: WorkflowDefinition) -> None:
+    """생성/수정 시 사용. 첫 번째 실패 시 즉시 400 응답."""
     if not definition or not definition.components:
         return
-
-    components = definition.components
-    connections = definition.connections if hasattr(definition, "connections") else []
-
-    # 1. KNOWLEDGE_BASE와 ODM MODEL 공존 검증
-    has_knowledge_base = any(c.type == ComponentType.KNOWLEDGE_BASE for c in components)
-    has_odm_model = False
-
-    # MODEL 컴포넌트 중 ODM 타입이 있는지 확인
-    for component in components:
-        if component.type == ComponentType.MODEL and component.model_id:
-            model = ModelService.get(db, component.model_id)
-            if model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value:
-                has_odm_model = True
-                break
-
-    if has_knowledge_base and has_odm_model:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="KNOWLEDGE_BASE component and ODM MODEL component cannot coexist in the same workflow",
-        )
-
-    # 2. KNOWLEDGE_BASE가 MODEL 앞에 있는지 순서 검증
-    if not has_knowledge_base:
-        return  # KNOWLEDGE_BASE가 없으면 순서 검증 불필요
-
-    # START 컴포넌트 찾기
-    start_components = [c for c in components if c.type == ComponentType.START]
-    if not start_components:
-        return  # START가 없으면 검증 스킵
-
-    # 컴포넌트 타입 -> 컴포넌트 매핑 (같은 타입이 여러 개일 수 있으므로 리스트로 관리)
-    component_type_map: Dict[ComponentType, List[Any]] = {}
-    for comp in components:
-        if comp.type not in component_type_map:
-            component_type_map[comp.type] = []
-        component_type_map[comp.type].append(comp)
-
-    # 연결 정보로 그래프 구성 (타입 기반)
-    graph: Dict[ComponentType, List[ComponentType]] = {}
-    for conn in connections:
-        source_type = conn.source_component_type
-        target_type = conn.target_component_type
-        if source_type not in graph:
-            graph[source_type] = []
-        graph[source_type].append(target_type)
-
-    # DFS로 각 경로를 독립적으로 확인하여 모든 경로에서 KNOWLEDGE_BASE가 MODEL 앞에 있는지 검증
-    def traverse_path(component_type: ComponentType, path_visited: set, knowledge_base_found_in_path: bool = False):
-        """각 경로를 독립적으로 순회하여 순서 검증"""
-        # 순환 참조 방지 (현재 경로 내에서만)
-        if component_type in path_visited:
-            return
-        path_visited.add(component_type)
-
-        # KNOWLEDGE_BASE 발견
-        if component_type == ComponentType.KNOWLEDGE_BASE:
-            knowledge_base_found_in_path = True
-
-        # MODEL 발견 - 이전에 KNOWLEDGE_BASE가 없었으면 에러
-        if component_type == ComponentType.MODEL:
-            if not knowledge_base_found_in_path:
-                # KNOWLEDGE_BASE가 워크플로우에 있으면 에러
-                if has_knowledge_base:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Knowledge Base components must come before Model components in the workflow",
-                    )
-
-        # 다음 컴포넌트 타입으로 이동 (각 경로를 독립적으로 확인)
-        for next_type in graph.get(component_type, []):
-            traverse_path(next_type, path_visited.copy(), knowledge_base_found_in_path)
-
-    # 모든 START 컴포넌트에서 시작하여 각 경로를 독립적으로 확인
-    for start_component in start_components:
-        traverse_path(ComponentType.START, set(), False)
+    checks = _validate_workflow_definition_checks(db, definition)
+    for check in checks:
+        if not check.passed:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=check.message)
 
 
 # ============= Workflow Test Helper Functions =============
@@ -2633,8 +2765,93 @@ def _validate_ml_workflow(db: Session, workflow: Workflow) -> None:
         )
 
 
+def _get_incoming_outputs(
+    component: WorkflowComponent,
+    workflow: Workflow,
+    outputs: Dict[str, dict],
+) -> dict:
+    """컴포넌트에 연결된 이전 컴포넌트들의 출력을 타입별로 수집"""
+    incoming: Dict[str, str] = {}
+    for conn in workflow.component_connections:
+        if conn.target_component_id != component.id:
+            continue
+        source_output = outputs.get(conn.source_component_id)
+        if not source_output:
+            continue
+
+        if source_output["type"] == "kb":
+            existing = incoming.get("kb_output", "")
+            incoming["kb_output"] = (existing + "\n\n" + source_output["text"]).strip()
+        elif source_output["type"] == "model":
+            existing = incoming.get("model_output", "")
+            incoming["model_output"] = (existing + "\n\n" + source_output["text"]).strip()
+
+    return incoming
+
+
+async def _execute_workflow_graph(
+    db: Session,
+    workflow: Workflow,
+    text: Optional[str] = None,
+    image_base64: Optional[str] = None,
+    service_id: Optional[str] = None,
+    current_user: Optional[UserSchema] = None,
+) -> tuple[List[ComponentTestResult], List[str]]:
+    """범용 그래프 실행 엔진 — 위상 정렬 순서로 컴포넌트를 실행하고 incoming outputs를 전달"""
+    execution_order = _get_workflow_execution_order(workflow)
+
+    if not execution_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No executable components found in workflow.",
+        )
+
+    outputs: Dict[str, dict] = {}
+    results: List[ComponentTestResult] = []
+    execution_order_ids: List[str] = []
+
+    for component in execution_order:
+        execution_order_ids.append(component.id)
+        incoming = _get_incoming_outputs(component, workflow, outputs)
+        config = _get_effective_config(component)
+
+        if component.type == ComponentType.KNOWLEDGE_BASE:
+            query = incoming.get("model_output") or text
+            search_result_text, component_result = await _execute_knowledge_base_search(
+                db, component, query, top_k=config.get("top_k", 3)
+            )
+            if search_result_text:
+                outputs[component.id] = {"type": "kb", "text": search_result_text}
+            results.append(component_result)
+
+        elif component.type == ComponentType.MODEL:
+            model = ModelService.get(db, component.model_id) if component.model_id else None
+            is_od = model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value
+
+            if is_od:
+                component_result = await _execute_odm_inference(
+                    db, workflow.id, component, image_base64, service_id, current_user
+                )
+                results.append(component_result)
+            else:
+                input_text = incoming.get("model_output") or text
+                kb_context = incoming.get("kb_output")
+                component_result = await _execute_llm_inference(
+                    db, workflow.id, component, input_text, kb_context, service_id, current_user, config=config
+                )
+                if isinstance(component_result, ModelComponentTestResult):
+                    if isinstance(component_result.result, ModelLLMTestResult):
+                        outputs[component.id] = {
+                            "type": "model",
+                            "text": component_result.result.response,
+                        }
+                results.append(component_result)
+
+    return results, execution_order_ids
+
+
 async def _execute_knowledge_base_search(
-    db: Session, component: WorkflowComponent, query: str
+    db: Session, component: WorkflowComponent, query: str, top_k: int = 3
 ) -> tuple[Optional[str], ComponentTestResult]:
     """
     지식베이스 검색 실행
@@ -2643,12 +2860,15 @@ async def _execute_knowledge_base_search(
         db: 데이터베이스 세션
         component: 지식베이스 컴포넌트
         query: 검색 쿼리
+        top_k: 검색 결과 상위 N건
 
     Returns:
         (search_result_text, component_result) 튜플
     """
     try:
-        search_result = KnowledgeBaseService.search(db, knowledge_base_id=component.knowledge_base_id, query=query)
+        search_result = KnowledgeBaseService.search(
+            db, knowledge_base_id=component.knowledge_base_id, query=query, top_k=top_k
+        )
 
         # 검색 결과를 문자열로 변환
         search_result_strings = []
@@ -2691,6 +2911,7 @@ async def _execute_llm_inference(
     search_text: Optional[str],
     service_id: Optional[str],
     current_user: UserSchema,
+    config: Optional[dict] = None,
 ) -> ComponentTestResult:
     """
     LLM 모델 추론 실행
@@ -2703,6 +2924,7 @@ async def _execute_llm_inference(
         search_text: 지식베이스 검색 결과 텍스트
         service_id: 서비스 ID
         current_user: 현재 사용자
+        config: 실행 설정 (temperature, top_p, max_tokens)
 
     Returns:
         컴포넌트 테스트 결과
@@ -2808,12 +3030,20 @@ async def _execute_llm_inference(
         user_message = {"role": "user", "content": text}
         messages.append(user_message)
 
+        ollama_options = {}
+        if config:
+            for config_key, ollama_key in CONFIG_TO_OLLAMA_OPTIONS.items():
+                if config_key in config:
+                    ollama_options[ollama_key] = config[config_key]
+
         data = {
             "model": model_repo_id,
             "messages": messages,
             "stream": False,
-            "keep_alive": "525600m",  # 모델을 1년(8760시간) 동안 메모리에 유지
+            "keep_alive": "525600m",
         }
+        if ollama_options:
+            data["options"] = ollama_options
         headers = {"Content-Type": "application/json"}
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
@@ -3158,52 +3388,22 @@ async def test_rag_workflow(
     # RAG 워크플로우 검증
     _validate_rag_workflow(db, workflow)
 
-    # 실행 순서 결정
-    execution_order = _get_workflow_execution_order(workflow)
+    results, execution_order_ids = await _execute_workflow_graph(
+        db,
+        workflow,
+        text=text,
+        service_id=workflow.service_id,
+        current_user=current_user,
+    )
 
-    if not execution_order:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No executable components found in workflow.",
-        )
-
-    # Service ID 확인
-    service_id = workflow.service_id
-
-    results = []
-    execution_order_ids = []
-    knowledge_base_search_result = None
-
-    # 각 컴포넌트를 순서대로 실행
-    for component in execution_order:
-        execution_order_ids.append(component.id)
-
-        if component.type == ComponentType.KNOWLEDGE_BASE:
-            # 지식베이스 검색 실행
-            search_result_text, component_result = await _execute_knowledge_base_search(db, component, text)
-            if search_result_text:
-                knowledge_base_search_result = search_result_text
-            results.append(component_result)
-
-        elif component.type == ComponentType.MODEL:
-            # LLM 모델 추론 실행
-            search_text = knowledge_base_search_result if knowledge_base_search_result else None
-            component_result = await _execute_llm_inference(
-                db, workflow_id, component, text, search_text, service_id, current_user
-            )
-            results.append(component_result)
-
-    # 최종 결과 문자열 추출 (마지막 MODEL 또는 KNOWLEDGE_BASE 컴포넌트의 결과)
-    # 우선순위: MODEL > KNOWLEDGE_BASE
+    # 최종 결과 문자열 추출 (마지막 MODEL > KNOWLEDGE_BASE)
     final_result = None
     for result in reversed(results):
         if isinstance(result, ModelComponentTestResult):
-            # LLM 모델인 경우 response 문자열 추출
             if isinstance(result.result, ModelLLMTestResult):
                 final_result = result.result.response
                 break
         elif isinstance(result, KnowledgeBaseComponentTestResult):
-            # MODEL이 없으면 KNOWLEDGE_BASE 검색 결과 문자열 추출
             if final_result is None:
                 final_result = result.result.search_result
 
@@ -3302,21 +3502,6 @@ async def test_ml_workflow(
     # ML 워크플로우 검증
     _validate_ml_workflow(db, workflow)
 
-    # 실행 순서 결정
-    execution_order = _get_workflow_execution_order(workflow)
-
-    if not execution_order:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No executable components found in workflow.",
-        )
-
-    # Service ID 확인
-    service_id = workflow.service_id
-
-    results = []
-    execution_order_ids = []
-
     # 이미지 읽기 및 base64 인코딩 (한 번만 수행)
     image_base64 = None
     image_bytes = None
@@ -3332,16 +3517,13 @@ async def test_ml_workflow(
                 detail="Unable to read image file",
             )
 
-    # 각 컴포넌트를 순서대로 실행
-    for component in execution_order:
-        execution_order_ids.append(component.id)
-
-        if component.type == ComponentType.MODEL:
-            # ODM 모델 추론 실행
-            component_result = await _execute_odm_inference(
-                db, workflow_id, component, image_base64, service_id, current_user
-            )
-            results.append(component_result)
+    results, execution_order_ids = await _execute_workflow_graph(
+        db,
+        workflow,
+        image_base64=image_base64,
+        service_id=workflow.service_id,
+        current_user=current_user,
+    )
 
     # 최종 결과 이미지 생성 (마지막 MODEL 컴포넌트의 predictions를 이용해 이미지에 bbox와 label 그리기)
     final_result = None

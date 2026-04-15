@@ -109,6 +109,7 @@ class WorkflowComponent(BaseModel, TimestampMixin):
     workflow_id: Mapped[str] = mapped_column(String(36), ForeignKey("workflows.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[ComponentType] = mapped_column(Enum(ComponentType), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # 컴포넌트 설정 정보
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
