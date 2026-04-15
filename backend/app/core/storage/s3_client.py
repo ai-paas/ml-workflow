@@ -3,9 +3,14 @@ import os
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 from core.storage.base import StorageClient
 
 logger = logging.getLogger(__name__)
+
+
+def _force_unsigned_payload(request, **kwargs):
+    request.context["payload_signing_enabled"] = False
 
 
 class S3StorageClient(StorageClient):
@@ -19,7 +24,14 @@ class S3StorageClient(StorageClient):
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                s3={"payload_signing_enabled": False},
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+            ),
         )
+        self.s3_client.meta.events.register("before-sign.s3.*", _force_unsigned_payload)
         self._ensure_bucket()
 
     def _ensure_bucket(self) -> None:
@@ -32,7 +44,7 @@ class S3StorageClient(StorageClient):
 
     def upload_file(self, local_path: str, object_key: str) -> str:
         with open(local_path, "rb") as f:
-            self.s3_client.upload_fileobj(f, self.bucket, object_key)
+            self.s3_client.put_object(Bucket=self.bucket, Key=object_key, Body=f)
         logger.info(f"S3 업로드 완료: s3://{self.bucket}/{object_key}")
         return object_key
 

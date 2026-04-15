@@ -29,7 +29,7 @@ class ExperimentModel(BaseModel, TimestampMixin):
         "Hyperparameter", back_populates="experiment", cascade="all, delete-orphan"
     )
     metrics: Mapped["ExperimentMetricsModel | None"] = relationship(
-        "ExperimentMetricsModel", uselist=False, back_populates="experiment"
+        "ExperimentMetricsModel", uselist=False, back_populates="experiment", cascade="all, delete-orphan"
     )
 
 
@@ -37,7 +37,9 @@ class ExperimentMetricsModel(BaseModel):
     __tablename__ = "experiment_metrics"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    experiment_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("experiment.id"), unique=True, nullable=False)
+    experiment_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("experiment.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
     elapsed_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(TIMESTAMP, nullable=True)
     max_epoch: Mapped[int] = mapped_column(Integer, default=0)
