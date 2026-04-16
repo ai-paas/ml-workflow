@@ -27,7 +27,7 @@ dependencies = [
     "torchvision==0.19.1",
     "python-jose==3.3.0",
     "fastapi-cli==0.0.5",
-    "pymilvus[model]==2.4.4",
+    "pymilvus[model]==2.5.16",
     "langchain==0.2.11",
     "surrochat==0.0.10",
     "httpx",

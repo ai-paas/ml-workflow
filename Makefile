@@ -6,10 +6,13 @@
         harbor-build-predictor harbor-push-predictor harbor-build-push-predictor \
         harbor-build-train harbor-push-train harbor-build-push-train \
         harbor-build-push-all \
+        harbor-build-push-backend-nc harbor-build-push-predictor-nc harbor-build-push-train-nc \
+        harbor-build-push-all-nc \
         flake8 flake8-fix isort black lint lint-fix \
         e2e-llm-workflow-deploy e2e-llm-workflow-delete e2e-llm-workflow-lifecycle \
         e2e-rag-workflow-deploy e2e-rag-workflow-delete e2e-rag-workflow-lifecycle \
-        e2e-workflow-validation
+        e2e-workflow-validation \
+        e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle
 
 APP_DIR := backend/app
 MODE ?= ensure
@@ -36,6 +39,8 @@ help:
 	@echo "  make harbor-build-push-predictor ENV=dev [TAG=latest]"
 	@echo "  make harbor-build-push-train ENV=dev [TAG=latest]"
 	@echo "  make harbor-build-push-all ENV=dev [TAG=latest]"
+	@echo "  make harbor-build-push-backend-nc ENV=dev [TAG=latest]  (--no-cache)"
+	@echo "  make harbor-build-push-all-nc ENV=dev [TAG=latest]      (--no-cache)"
 	@echo "개별: harbor-build-{backend|predictor|train}, harbor-push-{backend|predictor|train}"
 	@echo ""
 	@echo "Lint / Format (.pre-commit-config.yaml 규칙과 동일)"
@@ -137,6 +142,33 @@ harbor-build-push-all:
 	@$(MAKE) harbor-build-push-predictor ENV=$(ENV) TAG=$(TAG)
 	@$(MAKE) harbor-build-push-train ENV=$(ENV) TAG=$(TAG)
 
+# ─── Harbor Build+Push (--no-cache) ─────────────────────────────────────────
+harbor-build-push-backend-nc:
+	@[ -n "$(ENV)" ] || (echo "ERROR: ENV를 지정하세요." && exit 1)
+	@set -a && . $(ENV_FILE) && set +a && \
+		docker buildx build --no-cache --platform linux/amd64 -f backend/Dockerfile \
+		-t $$HARBOR_URL/$$HARBOR_REPOSITORY/$$BACKEND_PROJECT_NAME:$(TAG) . && \
+		docker push $$HARBOR_URL/$$HARBOR_REPOSITORY/$$BACKEND_PROJECT_NAME:$(TAG)
+
+harbor-build-push-predictor-nc:
+	@[ -n "$(ENV)" ] || (echo "ERROR: ENV를 지정하세요." && exit 1)
+	@set -a && . $(ENV_FILE) && set +a && \
+		docker buildx build --no-cache --platform linux/amd64 -f predictor/Dockerfile \
+		-t $$HARBOR_URL/$$HARBOR_REPOSITORY/$$INFERENCE_PROJECT_NAME:$(TAG) . && \
+		docker push $$HARBOR_URL/$$HARBOR_REPOSITORY/$$INFERENCE_PROJECT_NAME:$(TAG)
+
+harbor-build-push-train-nc:
+	@[ -n "$(ENV)" ] || (echo "ERROR: ENV를 지정하세요." && exit 1)
+	@set -a && . $(ENV_FILE) && set +a && \
+		docker buildx build --no-cache --platform linux/amd64 -f train_eval/Dockerfile \
+		-t $$HARBOR_URL/$$HARBOR_REPOSITORY/$$TRAIN_PROJECT_NAME:$(TAG) . && \
+		docker push $$HARBOR_URL/$$HARBOR_REPOSITORY/$$TRAIN_PROJECT_NAME:$(TAG)
+
+harbor-build-push-all-nc:
+	@$(MAKE) harbor-build-push-backend-nc ENV=$(ENV) TAG=$(TAG)
+	@$(MAKE) harbor-build-push-predictor-nc ENV=$(ENV) TAG=$(TAG)
+	@$(MAKE) harbor-build-push-train-nc ENV=$(ENV) TAG=$(TAG)
+
 # ─── Lint / Format (.pre-commit-config.yaml 규칙과 동일) ──────────────────
 FLAKE8_IGNORE := E203,W503,W605,E712,E266,F401,E402,F821,E711,F403
 FLAKE8_EXCLUDE := .venv,*/.venv
@@ -187,3 +219,30 @@ e2e-rag-workflow-lifecycle:
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
 	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s
+
+# ─── E2E: 워크플로우 시나리오 (§5.2 — 7개 시나리오) ────────────────────────────
+# SCENARIO=1~7 로 시나리오를 선택한다.
+#   make e2e-wf-scenario-info                    # 전체 시나리오 목록
+#   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
+#   make e2e-wf-scenario-deploy SCENARIO=3       # 3번 시나리오 배포
+#   make e2e-wf-scenario-delete SCENARIO=3       # 3번 시나리오 삭제
+#   make e2e-wf-scenario-lifecycle SCENARIO=3    # 3번 시나리오 전체 생명주기
+
+e2e-wf-scenario-info:
+	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-info SCENARIO=1" && exit 1)
+	@uv run --group e2e python $(E2E_DIR)/workflow_scenarios.py $(SCENARIO)
+
+e2e-wf-scenario-deploy:
+	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-deploy SCENARIO=1" && exit 1)
+	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 배포 테스트"
+	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
+
+e2e-wf-scenario-delete:
+	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-delete SCENARIO=1" && exit 1)
+	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 삭제 테스트"
+	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_delete.py -v -s
+
+e2e-wf-scenario-lifecycle:
+	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
+	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
+	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s

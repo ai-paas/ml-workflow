@@ -17,6 +17,13 @@ PASSWORD: str = os.environ.get("E2E_PASSWORD", "admin")
 TARGET_MODEL_NAME: str = os.environ.get("E2E_TARGET_MODEL_NAME", "gpt-oss-20b")
 TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NAME", "bge-m3")
 
+_scenario_raw = os.environ.get("E2E_SCENARIO")
+if not _scenario_raw:
+    raise RuntimeError(
+        "E2E_SCENARIO 환경변수가 설정되지 않았습니다. " "make e2e-wf-scenario-deploy SCENARIO=N 형태로 실행하세요."
+    )
+SCENARIO_NUM: int = int(_scenario_raw)
+
 DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "600"))
 POLL_INTERVAL_SEC: int = int(os.environ.get("E2E_POLL_INTERVAL_SEC", "10"))
 DELETE_TIMEOUT_SEC: int = int(os.environ.get("E2E_DELETE_TIMEOUT_SEC", "300"))
@@ -29,6 +36,10 @@ KB_THRESHOLD: float = float(os.environ.get("E2E_KB_THRESHOLD", "0.5"))
 
 # ── Knowledge Base 파일 경로 ─────────────────────────────────────────────
 KB_FILE_DIR: Path = Path(__file__).parent / "knowledge-base-file"
+KB_FILES: list[Path] = [
+    KB_FILE_DIR / "고압가스 안전관리법(법률)(제21065호)(20251001).pdf",
+    KB_FILE_DIR / "건축서비스산업 진흥법(법률)(제19990호)(20240710).pdf",
+]
 
 # ── 시나리오 간 상태 공유 ──────────────────────────────────────────────────
 STATE_FILE: Path = Path(__file__).parent / ".state.json"

@@ -2465,6 +2465,22 @@ def _validate_workflow_definition_checks(
     results: List[ValidationCheckResult] = []
     component_map = {c.ref_id: c for c in definition.components}
 
+    # 0. START / END 각 1개 필수
+    start_count = sum(1 for c in definition.components if c.type == ComponentType.START)
+    end_count = sum(1 for c in definition.components if c.type == ComponentType.END)
+    se_errors = []
+    if start_count != 1:
+        se_errors.append(f"START 컴포넌트는 정확히 1개여야 합니다. (현재 {start_count}개)")
+    if end_count != 1:
+        se_errors.append(f"END 컴포넌트는 정확히 1개여야 합니다. (현재 {end_count}개)")
+    results.append(
+        ValidationCheckResult(
+            rule="single_start_end",
+            passed=len(se_errors) == 0,
+            message="; ".join(se_errors) if se_errors else None,
+        )
+    )
+
     # 1. ref_id 유효성
     ref_id_errors = []
     for conn in definition.connections:
@@ -2685,6 +2701,101 @@ def _validate_workflow_definition_checks(
             rule="kb_incoming_model_limit",
             passed=len(kb_model_conn_errors) == 0,
             message="; ".join(kb_model_conn_errors) if kb_model_conn_errors else None,
+        )
+    )
+
+    # 13. START 데드 연결 검사 — START 직접 타겟이 동시에 MODEL/KB로부터 연결을 받으면 안 됨
+    #     START는 출력을 생성하지 않으므로, 다른 소스와 공존하는 START 연결은 데이터 전달 효과가 없다.
+    dead_start_errors = []
+    start_targets = set()
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        if src and src.type == ComponentType.START:
+            start_targets.add(conn.target_ref_id)
+
+    for target_ref in start_targets:
+        other_source_names = []
+        for conn in definition.connections:
+            if conn.target_ref_id != target_ref:
+                continue
+            src = component_map.get(conn.source_ref_id)
+            if src and src.type in (ComponentType.MODEL, ComponentType.KNOWLEDGE_BASE):
+                other_source_names.append(f"'{src.name}'")
+
+        if other_source_names:
+            tgt = component_map.get(target_ref)
+            tgt_name = tgt.name if tgt else target_ref
+            dead_start_errors.append(
+                f"'{tgt_name}'은(는) START에서 직접 연결되면서 동시에 "
+                f"{', '.join(other_source_names)}에서도 연결을 받고 있습니다. "
+                f"START는 출력을 생성하지 않으므로 이 연결은 데이터 전달 효과가 없습니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="no_dead_start_connection",
+            passed=len(dead_start_errors) == 0,
+            message="; ".join(dead_start_errors) if dead_start_errors else None,
+        )
+    )
+
+    # 14. 모든 실행 가능 컴포넌트(MODEL, KB)는 START→END 경로에 포함되어야 함
+    #     경로에 포함되지 않는 컴포넌트는 고아(orphan)이거나 데드엔드로, 불필요하게 실행될 수 있다.
+    reachability_errors = []
+    all_path_refs = set()
+    for path in all_paths:
+        all_path_refs.update(path)
+    for comp in definition.components:
+        if comp.type in (ComponentType.MODEL, ComponentType.KNOWLEDGE_BASE):
+            if comp.ref_id not in all_path_refs:
+                reachability_errors.append(
+                    f"'{comp.name}'({comp.type.value})이(가) START→END 경로에 포함되지 않습니다. "
+                    f"연결이 누락되었거나 불필요한 컴포넌트일 수 있습니다."
+                )
+    results.append(
+        ValidationCheckResult(
+            rule="component_reachability",
+            passed=len(reachability_errors) == 0,
+            message="; ".join(reachability_errors) if reachability_errors else None,
+        )
+    )
+
+    # 15. 모든 START→END 경로에 최소 1개의 MODEL 포함
+    #     MODEL 없는 경로(시작→종료, 시작→KB→종료 등)는 의미 있는 출력을 생성하지 않는다.
+    no_model_path_errors = []
+    for path in all_paths:
+        model_count_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.MODEL
+        )
+        if model_count_in_path == 0:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            no_model_path_errors.append(
+                f"경로({' → '.join(names)})에 MODEL 컴포넌트가 없습니다. " f"각 경로에는 최소 1개의 MODEL이 필요합니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="minimum_model_per_path",
+            passed=len(no_model_path_errors) == 0,
+            message="; ".join(no_model_path_errors) if no_model_path_errors else None,
+        )
+    )
+
+    # 16. 중복 연결 검사 — 동일한 source→target 쌍이 2회 이상 등장하면 안 됨
+    seen_conns = set()
+    duplicate_errors = []
+    for conn in definition.connections:
+        key = (conn.source_ref_id, conn.target_ref_id)
+        if key in seen_conns:
+            src = component_map.get(conn.source_ref_id)
+            tgt = component_map.get(conn.target_ref_id)
+            src_name = src.name if src else conn.source_ref_id
+            tgt_name = tgt.name if tgt else conn.target_ref_id
+            duplicate_errors.append(f"'{src_name}' → '{tgt_name}' 연결이 중복되었습니다.")
+        seen_conns.add(key)
+    results.append(
+        ValidationCheckResult(
+            rule="no_duplicate_connections",
+            passed=len(duplicate_errors) == 0,
+            message="; ".join(duplicate_errors) if duplicate_errors else None,
         )
     )
 
