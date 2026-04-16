@@ -1,6 +1,6 @@
 """워크플로우 시나리오 정의 모듈
 
-§5.2 개선 후 정상 동작하는 7개 시나리오의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
+§5.2 개선 후 정상 동작하는 9개 시나리오의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
 
 CLI 실행 (SCENARIO 필수):
   python workflow_scenarios.py 3         # 3번 시나리오 상세
@@ -43,6 +43,22 @@ def _kb_component(ref_id: str, name: str, kb_id: int, top_k: int = 3) -> dict:
 
 SCENARIOS: dict[int, dict] = {
     1: {
+        "name": "단순 LLM",
+        "graph": "시작 → LLM → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "대한민국의 수도는 어디인가요?",
+        "prompts": {},
+    },
+    2: {
+        "name": "단순 RAG",
+        "graph": "시작 → KB → LLM → 종료",
+        "kb_count": 1,
+        "kb_labels": ["고압가스 안전관리법"],
+        "inference_text": "고압가스 안전관리법의 목적은 무엇인가요?",
+        "prompts": {},
+    },
+    3: {
         "name": "LLM 체인",
         "graph": "시작 → LLM → LLM → 종료",
         "kb_count": 0,
@@ -69,7 +85,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    2: {
+    4: {
         "name": "RAG + LLM 체인",
         "graph": "시작 → KB → LLM → LLM → 종료",
         "kb_count": 1,
@@ -97,7 +113,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    3: {
+    5: {
         "name": "쿼리 정제 RAG",
         "graph": "시작 → LLM → KB → LLM → 종료",
         "kb_count": 1,
@@ -125,7 +141,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    4: {
+    6: {
         "name": "병렬 분기",
         "graph": "시작 → [LLM1 / LLM2] → LLM3 → 종료",
         "kb_count": 0,
@@ -161,7 +177,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    5: {
+    7: {
         "name": "비대칭 병렬",
         "graph": "시작 → [LLM1 / KB+LLM2] → LLM3 → 종료",
         "kb_count": 1,
@@ -198,7 +214,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    6: {
+    8: {
         "name": "대칭 병렬 RAG",
         "graph": "시작 → [KB(고압가스)+LLM1 / KB(건축서비스)+LLM2] → LLM3 → 종료",
         "kb_count": 2,
@@ -238,7 +254,7 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
-    7: {
+    9: {
         "name": "대칭 병렬 쿼리 정제 RAG",
         "graph": "시작 → [LLM→KB(고압가스) / LLM→KB(건축서비스)] → LLM → 종료",
         "kb_count": 2,
@@ -285,6 +301,40 @@ SCENARIOS: dict[int, dict] = {
 
 
 def _build_scenario_1(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → LLM → 종료"""
+    start, llm, end = _ref("start"), _ref("llm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _model_component(llm, "LLM", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": llm},
+            {"source_ref_id": llm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_2(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → KB → LLM → 종료"""
+    start, kb, llm, end = _ref("start"), _ref("kb"), _ref("llm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _kb_component(kb, "Knowledge Base", kb_ids[0], top_k),
+            _model_component(llm, "LLM", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": kb},
+            {"source_ref_id": kb, "target_ref_id": llm},
+            {"source_ref_id": llm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_3(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → LLM_A → LLM_B → 종료"""
     start, llm_a, llm_b, end = _ref("start"), _ref("llm-a"), _ref("llm-b"), _ref("end")
     return {
@@ -302,7 +352,7 @@ def _build_scenario_1(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_2(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_4(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → KB → LLM_A → LLM_B → 종료"""
     start, kb, llm_a, llm_b, end = (
         _ref("start"),
@@ -328,7 +378,7 @@ def _build_scenario_2(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_3(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_5(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → LLM_A → KB → LLM_B → 종료"""
     start, llm_a, kb, llm_b, end = (
         _ref("start"),
@@ -354,7 +404,7 @@ def _build_scenario_3(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_4(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_6(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → [LLM1 / LLM2] → LLM3 → 종료"""
     start, llm1, llm2, llm3, end = (
         _ref("start"),
@@ -381,7 +431,7 @@ def _build_scenario_4(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_5(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_7(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → [LLM1 / KB+LLM2] → LLM3 → 종료"""
     start, llm1, kb, llm2, llm3, end = (
         _ref("start"),
@@ -411,7 +461,7 @@ def _build_scenario_5(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_6(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_8(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → [KB1+LLM1 / KB2+LLM2] → LLM3 → 종료"""
     start, kb1, llm1, kb2, llm2, llm3, end = (
         _ref("start"),
@@ -444,7 +494,7 @@ def _build_scenario_6(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
-def _build_scenario_7(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+def _build_scenario_9(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
     """시작 → [LLM_A→KB_A / LLM_B→KB_B] → LLM_C → 종료"""
     start, llm_a, kb_a, llm_b, kb_b, llm_c, end = (
         _ref("start"),
@@ -485,6 +535,8 @@ _BUILDERS = {
     5: _build_scenario_5,
     6: _build_scenario_6,
     7: _build_scenario_7,
+    8: _build_scenario_8,
+    9: _build_scenario_9,
 }
 
 
@@ -544,10 +596,14 @@ def _print_scenario(num: int, s: dict) -> None:
     print(f"  #{num}  {s['name']}")
     print(f"      구성: {s['graph']}")
     print(f"      KB: {kb_label}")
-    print("      LLM 프롬프트:")
-    for comp_name, p in s["prompts"].items():
-        ctx_mark = " ({context} 포함)" if p["has_context"] else ""
-        print(f"        - {comp_name}: {p['name']}{ctx_mark}")
+    prompts = s.get("prompts", {})
+    if prompts:
+        print("      LLM 프롬프트:")
+        for comp_name, p in prompts.items():
+            ctx_mark = " ({context} 포함)" if p["has_context"] else ""
+            print(f"        - {comp_name}: {p['name']}{ctx_mark}")
+    else:
+        print("      LLM 프롬프트: 없음 (기본 설정)")
     print()
 
 

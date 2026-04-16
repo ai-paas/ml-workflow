@@ -20,9 +20,12 @@ TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NA
 _scenario_raw = os.environ.get("E2E_SCENARIO")
 if not _scenario_raw:
     raise RuntimeError(
-        "E2E_SCENARIO 환경변수가 설정되지 않았습니다. " "make e2e-wf-scenario-deploy SCENARIO=N 형태로 실행하세요."
+        "E2E_SCENARIO 환경변수가 설정되지 않았습니다. "
+        "make e2e-wf-scenario-deploy SCENARIO=N 형태로 실행하세요. (N: 1~9)"
     )
 SCENARIO_NUM: int = int(_scenario_raw)
+
+EXECUTE_GPUS: int = int(os.environ.get("E2E_GPUS", "0"))
 
 DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "600"))
 POLL_INTERVAL_SEC: int = int(os.environ.get("E2E_POLL_INTERVAL_SEC", "10"))

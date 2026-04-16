@@ -9,8 +9,6 @@
         harbor-build-push-backend-nc harbor-build-push-predictor-nc harbor-build-push-train-nc \
         harbor-build-push-all-nc \
         flake8 flake8-fix isort black lint lint-fix \
-        e2e-llm-workflow-deploy e2e-llm-workflow-delete e2e-llm-workflow-lifecycle \
-        e2e-rag-workflow-deploy e2e-rag-workflow-delete e2e-rag-workflow-lifecycle \
         e2e-workflow-validation \
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle
 
@@ -192,41 +190,19 @@ lint-fix: isort black flake8-fix
 # ─── E2E Tests ─────────────────────────────────────────────────────────────
 E2E_DIR := e2e-test
 
-e2e-llm-workflow-deploy:
-	@echo "▶ E2E: LLM 워크플로우 배포 시나리오 테스트"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_deploy.py -v -s
-
-e2e-llm-workflow-delete:
-	@echo "▶ E2E: LLM 워크플로우 삭제 시나리오 테스트"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_delete.py -v -s
-
-e2e-llm-workflow-lifecycle:
-	@echo "▶ E2E: LLM 워크플로우 전체 생명주기 테스트 (생성→배포→추론→삭제)"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_lifecycle.py -v -s
-
-e2e-rag-workflow-deploy:
-	@echo "▶ E2E: RAG 워크플로우 배포 시나리오 테스트 (KB생성→배포→추론)"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_deploy.py -v -s
-
-e2e-rag-workflow-delete:
-	@echo "▶ E2E: RAG 워크플로우 삭제 시나리오 테스트 (워크플로우 삭제→KB 삭제)"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_delete.py -v -s
-
-e2e-rag-workflow-lifecycle:
-	@echo "▶ E2E: RAG 워크플로우 전체 생명주기 테스트 (KB생성→배포→추론→삭제→KB삭제)"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_lifecycle.py -v -s
-
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
 	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s
 
-# ─── E2E: 워크플로우 시나리오 (§5.2 — 7개 시나리오) ────────────────────────────
-# SCENARIO=1~7 로 시나리오를 선택한다.
+# ─── E2E: 워크플로우 시나리오 (9개) ─────────────────────────────────────────────
+# SCENARIO=1~9 로 시나리오를 선택한다.
+# 1: 단순 LLM  2: 단순 RAG  3~9: 복합 시나리오 (체인/병렬/쿼리정제 등)
 #   make e2e-wf-scenario-info                    # 전체 시나리오 목록
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
-#   make e2e-wf-scenario-deploy SCENARIO=3       # 3번 시나리오 배포
-#   make e2e-wf-scenario-delete SCENARIO=3       # 3번 시나리오 삭제
-#   make e2e-wf-scenario-lifecycle SCENARIO=3    # 3번 시나리오 전체 생명주기
+#   make e2e-wf-scenario-deploy SCENARIO=3              # 3번 시나리오 배포
+#   make e2e-wf-scenario-deploy SCENARIO=1 GPUS=1      # GPU 1개로 배포
+#   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 삭제
+#   make e2e-wf-scenario-lifecycle SCENARIO=3           # 3번 시나리오 전체 생명주기
 
 e2e-wf-scenario-info:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-info SCENARIO=1" && exit 1)
@@ -235,7 +211,7 @@ e2e-wf-scenario-info:
 e2e-wf-scenario-deploy:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-deploy SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 배포 테스트"
-	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
+	E2E_SCENARIO=$(SCENARIO) E2E_GPUS=$(or $(GPUS),0) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
 
 e2e-wf-scenario-delete:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-delete SCENARIO=1" && exit 1)
@@ -245,4 +221,4 @@ e2e-wf-scenario-delete:
 e2e-wf-scenario-lifecycle:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
-	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s
+	E2E_SCENARIO=$(SCENARIO) E2E_GPUS=$(or $(GPUS),0) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s

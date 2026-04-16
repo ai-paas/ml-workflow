@@ -330,9 +330,16 @@ class ModelBaseDeploymentService:
                     },
                 )
 
+                ollama_env = [
+                    client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
+                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                ]
+
                 if gpu_enabled:
                     ollama_resources.requests["nvidia.com/gpu"] = "1"
                     ollama_resources.limits["nvidia.com/gpu"] = "1"
+                else:
+                    ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
                 # 2. Deployment 생성
                 deployment = client.V1Deployment(
@@ -371,10 +378,7 @@ class ModelBaseDeploymentService:
                                             client.V1ContainerPort(container_port=11434, name="http", protocol="TCP")
                                         ],
                                         resources=ollama_resources,
-                                        env=[
-                                            client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
-                                            client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
-                                        ],
+                                        env=ollama_env,
                                         volume_mounts=[
                                             client.V1VolumeMount(
                                                 name="model-data",

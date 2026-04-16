@@ -25,6 +25,7 @@ import pytest
 import requests
 from config import (
     DEPLOY_TIMEOUT_SEC,
+    EXECUTE_GPUS,
     KB_CHUNK_OVERLAP,
     KB_CHUNK_SIZE,
     KB_FILES,
@@ -226,14 +227,19 @@ class TestWorkflowScenarioDeploy:
         wf_id = self.__class__.workflow_id
         assert wf_id
 
+        params = {}
+        if EXECUTE_GPUS > 0:
+            params["gpus"] = EXECUTE_GPUS
+
         resp = requests.post(
             f"{api_url}/workflows/{wf_id}/execute",
-            json={"parameters": {}},
+            json={"parameters": params},
             headers=auth_headers,
         )
         assert resp.status_code == 200, f"실행 실패: {resp.status_code} {resp.text}"
         assert resp.json()["status"] == "running"
-        print("\n✔ 워크플로우 실행 시작")
+        gpu_msg = f" (gpus={EXECUTE_GPUS})" if EXECUTE_GPUS > 0 else ""
+        print(f"\n✔ 워크플로우 실행 시작{gpu_msg}")
 
     def test_08_wait_for_deployment(self, api_url: str, auth_headers: dict):
         """배포가 완료될 때까지 폴링한다."""

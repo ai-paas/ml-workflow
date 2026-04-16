@@ -81,7 +81,7 @@ class WorkflowExecutor:
                 parameters=parameters,
             )
 
-            # 워크플로우 kubeflow_run_id만 업데이트 (상태는 파이프라인 완료 시 END 컴포넌트에서 업데이트)
+            # 워크플로우 kubeflow_run_id만 업데이트 (상태는 MODEL 컴포넌트 배포 콜백에서 업데이트)
             workflow.kubeflow_run_id = run_id
 
             # KServe 배포 정보 초기화
@@ -183,32 +183,9 @@ class WorkflowExecutor:
         Returns:
             Kubeflow 태스크
         """
-        # START 컴포넌트
-        if component.type == ComponentType.START:
-
-            @dsl.component(base_image="python:3.10-slim", packages_to_install=["requests", "pandas"])
-            def start_component(workflow_id: str, component_id: str, config: str = "{}") -> str:
-                import json
-                import logging
-
-                logging.info(f"Starting workflow {workflow_id}, component {component_id}")
-                config_dict = json.loads(config)
-
-                # 입력 데이터 처리 로직
-                result = {
-                    "workflow_id": workflow_id,
-                    "component_id": component_id,
-                    "status": "started",
-                    "config": config_dict,
-                }
-
-                return json.dumps(result)
-
-            return start_component(
-                workflow_id=str(workflow.id),
-                component_id=component.id,
-                config=json.dumps(component.config or {}),
-            )
+        # START/END는 UI 시각화 전용이므로 파이프라인 태스크로 생성하지 않음
+        if component.type in (ComponentType.START, ComponentType.END):
+            return None
 
         # MODEL 컴포넌트
         elif component.type == ComponentType.MODEL:
@@ -401,11 +378,20 @@ class WorkflowExecutor:
                             },
                         )
 
+                        ollama_env = [
+                            client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
+                            client.V1EnvVar(name="COMPONENT_ID", value=component_id),
+                            client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                        ]
+
                         if gpus > 0:
                             gpu_count = str(gpus)
                             ollama_resources.requests["nvidia.com/gpu"] = gpu_count
                             ollama_resources.limits["nvidia.com/gpu"] = gpu_count
                             logger.info(f"Allocating {gpu_count} GPU(s) for model: {ollama_model_name}")
+                        else:
+                            ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
+                            logger.info(f"CPU-only mode for model: {ollama_model_name} (GPU access blocked)")
 
                         # 2. Deployment 생성
                         deployment = client.V1Deployment(
@@ -446,11 +432,7 @@ class WorkflowExecutor:
                                                     )
                                                 ],
                                                 resources=ollama_resources,
-                                                env=[
-                                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
-                                                    client.V1EnvVar(name="COMPONENT_ID", value=component_id),
-                                                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
-                                                ],
+                                                env=ollama_env,
                                                 volume_mounts=[
                                                     client.V1VolumeMount(
                                                         name="model-data",
@@ -716,11 +698,18 @@ class WorkflowExecutor:
                         limits={"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "1Gi"},  # 폭주 방지용 제한만 설정
                     )
 
+                    kserve_env = [
+                        client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
+                        client.V1EnvVar(name="COMPONENT_ID", value=component_id),
+                    ]
+
                     if gpus > 0:
                         gpu_count = str(gpus)
                         resources.requests["nvidia.com/gpu"] = gpu_count
                         resources.limits["nvidia.com/gpu"] = gpu_count
                         logger.info(f"Allocating {gpu_count} GPU(s) for MLflow model: {model_name}")
+                    else:
+                        kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
                     # Predictor 스펙 생성
                     predictor_spec = V1beta1PredictorSpec(
@@ -731,10 +720,7 @@ class WorkflowExecutor:
                                 image=infer_image_url,
                                 args=container_args,
                                 resources=resources,
-                                env=[
-                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
-                                    client.V1EnvVar(name="COMPONENT_ID", value=component_id),
-                                ],
+                                env=kserve_env,
                             )
                         ],
                         image_pull_secrets=[client.V1LocalObjectReference(name=image_pull_secret_name)],
@@ -1105,51 +1091,6 @@ class WorkflowExecutor:
                 node_name=parameters.get("node_name", ""),
             )
 
-        # END 컴포넌트
-        elif component.type == ComponentType.END:
-
-            @dsl.component(base_image="python:3.10-slim", packages_to_install=["requests"])
-            def end_component(
-                workflow_id: str,
-                component_id: str,
-                input_data: str = "{}",
-                config: str = "{}",
-                rest_api_url: str = "",
-                restapi_username: str = "",
-                restapi_password: str = "",
-            ) -> str:
-                import json
-                import logging
-
-                import requests
-
-                logging.info(f"Ending workflow {workflow_id}, component {component_id}")
-
-                input_dict = json.loads(input_data)
-                config_dict = json.loads(config)
-
-                # 결과 처리 로직
-                # 참고: 워크플로우 상태는 MODEL component에서 배포 완료 시 ACTIVE로 업데이트됨
-                result = {
-                    "workflow_id": workflow_id,
-                    "component_id": component_id,
-                    "status": "completed",
-                    "results": input_dict,
-                    "config": config_dict,
-                }
-
-                return json.dumps(result)
-
-            return end_component(
-                workflow_id=str(workflow.id),
-                component_id=component.id,
-                input_data="{}",  # 이전 태스크 출력 연결 필요
-                config=json.dumps(component.config or {}),
-                rest_api_url=parameters.get("rest_api_url", ""),
-                restapi_username=parameters.get("restapi_username", ""),
-                restapi_password=parameters.get("restapi_password", ""),
-            )
-
         return None
 
     def _sort_components_by_dependencies(self, workflow: Workflow) -> List[WorkflowComponent]:
@@ -1162,10 +1103,10 @@ class WorkflowExecutor:
         Returns:
             정렬된 컴포넌트 리스트
         """
-        # 간단한 타입 기반 정렬 (실제로는 연결 정보 기반 토폴로지 정렬 필요)
-        type_order = {ComponentType.START: 0, ComponentType.MODEL: 1, ComponentType.END: 2}
+        # START/END는 파이프라인 태스크 없이 스킵되므로 MODEL만 정렬
+        model_components = [c for c in workflow.components if c.type not in (ComponentType.START, ComponentType.END)]
 
-        return sorted(workflow.components, key=lambda c: type_order.get(c.type, 99))
+        return sorted(model_components, key=lambda c: c.id)
 
     def _get_component_dependencies(self, component: WorkflowComponent, workflow: Workflow) -> List[str]:
         """
@@ -1180,12 +1121,13 @@ class WorkflowExecutor:
         """
         dependencies = []
 
-        # 컴포넌트 연결 정보에서 의존성 찾기
+        # START/END는 파이프라인 태스크가 없으므로 의존성에서 제외
+        skip_types = (ComponentType.START, ComponentType.END)
+
         for connection in workflow.component_connections:
             if connection.target_component_id == component.id:
-                # 소스 컴포넌트의 id 찾기
                 for comp in workflow.components:
-                    if comp.id == connection.source_component_id:
+                    if comp.id == connection.source_component_id and comp.type not in skip_types:
                         dependencies.append(comp.id)
                         break
 
