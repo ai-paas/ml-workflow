@@ -2,25 +2,23 @@ FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 as builder
 
 WORKDIR /app
 
-# # 타임존 설정
-# ENV TZ=Asia/Seoul
-# RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
 # 필요한 패키지 설치
 RUN apt-get update && apt-get install -y \
     python3-pip \
     curl \
     gcc \
     build-essential \
-    sudo \
-    && pip3 install pipenv
+    sudo
 
+# uv 바이너리 복사
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Copy only the Pipfile and Pipfile.lock to leverage Docker cache
-COPY backend/Pipfile backend/Pipfile.lock ./
+# 의존성 파일 복사 (Docker 캐시 활용)
+COPY backend/pyproject.toml backend/uv.lock ./
 
-# Install the dependencies via pipenv
-RUN pipenv install --deploy --system
+# uv.lock → requirements.txt 변환 후 시스템 Python에 설치
+RUN uv export --frozen --no-dev --no-emit-project -o requirements.txt && \
+    uv pip install --system --no-cache -r requirements.txt
 FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
 
 

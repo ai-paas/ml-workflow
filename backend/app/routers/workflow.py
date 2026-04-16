@@ -59,7 +59,7 @@ from schemas.workflow import (
 from services.app_service import ServiceMonitoringService
 from services.knowledge_base import KnowledgeBaseService
 from services.kserve_deployment import KServeDeploymentService
-from services.model import ModelService
+from services.model import PREDEFINED_MODEL_CONFIGS, ModelService
 from services.workflow import WorkflowService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
@@ -2577,7 +2577,35 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 9. config 유효성 (Pydantic validator가 이미 처리하지만, validate API 용도로 명시 검증)
+    # 9. max_tokens vs 모델 context length 검증
+    max_tokens_errors = []
+    for comp in definition.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        max_tokens_val = (comp.config or {}).get("max_tokens")
+        if max_tokens_val is None:
+            continue
+        model = ModelService.get(db, comp.model_id)
+        if not model or not model.repo_id:
+            continue
+        predefined = PREDEFINED_MODEL_CONFIGS.get(model.repo_id)
+        if not predefined:
+            continue
+        ctx_len = predefined.get("max_context_length")
+        if ctx_len and int(max_tokens_val) > ctx_len:
+            max_tokens_errors.append(
+                f"{comp.ref_id}: max_tokens({int(max_tokens_val)})가 "
+                f"{model.repo_id}의 context length({ctx_len: , })를 초과합니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="max_tokens_within_context_length",
+            passed=len(max_tokens_errors) == 0,
+            message="; ".join(max_tokens_errors) if max_tokens_errors else None,
+        )
+    )
+
+    # 10. config 유효성 (Pydantic validator가 이미 처리하지만, validate API 용도로 명시 검증)
     config_errors = []
     for comp in definition.components:
         try:
@@ -2589,6 +2617,74 @@ def _validate_workflow_definition_checks(
             rule="config_validation",
             passed=len(config_errors) == 0,
             message="; ".join(config_errors) if config_errors else None,
+        )
+    )
+
+    # 11. 경로당 컴포넌트 수 제한 (§4.2) — MODEL ≤ 2/경로, KB ≤ 1/경로
+    path_limit_errors = []
+    graph_fwd: Dict[str, List[str]] = {}
+    for conn in definition.connections:
+        graph_fwd.setdefault(conn.source_ref_id, []).append(conn.target_ref_id)
+
+    start_ref_ids = [c.ref_id for c in definition.components if c.type == ComponentType.START]
+    end_ref_ids = {c.ref_id for c in definition.components if c.type == ComponentType.END}
+
+    all_paths: List[List[str]] = []
+    for s in start_ref_ids:
+        stack = [(s, [s])]
+        while stack:
+            node, path = stack.pop()
+            if node in end_ref_ids:
+                all_paths.append(path)
+                continue
+            for nxt in graph_fwd.get(node, []):
+                if nxt not in set(path):
+                    stack.append((nxt, path + [nxt]))
+
+    for path in all_paths:
+        model_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.MODEL
+        )
+        kb_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.KNOWLEDGE_BASE
+        )
+        if model_in_path > 2:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            path_limit_errors.append(
+                f"경로({' → '.join(names)})에 MODEL 컴포넌트가 {model_in_path}개입니다. (최대 2개)"
+            )
+        if kb_in_path > 1:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            path_limit_errors.append(
+                f"경로({' → '.join(names)})에 KNOWLEDGE_BASE 컴포넌트가 {kb_in_path}개입니다. (최대 1개)"
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="path_component_limit",
+            passed=len(path_limit_errors) == 0,
+            message="; ".join(path_limit_errors) if path_limit_errors else None,
+        )
+    )
+
+    # 12. KB로 들어오는 MODEL 연결은 최대 1개 (§4.3)
+    kb_model_conn_errors = []
+    kb_model_incoming: Dict[str, int] = {}
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        tgt = component_map.get(conn.target_ref_id)
+        if src and tgt and src.type == ComponentType.MODEL and tgt.type == ComponentType.KNOWLEDGE_BASE:
+            kb_model_incoming[tgt.ref_id] = kb_model_incoming.get(tgt.ref_id, 0) + 1
+
+    for kb_ref_id, cnt in kb_model_incoming.items():
+        if cnt > 1:
+            kb_comp = component_map.get(kb_ref_id)
+            kb_name = kb_comp.name if kb_comp else kb_ref_id
+            kb_model_conn_errors.append(f"KNOWLEDGE_BASE '{kb_name}'에 {cnt}개의 MODEL 연결이 들어옵니다. (최대 1개)")
+    results.append(
+        ValidationCheckResult(
+            rule="kb_incoming_model_limit",
+            passed=len(kb_model_conn_errors) == 0,
+            message="; ".join(kb_model_conn_errors) if kb_model_conn_errors else None,
         )
     )
 
@@ -2653,7 +2749,7 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
                 logger.info(
                     f"Scaling bbox: model_input={model_width}x{model_height}, "
                     f"original={original_width}x{original_height}, "
-                    f"scale=({scale_x:.2f}, {scale_y:.2f})"
+                    f"scale=({scale_x: .2f}, {scale_y: .2f})"
                 )
 
         # 각 prediction에 대해 bbox와 label 그리기
@@ -2678,7 +2774,7 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
                 draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=3)
 
                 # 레이블 텍스트 (label + score)
-                text = f"{label}: {score:.2f}"
+                text = f"{label}: {score: .2f}"
 
                 # 텍스트 배경 박스
                 text_bbox = draw.textbbox((xmin, ymin - 25), text, font=font)
@@ -2770,8 +2866,16 @@ def _get_incoming_outputs(
     workflow: Workflow,
     outputs: Dict[str, dict],
 ) -> dict:
-    """컴포넌트에 연결된 이전 컴포넌트들의 출력을 타입별로 수집"""
-    incoming: Dict[str, str] = {}
+    """컴포넌트에 연결된 이전 컴포넌트들의 출력을 타입별로 수집.
+
+    다중 소스가 같은 타입으로 합류할 경우, 각 소스 컴포넌트 이름을 포함한
+    구분자를 추가하여 후속 컴포넌트가 출처를 식별할 수 있도록 한다.
+    """
+    component_map = {c.id: c for c in workflow.components}
+
+    kb_entries = []
+    model_entries = []
+
     for conn in workflow.component_connections:
         if conn.target_component_id != component.id:
             continue
@@ -2779,12 +2883,29 @@ def _get_incoming_outputs(
         if not source_output:
             continue
 
+        source_comp = component_map.get(conn.source_component_id)
+        source_name = source_comp.name if source_comp else conn.source_component_id
+
         if source_output["type"] == "kb":
-            existing = incoming.get("kb_output", "")
-            incoming["kb_output"] = (existing + "\n\n" + source_output["text"]).strip()
+            kb_entries.append((source_name, source_output["text"]))
         elif source_output["type"] == "model":
-            existing = incoming.get("model_output", "")
-            incoming["model_output"] = (existing + "\n\n" + source_output["text"]).strip()
+            model_entries.append((source_name, source_output["text"]))
+
+    incoming: Dict[str, str] = {}
+
+    if kb_entries:
+        if len(kb_entries) > 1:
+            parts = [f"[{name} 검색결과]\n{text}" for name, text in kb_entries]
+            incoming["kb_output"] = "\n\n".join(parts)
+        else:
+            incoming["kb_output"] = kb_entries[0][1]
+
+    if model_entries:
+        if len(model_entries) > 1:
+            parts = [f"[{name} 응답결과]\n{text}" for name, text in model_entries]
+            incoming["model_output"] = "\n\n".join(parts)
+        else:
+            incoming["model_output"] = model_entries[0][1]
 
     return incoming
 

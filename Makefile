@@ -1,11 +1,15 @@
-# DB · Alembic · 시드 · Harbor
+# DB · Alembic · 시드 · Harbor · E2E
 .DEFAULT_GOAL := help
 .PHONY: help alembic-upgrade-head alembic-autogen-file db-seed db-seed-ensure db-seed-upsert db-seed-reset \
         harbor-login \
         harbor-build-backend harbor-push-backend harbor-build-push-backend \
         harbor-build-predictor harbor-push-predictor harbor-build-push-predictor \
         harbor-build-train harbor-push-train harbor-build-push-train \
-        harbor-build-push-all
+        harbor-build-push-all \
+        flake8 flake8-fix isort black lint lint-fix \
+        e2e-llm-workflow-deploy e2e-llm-workflow-delete e2e-llm-workflow-lifecycle \
+        e2e-rag-workflow-deploy e2e-rag-workflow-delete e2e-rag-workflow-lifecycle \
+        e2e-workflow-validation
 
 APP_DIR := backend/app
 MODE ?= ensure
@@ -33,6 +37,14 @@ help:
 	@echo "  make harbor-build-push-train ENV=dev [TAG=latest]"
 	@echo "  make harbor-build-push-all ENV=dev [TAG=latest]"
 	@echo "개별: harbor-build-{backend|predictor|train}, harbor-push-{backend|predictor|train}"
+	@echo ""
+	@echo "Lint / Format (.pre-commit-config.yaml 규칙과 동일)"
+	@echo "  make flake8    — flake8 린트 검사"
+	@echo "  make isort     — import 정렬"
+	@echo "  make black     — 코드 포맷팅"
+	@echo "  make lint      — isort + black + flake8 전체 검사"
+	@echo "  make lint-fix  — isort + black + autopep8 자동 수정"
+	@echo "  make flake8-fix — autopep8 자동 수정만 수행"
 
 alembic-upgrade-head:
 	cd $(APP_DIR) && $(if $(strip $(ENV)),ENV=$(ENV) )PYTHONPATH=$(APP_PYTHONPATH) alembic upgrade head
@@ -124,3 +136,54 @@ harbor-build-push-all:
 	@$(MAKE) harbor-build-push-backend ENV=$(ENV) TAG=$(TAG)
 	@$(MAKE) harbor-build-push-predictor ENV=$(ENV) TAG=$(TAG)
 	@$(MAKE) harbor-build-push-train ENV=$(ENV) TAG=$(TAG)
+
+# ─── Lint / Format (.pre-commit-config.yaml 규칙과 동일) ──────────────────
+FLAKE8_IGNORE := E203,W503,W605,E712,E266,F401,E402,F821,E711,F403
+FLAKE8_EXCLUDE := .venv,*/.venv
+
+flake8:
+	uv run --group dev flake8 --max-line-length=120 --ignore=$(FLAKE8_IGNORE) --exclude=$(FLAKE8_EXCLUDE) .
+
+flake8-fix:
+	uv run --group dev ruff check --fix .
+
+isort:
+	uv run --group dev isort --profile black --line-length 120 .
+
+black:
+	uv run --group dev black --line-length 120 .
+
+lint: isort black flake8
+
+lint-fix: isort black flake8-fix
+
+# ─── E2E Tests ─────────────────────────────────────────────────────────────
+E2E_DIR := e2e-test
+
+e2e-llm-workflow-deploy:
+	@echo "▶ E2E: LLM 워크플로우 배포 시나리오 테스트"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_deploy.py -v -s
+
+e2e-llm-workflow-delete:
+	@echo "▶ E2E: LLM 워크플로우 삭제 시나리오 테스트"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_delete.py -v -s
+
+e2e-llm-workflow-lifecycle:
+	@echo "▶ E2E: LLM 워크플로우 전체 생명주기 테스트 (생성→배포→추론→삭제)"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_llm_workflow_lifecycle.py -v -s
+
+e2e-rag-workflow-deploy:
+	@echo "▶ E2E: RAG 워크플로우 배포 시나리오 테스트 (KB생성→배포→추론)"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_deploy.py -v -s
+
+e2e-rag-workflow-delete:
+	@echo "▶ E2E: RAG 워크플로우 삭제 시나리오 테스트 (워크플로우 삭제→KB 삭제)"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_delete.py -v -s
+
+e2e-rag-workflow-lifecycle:
+	@echo "▶ E2E: RAG 워크플로우 전체 생명주기 테스트 (KB생성→배포→추론→삭제→KB삭제)"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_rag_workflow_lifecycle.py -v -s
+
+e2e-workflow-validation:
+	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
+	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s

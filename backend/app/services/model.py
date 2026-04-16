@@ -1379,6 +1379,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
+        "max_context_length": 8_192,
     },
     "bge-m3": {
         "name": "bge-m3",
@@ -1426,6 +1427,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
+        "max_context_length": 40_960,
     },
     "qwen3:32b": {
         "name": "qwen3-32b",
@@ -1435,6 +1437,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
+        "max_context_length": 40_960,
     },
     "qwen3:30b": {
         "name": "qwen3-30b",
@@ -1444,6 +1447,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
+        "max_context_length": 262_144,
     },
     "gpt-oss:20b": {
         "name": "gpt-oss-20b",
@@ -1453,5 +1457,6 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
+        "max_context_length": 131_072,
     },
 }

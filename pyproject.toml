@@ -9,7 +9,21 @@ dev = [
     "black==25.9.0",
     "isort==5.12.0",
     "flake8==6.0.0",
+    "ruff",
     "pre-commit>=4.0.0",
+    "ipykernel",
+]
+e2e = [
+    "pytest>=8.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["e2e-test"]
+markers = [
+    "workflow_deploy: 워크플로우 배포 시나리오",
+    "workflow_delete: 워크플로우 삭제 시나리오",
 ]
 
 [tool.black]
@@ -18,3 +32,10 @@ line-length = 120
 [tool.isort]
 profile = "black"
 line_length = 120
+
+[tool.ruff]
+line-length = 120
+exclude = [".venv", "*/.venv", "YOLOX"]
+
+[tool.ruff.lint]
+ignore = ["E203", "W605", "E712", "E266", "F401", "E402", "F821", "E711", "F403"]
