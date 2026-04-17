@@ -179,6 +179,18 @@ class KServeDeploymentService:
         return True, "", deployment
 
     @staticmethod
+    def has_active_deployment(db: Session, workflow_id: str) -> bool:
+        """워크플로우에 DEPLOYING 또는 DEPLOYED 상태의 배포가 존재하는지 확인"""
+        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        return any(d.status in (DeploymentStatus.DEPLOYING, DeploymentStatus.DEPLOYED) for d in deployments)
+
+    @staticmethod
+    def has_deploying(db: Session, workflow_id: str) -> bool:
+        """워크플로우에 DEPLOYING 상태의 배포가 존재하는지 확인"""
+        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        return any(d.status == DeploymentStatus.DEPLOYING for d in deployments)
+
+    @staticmethod
     def cleanup_workflow_deployments(db: Session, workflow_id: str) -> int:
         """워크플로우의 모든 배포 정보 정리"""
         # 상태를 DELETED로 변경

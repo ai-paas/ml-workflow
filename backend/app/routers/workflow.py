@@ -1169,10 +1169,16 @@ def update_workflow(
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 배포 중이거나 배포된 워크플로우의 구조 변경 시도
     - 500: 서버 내부 오류
     """
     try:
         if workflow_data.workflow_definition:
+            if KServeDeploymentService.has_active_deployment(db, workflow_id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="배포 중이거나 배포된 워크플로우는 수정할 수 없습니다. 먼저 배포를 삭제한 후 수정해주세요.",
+                )
             _validate_workflow_definition_or_raise(db, workflow_data.workflow_definition)
 
         workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
@@ -1308,6 +1314,7 @@ async def delete_workflow(
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 배포가 진행 중인 워크플로우 삭제 시도
     - 500: 정리 파이프라인 시작 실패
     """
     try:
@@ -1315,6 +1322,12 @@ async def delete_workflow(
         workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+        if KServeDeploymentService.has_deploying(db, workflow_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="배포가 진행 중인 워크플로우는 삭제할 수 없습니다. 배포가 완료된 후 다시 시도해주세요.",
+            )
 
         # Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제 시작
         cleanup_run_id = None
