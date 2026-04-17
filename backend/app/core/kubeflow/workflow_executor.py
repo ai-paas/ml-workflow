@@ -54,8 +54,7 @@ class WorkflowExecutor:
 
         # REST API 설정을 parameters에 추가 (DB 업데이트용)
         parameters["rest_api_url"] = settings.REST_API_URL
-        parameters["restapi_username"] = "surromind"  # 고정 사용자명
-        parameters["restapi_password"] = settings.DEMO_PASSWORD
+        parameters["internal_api_key"] = settings.INTERNAL_API_KEY
 
         # KServe imagePullSecret 설정 추가
         parameters["image_pull_secret_name"] = settings.KUBEFLOW_IMAGE_PULL_SECRET
@@ -256,8 +255,7 @@ class WorkflowExecutor:
                 aws_access_key_id: str,
                 aws_secret_access_key: str,
                 rest_api_url: str,
-                restapi_username: str,
-                restapi_password: str,
+                internal_api_key: str,
                 infer_image_url: str,
                 config: str = "{}",
                 gpus: int = 0,
@@ -583,23 +581,6 @@ class WorkflowExecutor:
                             if not rest_api_url:
                                 logger.warning("REST_API_URL not provided, skipping DB update")
                             else:
-                                # 토큰 발급
-                                auth_token = None
-                                if restapi_username and restapi_password:
-                                    try:
-                                        token_response = requests.post(
-                                            f"{rest_api_url}/api/v1/authentications/token",
-                                            data={"username": restapi_username, "password": restapi_password},
-                                            timeout=10,
-                                        )
-                                        if token_response.status_code == 200:
-                                            auth_token = token_response.json().get("access_token")
-                                            logger.info("Successfully obtained authentication token")
-                                        else:
-                                            logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                                    except Exception as token_error:
-                                        logger.warning(f"Failed to obtain auth token: {token_error}")
-
                                 update_url = (
                                     f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                     f"components/{component_id}/deployment-status"
@@ -607,16 +588,17 @@ class WorkflowExecutor:
 
                                 update_payload = {
                                     "service_name": service_name,
-                                    "service_hostname": service_hostname,  # Ollama는 빈 문자열이지만 형식 유지
+                                    "service_hostname": service_hostname,
                                     "model_name": ollama_model_name,
                                     "status": deployment_status,
                                     "internal_url": internal_url,
                                     "error_message": None,
                                 }
 
-                                headers = {"Content-Type": "application/json"}
-                                if auth_token:
-                                    headers["Authorization"] = f"Bearer {auth_token}"
+                                headers = {
+                                    "Content-Type": "application/json",
+                                    "X-Internal-API-Key": internal_api_key,
+                                }
 
                                 logger.info("Updating Ollama deployment status via API: %s", update_url)
                                 response = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
@@ -883,29 +865,11 @@ class WorkflowExecutor:
                         if not rest_api_url:
                             logger.warning("REST_API_URL not provided, skipping DB update")
                         else:
-                            # 토큰 발급
-                            auth_token = None
-                            if restapi_username and restapi_password:
-                                try:
-                                    token_response = requests.post(
-                                        f"{rest_api_url}/api/v1/authentications/token",
-                                        data={"username": restapi_username, "password": restapi_password},
-                                        timeout=10,
-                                    )
-                                    if token_response.status_code == 200:
-                                        auth_token = token_response.json().get("access_token")
-                                        logger.info("Successfully obtained authentication token")
-                                    else:
-                                        logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                                except Exception as token_error:
-                                    logger.warning(f"Failed to obtain auth token: {token_error}")
-
                             update_url = (
                                 f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                 f"components/{component_id}/deployment-status"
                             )
 
-                            # error_message 설정
                             error_msg = None
                             if evicted_count > 0:
                                 error_msg = (
@@ -922,9 +886,10 @@ class WorkflowExecutor:
                                 "error_message": error_msg,
                             }
 
-                            headers = {"Content-Type": "application/json"}
-                            if auth_token:
-                                headers["Authorization"] = f"Bearer {auth_token}"
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
 
                             logger.info("Updating deployment status via API: %s", update_url)
                             response = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
@@ -1007,20 +972,6 @@ class WorkflowExecutor:
                         import requests
 
                         if rest_api_url:
-                            # 토큰 발급
-                            auth_token = None
-                            if restapi_username and restapi_password:
-                                try:
-                                    token_response = requests.post(
-                                        f"{rest_api_url}/api/v1/authentications/token",
-                                        data={"username": restapi_username, "password": restapi_password},
-                                        timeout=10,
-                                    )
-                                    if token_response.status_code == 200:
-                                        auth_token = token_response.json().get("access_token")
-                                except Exception as token_error:
-                                    logger.warning(f"Failed to obtain auth token for failure update: {token_error}")
-
                             update_url = (
                                 f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                 f"components/{component_id}/deployment-status"
@@ -1039,9 +990,10 @@ class WorkflowExecutor:
                                 "error_message": str(e),
                             }
 
-                            headers = {"Content-Type": "application/json"}
-                            if auth_token:
-                                headers["Authorization"] = f"Bearer {auth_token}"
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
 
                             requests.post(update_url, json=update_payload, headers=headers, timeout=10)
                     except Exception as db_error:
@@ -1080,8 +1032,7 @@ class WorkflowExecutor:
                 aws_access_key_id=parameters.get("aws_access_key_id", ""),
                 aws_secret_access_key=parameters.get("aws_secret_access_key", ""),
                 rest_api_url=parameters.get("rest_api_url", ""),
-                restapi_username=parameters.get("restapi_username", ""),
-                restapi_password=parameters.get("restapi_password", ""),
+                internal_api_key=parameters.get("internal_api_key", ""),
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
                 gpus=parameters.get("gpus", 0),

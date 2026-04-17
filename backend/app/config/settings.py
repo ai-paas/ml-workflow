@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     REST_API_URL: str = Field(..., description="REST API 기본 URL")
     DEMO_PASSWORD: str = Field(..., description="데모용 비밀번호")
     LOGIN_SECRET_KEY: str = Field(..., description="로그인 세션 암호화 키")
+    INTERNAL_API_KEY: str = Field(
+        default="",
+        description="내부 전용 API 인증에 사용할 키 (KFP 컴포넌트 콜백용). 서버 시작 시 SHA-256 해시로 검증.",
+    )
 
     # KServe 설정
     KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")

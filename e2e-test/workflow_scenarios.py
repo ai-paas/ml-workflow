@@ -8,6 +8,7 @@ CLI 실행 (SCENARIO 필수):
 
 from __future__ import annotations
 
+import json
 import sys
 import uuid
 
@@ -569,18 +570,73 @@ def build_workflow_definition(
 
 
 def state_key_wf(num: int) -> str:
-    """시나리오별 workflow_id 상태 키"""
+    """시나리오별 workflow_id 상태 키 (레거시 단일 배포; deployments 로 이전됨)"""
     return f"scenario_{num}_workflow_id"
 
 
 def state_key_kb_ids(num: int) -> str:
-    """시나리오별 kb_ids 상태 키 (JSON list)"""
+    """시나리오별 kb_ids 상태 키 (JSON list, 레거시)"""
     return f"scenario_{num}_kb_ids"
 
 
 def state_key_prompts(num: int) -> str:
-    """시나리오별 prompt_ids 상태 키 (JSON dict)"""
+    """시나리오별 prompt_ids 상태 키 (JSON dict, 레거시)"""
     return f"scenario_{num}_prompt_ids"
+
+
+def state_key_deployments(num: int) -> str:
+    """시나리오별 배포 기록 목록 (JSON list of deployment dict)"""
+    return f"scenario_{num}_deployments"
+
+
+def load_deployment_entries(num: int) -> list[dict]:
+    """시나리오별 저장된 배포 기록을 읽는다. 레거시 단일 키만 있으면 1건으로 승격한다."""
+    from config import load_state
+
+    raw = load_state(state_key_deployments(num))
+    if raw:
+        return json.loads(raw)
+
+    wf = load_state(state_key_wf(num))
+    if not wf:
+        return []
+    kb_raw = load_state(state_key_kb_ids(num)) or "[]"
+    pr_raw = load_state(state_key_prompts(num)) or "{}"
+    return [
+        {
+            "workflow_id": wf,
+            "kb_ids": json.loads(kb_raw),
+            "prompt_ids": json.loads(pr_raw),
+            "workflow_name": "",
+        }
+    ]
+
+
+def save_deployment_entries(num: int, entries: list[dict]) -> None:
+    """배포 기록 전체를 저장하고, 레거시 단일 키는 제거한다."""
+    from config import clear_state, save_state
+
+    key_dep = state_key_deployments(num)
+    if entries:
+        save_state(key_dep, json.dumps(entries))
+    else:
+        clear_state(key_dep)
+    clear_state(state_key_wf(num))
+    clear_state(state_key_kb_ids(num))
+    clear_state(state_key_prompts(num))
+
+
+def append_deployment_entry(num: int, entry: dict) -> None:
+    """배포 1건을 기존 목록 끝에 추가한다 (이전 배포와 kb/프롬프트를 덮어쓰지 않음)."""
+    entries = load_deployment_entries(num)
+    entries.append(entry)
+    save_deployment_entries(num, entries)
+
+
+def remove_deployment_entry_by_workflow_id(num: int, workflow_id: str) -> None:
+    """삭제 완료 후 해당 workflow_id 인 기록만 목록에서 제거한다."""
+    entries = [e for e in load_deployment_entries(num) if e.get("workflow_id") != workflow_id]
+    save_deployment_entries(num, entries)
 
 
 # ── CLI: 시나리오 정보 출력 ──────────────────────────────────────────

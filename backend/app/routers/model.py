@@ -34,7 +34,7 @@ from services.model import (
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
-from utils.authentication import get_current_user
+from utils.authentication import get_current_user, verify_internal_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -628,7 +628,7 @@ def delete_model(model_id: int, db: Session = SessionDepends, current_user: User
         raise HTTPException(status_code=500, detail=f"모델 삭제 중 오류가 발생했습니다: {str(e)}")
 
 
-@router.put("/base-deployments/{model_id}/status")
+@router.put("/base-deployments/{model_id}/status", dependencies=[Depends(verify_internal_api_key)])
 def update_model_base_deployment_status(
     *,
     db: Session = SessionDepends,
@@ -638,7 +638,6 @@ def update_model_base_deployment_status(
     internal_url: Optional[str] = Body(None),
     status: str = Body(...),
     error_message: Optional[str] = Body(None),
-    current_user: UserSchema = Depends(get_current_user),
 ):
     """
     모델 기본 배포 상태 업데이트 (백엔드 서버 내부 전용 API)

@@ -62,7 +62,7 @@ from services.kserve_deployment import KServeDeploymentService
 from services.model import PREDEFINED_MODEL_CONFIGS, ModelService
 from services.workflow import WorkflowService
 from sqlalchemy.orm import Session
-from utils.authentication import get_current_user
+from utils.authentication import get_current_user, get_current_user_or_internal, verify_internal_api_key
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -1091,7 +1091,7 @@ def update_workflow(
     db: Session = SessionDepends,
     workflow_id: str,
     workflow_data: WorkflowUpdateRequest,
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: Optional[UserSchema] = Depends(get_current_user_or_internal),
 ):
     """
     워크플로우 수정
@@ -1731,7 +1731,9 @@ def get_workflow_execution_status(
         }
 
 
-@router.post("/{workflow_id}/components/{component_id}/deployment-status")
+@router.post(
+    "/{workflow_id}/components/{component_id}/deployment-status", dependencies=[Depends(verify_internal_api_key)]
+)
 async def update_component_deployment_status(
     *,
     db: Session = SessionDepends,

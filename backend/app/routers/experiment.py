@@ -14,7 +14,7 @@ from schemas.experiment import (
 from schemas.user import UserSchema
 from services.experiment import ExperimentService
 from sqlalchemy.orm import Session
-from utils.authentication import get_current_user
+from utils.authentication import get_current_user, verify_internal_api_key
 
 router = APIRouter(prefix="/experiments", tags=["Experiment"])
 
@@ -260,13 +260,16 @@ async def delete_experiment_internal(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
-@router.patch("/{experiment_id}/internal-access", response_model=ExperimentReadSchema)
+@router.patch(
+    "/{experiment_id}/internal-access",
+    response_model=ExperimentReadSchema,
+    dependencies=[Depends(verify_internal_api_key)],
+)
 async def update_experiment_internal(
     db: Session = SessionDepends,
     *,
     experiment_id: int,
     experiment_update_request: ExperimentInternalUpdateRequest,
-    current_user: UserSchema = Depends(get_current_user),
 ):
     """
     내부 통신 전용 실험 정보 수정 API

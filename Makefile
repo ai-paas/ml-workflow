@@ -201,7 +201,7 @@ e2e-workflow-validation:
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
 #   make e2e-wf-scenario-deploy SCENARIO=3              # 3번 시나리오 배포
 #   make e2e-wf-scenario-deploy SCENARIO=1 GPUS=1      # GPU 1개로 배포
-#   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 삭제
+#   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 저장 건별 삭제 확인(y)
 #   make e2e-wf-scenario-lifecycle SCENARIO=3           # 3번 시나리오 전체 생명주기
 
 e2e-wf-scenario-info:

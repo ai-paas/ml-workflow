@@ -2,7 +2,8 @@
 E2E 시나리오: 워크플로우 시나리오 배포 테스트
 
 §5.2 시나리오 1~7 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
-삭제는 포함하지 않는다. 별도 삭제: make e2e-wf-scenario-delete SCENARIO=N
+삭제는 포함하지 않는다. 별도 삭제: make e2e-wf-scenario-delete SCENARIO=N (저장된 배포 건별 확인)
+같은 SCENARIO 로 재실행 시 이전 배포를 덮어쓰지 않고 .state.json 의 scenario_N_deployments 목록에 추가된다.
 
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
 
@@ -17,7 +18,6 @@ E2E 시나리오: 워크플로우 시나리오 배포 테스트
   8. 추론 테스트
 """
 
-import json
 import time
 import uuid
 
@@ -35,15 +35,8 @@ from config import (
     SCENARIO_NUM,
     TARGET_EMBEDDING_MODEL_NAME,
     TARGET_MODEL_NAME,
-    save_state,
 )
-from workflow_scenarios import (
-    build_workflow_definition,
-    get_scenario,
-    state_key_kb_ids,
-    state_key_prompts,
-    state_key_wf,
-)
+from workflow_scenarios import append_deployment_entry, build_workflow_definition, get_scenario, load_deployment_entries
 
 SCENARIO = get_scenario(SCENARIO_NUM)
 INFERENCE_TIMEOUT_SEC = 120
@@ -171,7 +164,6 @@ class TestWorkflowScenarioDeploy:
             print(f"  ✔ KB{i + 1} 생성: id={data['id']}, name={data['name']} ({label})")
 
         self.__class__.kb_ids = created_ids
-        save_state(state_key_kb_ids(SCENARIO_NUM), json.dumps(created_ids))
         print(f"\n✔ KB {len(created_ids)}개 생성 완료")
 
     def test_05_create_prompts(self, api_url: str, auth_headers: dict):
@@ -197,7 +189,6 @@ class TestWorkflowScenarioDeploy:
             print(f"  ✔ 프롬프트 생성: {comp_name} → id={data['id']}, name={data['name']}")
 
         self.__class__.prompt_ids = created
-        save_state(state_key_prompts(SCENARIO_NUM), json.dumps(created))
         print(f"\n✔ 프롬프트 {len(created)}개 생성 완료")
 
     def test_06_create_workflow(self, api_url: str, auth_headers: dict):
@@ -219,8 +210,17 @@ class TestWorkflowScenarioDeploy:
 
         data = resp.json()
         self.__class__.workflow_id = data["id"]
-        save_state(state_key_wf(SCENARIO_NUM), data["id"])
-        print(f"\n✔ 워크플로우 생성 완료: id={data['id']}")
+        append_deployment_entry(
+            SCENARIO_NUM,
+            {
+                "workflow_id": data["id"],
+                "workflow_name": payload["name"],
+                "kb_ids": list(self.__class__.kb_ids),
+                "prompt_ids": dict(self.__class__.prompt_ids),
+            },
+        )
+        n_saved = len(load_deployment_entries(SCENARIO_NUM))
+        print(f"\n✔ 워크플로우 생성 완료: id={data['id']} (시나리오 #{SCENARIO_NUM} 저장 건수: {n_saved})")
 
     def test_07_execute_workflow(self, api_url: str, auth_headers: dict):
         """워크플로우를 실행(배포)한다."""
