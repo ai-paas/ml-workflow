@@ -224,10 +224,9 @@ class APIClient:
         """워크플로우 상세 조회"""
         return self._get(f"/api/v1/workflows/{workflow_id}")
 
-    def execute_workflow(self, workflow_id: str, parameters: Optional[Dict] = None) -> Dict:
-        """워크플로우 실행"""
-        data = {"parameters": parameters or {}}
-        return self._post(f"/api/v1/workflows/{workflow_id}/execute", data=data)
+    def execute_workflow(self, workflow_id: str) -> Dict:
+        """워크플로우 실행 (요청 바디 없음 — 리소스는 백엔드가 결정)"""
+        return self._post(f"/api/v1/workflows/{workflow_id}/execute", data=None)
 
     def get_workflow_status(self, workflow_id: str) -> Dict:
         """워크플로우 실행 상태 조회"""

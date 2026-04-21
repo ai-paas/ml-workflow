@@ -104,6 +104,27 @@ class Settings(BaseSettings):
 
     # KServe 설정
     KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")
+    DEFAULT_TRY_GPU: bool = Field(
+        default=True,
+        description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU).\
+        Ollama는 이 값만 사용, HuggingFace/KServe는 KSERVE_GPU와 함께 적용.",
+    )
+    SERVING_DEFAULT_GPU_VRAM_BYTES: int = Field(
+        default=16 * 1024 * 1024 * 1024,
+        description="노드 라벨·오버라이드 없을 때 GPU 1장당 VRAM 바이트 기본값(§7.5). 인벤토리 기반 k 산정에도 사용.",
+    )
+    SERVING_NODE_NAMES: str = Field(
+        default="",
+        description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체(§7.3).",
+    )
+    SERVING_NODE_VRAM_OVERRIDES_JSON: str = Field(
+        default="{}",
+        description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8} (§7.10)',
+    )
+    SERVING_PIN_SELECTED_NODE: bool = Field(
+        default=True,
+        description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임(§7.7).",
+    )
     KSERVE_GATEWAY_URL: str = Field(
         default="http://10.10.30.154:80",
         description="KServe Istio Gateway URL \

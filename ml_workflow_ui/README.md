@@ -212,7 +212,7 @@ ml_workflow_ui/
 #### 워크플로우
 - `get_workflows(status=None, page=None, page_size=None)`: 워크플로우 목록 조회 (템플릿 제외)
 - `get_workflow(workflow_id)`: 특정 워크플로우 조회
-- `execute_workflow(workflow_id, parameters)`: 워크플로우 실행
+- `execute_workflow(workflow_id)`: 워크플로우 실행 (요청 바디 없음)
 - `get_workflow_status(workflow_id)`: 실행 상태 조회
 - `sync_workflow_deployments(workflow_id)`: 배포 정보 동기화
 

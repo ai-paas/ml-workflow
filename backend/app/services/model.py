@@ -541,7 +541,7 @@ class ModelService:
             raise e
 
     @staticmethod
-    def resolve_predefined_model_ids(db: Session, config: dict[str, str]) -> dict[str, int]:
+    def resolve_predefined_model_ids(db: Session, config: dict[str, Any]) -> dict[str, int]:
         """사전 정의 모델 config에서 provider_name, type_name, format_name을 DB ID로 변환"""
         provider = ModelProviderService.get_by_name(db, config["provider_name"])
         if not provider:
@@ -1334,7 +1334,9 @@ class OllamaModelService:
         )
 
 
-PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
+_GIB = 1024**3
+
+PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "hustvl/yolos-tiny": {
         "name": "hustvl/yolos-tiny",
         "description": "hustvl/yolos-tiny",
@@ -1343,6 +1345,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "huggingface",
         "type_name": "ODM",
         "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "hustvl/yolos-small": {
         "name": "hustvl/yolos-small",
@@ -1352,6 +1359,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "huggingface",
         "type_name": "ODM",
         "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "facebook/detr-resnet-50": {
         "name": "facebook/detr-resnet-50",
@@ -1361,6 +1373,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "huggingface",
         "type_name": "ODM",
         "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "facebook/detr-resnet-101": {
         "name": "facebook/detr-resnet-101",
@@ -1370,6 +1387,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "huggingface",
         "type_name": "ODM",
         "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "ahmgam/medllama3-v20:latest": {
         "name": "ahmgam-medllama3-v20-latest",
@@ -1380,6 +1402,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
         "max_context_length": 8_192,
+        "serving_vram_need_bytes": 6 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "8Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "bge-m3": {
         "name": "bge-m3",
@@ -1389,6 +1416,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "provider_name": "ollama",
         "type_name": "Embedding",
         "format_name": "gguf",
+        "serving_vram_need_bytes": 1 * _GIB,
+        "serving_memory_request_gpu": "Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "6Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     # "facebook/esm2_t33_650M_UR50D": {
     #     "name": "facebook/esm2_t33_650M_UR50D",
@@ -1402,22 +1434,34 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
     "yolox_s": {
         "name": "yolox_s",
         "description": "yolox_s",
+        "repo_id": "yolox_s",
         "task": "object-detection",
         "provider_name": "custom",
         "type_name": "ODM",
         "format_name": "yolox",
         "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth",
         "weight_filename": "yolox_s.pth",
+        "serving_vram_need_bytes": 4 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "yolox_m": {
         "name": "yolox_m",
         "description": "yolox_m",
+        "repo_id": "yolox_m",
         "task": "object-detection",
         "provider_name": "custom",
         "type_name": "ODM",
         "format_name": "yolox",
         "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth",
         "weight_filename": "yolox_m.pth",
+        "serving_vram_need_bytes": 4 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
     },
     "qwq:32b": {
         "name": "qwq-32b",
@@ -1428,6 +1472,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
         "max_context_length": 40_960,
+        "serving_vram_need_bytes": 26 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "24Gi",
+        "serving_cpu_request_millicores": 4000,
     },
     "qwen3:32b": {
         "name": "qwen3-32b",
@@ -1438,6 +1487,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
         "max_context_length": 40_960,
+        "serving_vram_need_bytes": 26 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "24Gi",
+        "serving_cpu_request_millicores": 4000,
     },
     "qwen3:30b": {
         "name": "qwen3-30b",
@@ -1448,6 +1502,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
         "max_context_length": 262_144,
+        "serving_vram_need_bytes": 24 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "20Gi",
+        "serving_cpu_request_millicores": 4000,
     },
     "gpt-oss:20b": {
         "name": "gpt-oss-20b",
@@ -1458,5 +1517,10 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, str]] = {
         "type_name": "LLM",
         "format_name": "gguf",
         "max_context_length": 131_072,
+        "serving_vram_need_bytes": 16 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "15Gi",
+        "serving_cpu_request_millicores": 4000,
     },
 }

@@ -25,8 +25,6 @@ if not _scenario_raw:
     )
 SCENARIO_NUM: int = int(_scenario_raw)
 
-EXECUTE_GPUS: int = int(os.environ.get("E2E_GPUS", "0"))
-
 DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "600"))
 POLL_INTERVAL_SEC: int = int(os.environ.get("E2E_POLL_INTERVAL_SEC", "10"))
 DELETE_TIMEOUT_SEC: int = int(os.environ.get("E2E_DELETE_TIMEOUT_SEC", "300"))

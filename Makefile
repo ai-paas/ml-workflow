@@ -200,7 +200,6 @@ e2e-workflow-validation:
 #   make e2e-wf-scenario-info                    # 전체 시나리오 목록
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
 #   make e2e-wf-scenario-deploy SCENARIO=3              # 3번 시나리오 배포
-#   make e2e-wf-scenario-deploy SCENARIO=1 GPUS=1      # GPU 1개로 배포
 #   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 저장 건별 삭제 확인(y)
 #   make e2e-wf-scenario-lifecycle SCENARIO=3           # 3번 시나리오 전체 생명주기
 
@@ -211,7 +210,7 @@ e2e-wf-scenario-info:
 e2e-wf-scenario-deploy:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-deploy SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 배포 테스트"
-	E2E_SCENARIO=$(SCENARIO) E2E_GPUS=$(or $(GPUS),0) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
+	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
 
 e2e-wf-scenario-delete:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-delete SCENARIO=1" && exit 1)
@@ -221,4 +220,4 @@ e2e-wf-scenario-delete:
 e2e-wf-scenario-lifecycle:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
-	E2E_SCENARIO=$(SCENARIO) E2E_GPUS=$(or $(GPUS),0) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s
+	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s

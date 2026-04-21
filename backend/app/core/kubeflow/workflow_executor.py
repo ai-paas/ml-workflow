@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from db.models.model import Model
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -25,6 +26,107 @@ class WorkflowExecutor:
         self.db = db
         self.kf_manager = KubeflowManager()
         self.deployed_services = {}  # component_id -> inference_service_name
+
+    def _prepare_serving_plans_for_workflow(self, workflow: Workflow, parameters: Dict[str, Any]) -> None:
+        """§7.9·§7.9.1 사전정의 메타 조회 및 컴포넌트별 동결 리소스 계획을 parameters['serving_plans']에 적재."""
+        from core.serving.serving_k8s_inventory import collect_node_inventory, node_inventories_with_free_overrides
+        from core.serving.serving_resource_meta import resolve_normalized_serving_meta
+        from core.serving.serving_resource_planner import (
+            apply_chain_reservation_from_plan,
+            plan_serving_resources_with_k8s,
+        )
+        from core.serving.serving_workflow_model_order import topological_order_model_components
+        from services.model import PREDEFINED_MODEL_CONFIGS
+
+        plans: Dict[str, Dict[str, Any]] = {}
+        s = get_settings()
+
+        model_order = topological_order_model_components(workflow)
+        nodes_snapshot = collect_node_inventory(
+            default_vram_bytes=s.SERVING_DEFAULT_GPU_VRAM_BYTES,
+            vram_overrides_json=s.SERVING_NODE_VRAM_OVERRIDES_JSON,
+            serving_node_names_csv=s.SERVING_NODE_NAMES or "",
+        )
+        frees: dict[str, tuple[int, int, int]] = (
+            {n.name: (n.g_free, n.m_free, n.c_free) for n in nodes_snapshot} if nodes_snapshot else {}
+        )
+        chain_n = len(model_order)
+
+        for step, component in enumerate(model_order):
+            model = self.db.get(Model, component.model_id)
+            if not model:
+                raise ValueError(
+                    f"워크플로우 MODEL 컴포넌트 '{component.name}'(id={component.id}): "
+                    f"model_id={component.model_id} 모델을 찾을 수 없습니다."
+                )
+
+            meta, source, parent_repo = resolve_normalized_serving_meta(
+                self.db, model, predefined_configs=PREDEFINED_MODEL_CONFIGS
+            )
+
+            pre_cfg = PREDEFINED_MODEL_CONFIGS.get(model.repo_id or "", {})
+            task = pre_cfg.get("task") or model.task
+
+            framework = "pytorch"
+            if (
+                getattr(model, "provider_info", None)
+                and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
+                and getattr(model, "format_info", None)
+                and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
+            ):
+                framework = "ollama"
+            elif getattr(model, "format_info", None):
+                format_name = model.format_info.name.lower()
+                if ModelFormatEnum.TENSORFLOW.value.lower() in format_name or "tf" in format_name:
+                    framework = "tensorflow"
+                elif ModelFormatEnum.ONNX.value.lower() in format_name:
+                    framework = "onnx"
+                elif ModelFormatEnum.TRANSFORMERS.value.lower() in format_name:
+                    framework = "transformers"
+                elif ModelFormatEnum.KERAS.value.lower() in format_name:
+                    framework = "keras"
+                elif ModelFormatEnum.YOLOX.value.lower() in format_name:
+                    framework = "yolox"
+
+            nodes_override = node_inventories_with_free_overrides(nodes_snapshot, frees) if nodes_snapshot else None
+            plan = plan_serving_resources_with_k8s(
+                normalized_meta=meta,
+                task=task,
+                framework=framework,
+                execute_parameters=parameters,
+                settings=s,
+                serving_meta_source=source,
+                parent_repo_id=parent_repo,
+                nodes_override=nodes_override,
+            )
+
+            if nodes_snapshot and plan.reservation_node_name:
+                apply_chain_reservation_from_plan(frees, plan)
+
+            planner_note = plan.planner_note
+            if chain_n > 1:
+                chain_tag = f"7.3.2_chain_step={step + 1}/{chain_n}"
+                planner_note = f"{planner_note};{chain_tag}" if planner_note else chain_tag
+
+            plans[component.id] = {
+                "device_type": plan.device_type,
+                "gpu_count": plan.gpu_count,
+                "memory_request": plan.memory_request,
+                "cpu_request": plan.cpu_request,
+                "memory_limit": plan.memory_limit,
+                "cpu_limit": plan.cpu_limit,
+                "serving_vram_need_bytes": plan.serving_vram_need_bytes,
+                "serving_meta_source": plan.serving_meta_source,
+                "parent_repo_id": plan.parent_repo_id,
+                "fallback_reason": plan.fallback_reason,
+                "serving_node_name": plan.serving_node_name,
+                "planner_note": planner_note,
+                "reservation_node_name": plan.reservation_node_name,
+                "chain_step": step,
+                "chain_model_count": chain_n,
+            }
+
+        parameters["serving_plans"] = plans
 
     def execute_workflow(self, workflow: Workflow, parameters: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -58,6 +160,8 @@ class WorkflowExecutor:
 
         # KServe imagePullSecret 설정 추가
         parameters["image_pull_secret_name"] = settings.KUBEFLOW_IMAGE_PULL_SECRET
+
+        self._prepare_serving_plans_for_workflow(workflow, parameters)
 
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
@@ -195,8 +299,6 @@ class WorkflowExecutor:
             framework = "pytorch"
 
             if db and component.model_id:
-                from db.models.model import Model
-
                 model = db.query(Model).filter(Model.id == component.model_id).first()
                 if model:
                     # Ollama 모델 감지 (provider가 ollama이고 format이 gguf인 경우)
@@ -263,6 +365,10 @@ class WorkflowExecutor:
                 pvc_name: str = "",
                 image_pull_secret_name: str = "harbor",
                 node_name: str = "",
+                memory_request: str = "2Gi",
+                cpu_request: str = "500m",
+                memory_limit: str = "4Gi",
+                cpu_limit: str = "2000m",
             ) -> str:
                 import json
                 import logging
@@ -364,15 +470,15 @@ class WorkflowExecutor:
                                 f"Please ensure model download pipeline completed successfully."
                             )
 
-                        # Ollama용 리소스 설정
+                        # Ollama용 리소스 설정 (§7.9 사전정의 메타 → 백엔드에서 동결된 request/limit)
                         ollama_resources = client.V1ResourceRequirements(
                             requests={
-                                "memory": "4Gi",
-                                "cpu": "500m",
+                                "memory": memory_request,
+                                "cpu": cpu_request,
                             },
                             limits={
-                                "memory": "8Gi",
-                                "cpu": "2000m",
+                                "memory": memory_limit,
+                                "cpu": cpu_limit,
                             },
                         )
 
@@ -536,8 +642,10 @@ class WorkflowExecutor:
                                 time.sleep(wait_interval)
                                 elapsed += wait_interval
 
+                        deploy_error_message: Optional[str] = None
                         if not deployment_ready:
-                            logger.warning(f"Deployment {service_name} not ready after {max_wait} seconds")
+                            deploy_error_message = f"Deployment {service_name} not ready after {max_wait} seconds"
+                            logger.warning(deploy_error_message)
 
                         # Deployment가 준비된 경우 모델을 미리 로드
                         if deployment_ready:
@@ -571,8 +679,11 @@ class WorkflowExecutor:
                                 # 모델 미리 로드 실패는 치명적이지 않으므로 경고만 기록하고 계속 진행
                                 logger.warning(f"Failed to preload Ollama model {ollama_model_name}: {preload_error}")
 
-                        # 배포 상태 결정
-                        deployment_status = "deployed" if deployment_ready else "deploying"
+                        # 배포 상태 결정 (준비 타임아웃은 failed로 기록 → DEPLOYING 잠금 해제·삭제 가능)
+                        if deployment_ready:
+                            deployment_status = "deployed"
+                        else:
+                            deployment_status = "failed"
 
                         # DB 업데이트를 위해 Backend API 호출
                         try:
@@ -592,7 +703,7 @@ class WorkflowExecutor:
                                     "model_name": ollama_model_name,
                                     "status": deployment_status,
                                     "internal_url": internal_url,
-                                    "error_message": None,
+                                    "error_message": deploy_error_message,
                                 }
 
                                 headers = {
@@ -632,6 +743,29 @@ class WorkflowExecutor:
                                             logger.error(
                                                 f"Error updating workflow status to ACTIVE: {workflow_update_error}"
                                             )
+                                    elif deployment_status == "failed":
+                                        try:
+                                            workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                            workflow_update_response = requests.put(
+                                                workflow_update_url,
+                                                json={"status": "ERROR"},
+                                                headers=headers,
+                                                timeout=10,
+                                            )
+                                            if workflow_update_response.status_code == 200:
+                                                logger.info(
+                                                    f"Successfully updated workflow {workflow_id} status to ERROR"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    "Failed to update workflow status to ERROR: "
+                                                    f"{workflow_update_response.status_code} - "
+                                                    f"{workflow_update_response.text}"
+                                                )
+                                        except Exception as workflow_update_error:
+                                            logger.error(
+                                                f"Error updating workflow status to ERROR: {workflow_update_error}"
+                                            )
                                 else:
                                     status_code = response.status_code
                                     status_text = response.text
@@ -670,14 +804,17 @@ class WorkflowExecutor:
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
 
-                    # 리소스 설정 (ephemeral-storage requests는 제거)
+                    # 리소스 설정 (§7.9 사전정의 메타 기반, ephemeral-storage requests는 제거)
                     resources = client.V1ResourceRequirements(
                         requests={
-                            "memory": "2Gi",
-                            "cpu": "200m",
-                            # ephemeral-storage requests 제거 - 노드 리소스 부족 시 스케줄링 방해 방지
+                            "memory": memory_request,
+                            "cpu": cpu_request,
                         },
-                        limits={"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "1Gi"},  # 폭주 방지용 제한만 설정
+                        limits={
+                            "memory": memory_limit,
+                            "cpu": cpu_limit,
+                            "ephemeral-storage": "1Gi",
+                        },
                     )
 
                     kserve_env = [
@@ -693,10 +830,10 @@ class WorkflowExecutor:
                     else:
                         kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
-                    # Predictor 스펙 생성
-                    predictor_spec = V1beta1PredictorSpec(
-                        min_replicas=1,
-                        containers=[
+                    # Predictor 스펙 생성 (§7: 백엔드에서 확정한 노드 → nodeSelector)
+                    pred_kwargs: Dict[str, Any] = {
+                        "min_replicas": 1,
+                        "containers": [
                             client.V1Container(
                                 name="kserve-container",
                                 image=infer_image_url,
@@ -705,8 +842,11 @@ class WorkflowExecutor:
                                 env=kserve_env,
                             )
                         ],
-                        image_pull_secrets=[client.V1LocalObjectReference(name=image_pull_secret_name)],
-                    )
+                        "image_pull_secrets": [client.V1LocalObjectReference(name=image_pull_secret_name)],
+                    }
+                    if node_name:
+                        pred_kwargs["node_selector"] = {"kubernetes.io/hostname": node_name}
+                    predictor_spec = V1beta1PredictorSpec(**pred_kwargs)
 
                     # InferenceService 생성
                     inference_service = V1beta1InferenceService(
@@ -738,6 +878,7 @@ class WorkflowExecutor:
                     service_ready = False
                     evicted_count = 0
                     last_status = None
+                    rollout_failure_reason: Optional[str] = None
 
                     # Pod 상태 확인을 위한 k8s client
                     k8s_v1 = client.CoreV1Api()
@@ -760,12 +901,27 @@ class WorkflowExecutor:
                             failed = any(c.get("type") == "Ready" and c.get("status") == "False" for c in conditions)
 
                             if failed:
-                                # 실패 이유 확인
+                                rollout_abort = False
+                                fatal_markers = (
+                                    "ImagePullBackOff",
+                                    "ErrImagePull",
+                                    "InvalidImageName",
+                                    "CreateContainerConfigError",
+                                )
                                 for c in conditions:
                                     if c.get("type") == "Ready" and c.get("status") == "False":
                                         reason = c.get("reason", "")
                                         message = c.get("message", "")
                                         logger.warning(f"Service not ready: {reason} - {message}")
+
+                                        combined = f"{reason} {message}"
+                                        if any(m in combined for m in fatal_markers):
+                                            rollout_failure_reason = (
+                                                f"InferenceService fatal readiness: {reason} — {message}"
+                                            )
+                                            logger.error(rollout_failure_reason)
+                                            rollout_abort = True
+                                            break
 
                                         # RevisionMissing은 Pod가 생성 중이거나 Evicted된 경우
                                         if "RevisionMissing" in reason or "Evicted" in message:
@@ -774,6 +930,8 @@ class WorkflowExecutor:
                                                 f"Pod may have been evicted (count: {evicted_count}), "
                                                 f"waiting for retry..."
                                             )
+                                if rollout_abort:
+                                    break
 
                             # Pod 직접 확인 (Evicted 상태 감지)
                             try:
@@ -830,15 +988,20 @@ class WorkflowExecutor:
                         time.sleep(wait_interval)
                         elapsed += wait_interval
 
+                    deploy_error_message: Optional[str] = None
                     if not service_ready:
-                        if evicted_count > 0:
-                            logger.warning(
-                                f"Service {service_name} not ready after {max_wait}s, "
-                                f"but detected {evicted_count} eviction(s)"
+                        if rollout_failure_reason:
+                            deploy_error_message = rollout_failure_reason
+                            logger.error(deploy_error_message)
+                        elif evicted_count > 0:
+                            deploy_error_message = (
+                                f"InferenceService {service_name} not ready after {max_wait}s "
+                                f"({evicted_count} pod eviction(s) observed; cluster may still retry)."
                             )
-                            logger.info("KServe will continue retrying in the background")
+                            logger.warning(deploy_error_message)
                         else:
-                            logger.warning(f"Service {service_name} may not be fully ready after {max_wait} seconds")
+                            deploy_error_message = f"InferenceService {service_name} not ready after {max_wait} seconds"
+                            logger.warning(deploy_error_message)
 
                     # 서비스 URL 정보 생성
                     internal_url = f"http://{service_name}.{namespace}.svc.cluster.local"
@@ -849,14 +1012,11 @@ class WorkflowExecutor:
 
                     config_dict = json.loads(config)
 
-                    # 상태 결정 (evicted 포함)
+                    # 상태 결정: 준비 완료만 deployed, 그 외(타임아웃·치명 조건)는 failed
                     if service_ready:
                         deployment_status = "deployed"
-                    elif evicted_count > 0:
-                        deployment_status = "deploying"  # Evicted 후 재시도 중
-                        logger.info(f"Setting status to 'deploying' due to {evicted_count} eviction(s)")
                     else:
-                        deployment_status = "deploying"  # 아직 배포 중
+                        deployment_status = "failed"
 
                     # DB 업데이트를 위해 Backend API 호출
                     try:
@@ -870,20 +1030,13 @@ class WorkflowExecutor:
                                 f"components/{component_id}/deployment-status"
                             )
 
-                            error_msg = None
-                            if evicted_count > 0:
-                                error_msg = (
-                                    f"Pod evicted {evicted_count} time(s) due to node resource shortage, "
-                                    f"KServe retrying..."
-                                )
-
                             update_payload = {
                                 "service_name": service_name,
                                 "service_hostname": service_hostname,
                                 "model_name": model_name,
                                 "status": deployment_status,
                                 "internal_url": internal_url,
-                                "error_message": error_msg,
+                                "error_message": deploy_error_message,
                             }
 
                             headers = {
@@ -920,6 +1073,27 @@ class WorkflowExecutor:
                                         logger.error(
                                             f"Error updating workflow status to ACTIVE: {workflow_update_error}"
                                         )
+                                elif deployment_status == "failed":
+                                    try:
+                                        workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                        workflow_update_response = requests.put(
+                                            workflow_update_url,
+                                            json={"status": "ERROR"},
+                                            headers=headers,
+                                            timeout=10,
+                                        )
+                                        if workflow_update_response.status_code == 200:
+                                            logger.info(f"Successfully updated workflow {workflow_id} status to ERROR")
+                                        else:
+                                            logger.warning(
+                                                "Failed to update workflow status to ERROR: "
+                                                f"{workflow_update_response.status_code} - "
+                                                f"{workflow_update_response.text}"
+                                            )
+                                    except Exception as workflow_update_error:
+                                        logger.error(
+                                            f"Error updating workflow status to ERROR: {workflow_update_error}"
+                                        )
                             else:
                                 logger.warning(
                                     f"Failed to update deployment status: {response.status_code} - {response.text}"
@@ -935,16 +1109,10 @@ class WorkflowExecutor:
                             f"Model deployed successfully. Access via gateway: {gateway_url} "
                             f"with Host: {service_hostname}"
                         )
-                    elif evicted_count > 0:
-                        message = (
-                            f"Model deployment in progress. Pod evicted {evicted_count} time(s) due to "
-                            f"node resource shortage. KServe is retrying automatically. "
-                            f"Service: {service_name}"
-                        )
                     else:
-                        message = (
-                            f"Model deployment in progress. Service: {service_name}. "
-                            f"Check status at gateway: {gateway_url} with Host: {service_hostname}"
+                        message = deploy_error_message or (
+                            f"Model deployment failed for service {service_name}. "
+                            f"See deployment-status error_message in DB."
                         )
 
                     result = {
@@ -995,7 +1163,13 @@ class WorkflowExecutor:
                                 "X-Internal-API-Key": internal_api_key,
                             }
 
-                            requests.post(update_url, json=update_payload, headers=headers, timeout=10)
+                            fail_resp = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
+                            if fail_resp.status_code == 200:
+                                try:
+                                    wu = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                    requests.put(wu, json={"status": "ERROR"}, headers=headers, timeout=10)
+                                except Exception as werr:
+                                    logger.warning(f"Could not set workflow to ERROR after deploy failure: {werr}")
                     except Exception as db_error:
                         logger.error(f"Failed to update DB with failure status: {db_error}")
 
@@ -1019,6 +1193,14 @@ class WorkflowExecutor:
             if model and hasattr(model, "registry") and model.registry:
                 pvc_name_value = model.registry.pvc or ""
 
+            plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+            gpu_n = int(plan.get("gpu_count", parameters.get("gpus", 0)) or 0)
+            mem_req = plan.get("memory_request") or "2Gi"
+            cpu_req = plan.get("cpu_request") or "500m"
+            mem_lim = plan.get("memory_limit") or mem_req
+            cpu_lim = plan.get("cpu_limit") or cpu_req
+            pin_node = (plan.get("serving_node_name") or parameters.get("node_name") or "").strip()
+
             return model_deployment_component(
                 workflow_id=str(workflow.id),
                 component_id=component.id,
@@ -1035,11 +1217,15 @@ class WorkflowExecutor:
                 internal_api_key=parameters.get("internal_api_key", ""),
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
-                gpus=parameters.get("gpus", 0),
+                gpus=gpu_n,
                 repo_id=repo_id_value,
                 pvc_name=pvc_name_value,
                 image_pull_secret_name=parameters.get("image_pull_secret_name", "harbor"),
-                node_name=parameters.get("node_name", ""),
+                node_name=pin_node,
+                memory_request=mem_req,
+                cpu_request=cpu_req,
+                memory_limit=mem_lim,
+                cpu_limit=cpu_lim,
             )
 
         return None

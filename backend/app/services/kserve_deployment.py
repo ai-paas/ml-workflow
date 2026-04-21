@@ -86,7 +86,20 @@ class KServeDeploymentService:
             db.commit()
             db.refresh(deployment)
         else:
-            # 새 레코드 생성
+            # 새 레코드 생성 (첫 콜백이 failed/deployed 등인 경우 포함)
+            if status == "deployed":
+                dep_status = DeploymentStatus.DEPLOYED
+                deployed_at = datetime.utcnow()
+            elif status == "failed":
+                dep_status = DeploymentStatus.FAILED
+                deployed_at = None
+            elif status == "deleted":
+                dep_status = DeploymentStatus.DELETED
+                deployed_at = None
+            else:
+                dep_status = DeploymentStatus.DEPLOYING
+                deployed_at = None
+
             deployment_data = KServeDeploymentBaseSchema(
                 workflow_id=workflow_id,
                 component_id=component_id,
@@ -94,8 +107,8 @@ class KServeDeploymentService:
                 service_hostname=service_hostname,
                 model_name=model_name,
                 internal_url=internal_url,
-                status=DeploymentStatus.DEPLOYED if status == "deployed" else DeploymentStatus.DEPLOYING,
-                deployed_at=datetime.utcnow() if status == "deployed" else None,
+                status=dep_status,
+                deployed_at=deployed_at,
                 error_message=error_message if status == "failed" else None,
             )
             deployment = kserve_deployment_repository.create(db, obj_in=deployment_data)

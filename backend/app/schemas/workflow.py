@@ -318,12 +318,6 @@ class WorkflowTemplateReadSchema(WorkflowReadSchema):
 
 
 # ============= Execution 스키마 =============
-class WorkflowExecuteRequest(BaseModel):
-    """워크플로우 실행 요청"""
-
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-
-
 class WorkflowExecuteResponse(BaseModel):
     """워크플로우 실행 응답"""
 

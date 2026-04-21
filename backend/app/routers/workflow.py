@@ -19,7 +19,9 @@ from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
+from core.serving.serving_resource_meta import serving_meta_validation_error
 from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
+from db.models.model import Model
 from db.models.prompt import PromptVariableType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -41,7 +43,6 @@ from schemas.workflow import (
     WorkflowBaseSchema,
     WorkflowCreateRequest,
     WorkflowDefinition,
-    WorkflowExecuteRequest,
     WorkflowExecuteResponse,
     WorkflowListSchema,
     WorkflowMLTestResponse,
@@ -1550,7 +1551,6 @@ async def execute_workflow(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    execute_data: WorkflowExecuteRequest,
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
@@ -1563,10 +1563,8 @@ async def execute_workflow(
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
 
-    ## Request Body (WorkflowExecuteRequest)
-    - **parameters** (Dict[str, Any], optional): 실행 파라미터
-        - 커스텀 설정 값들을 전달할 수 있음
-        - 예: {"gpus": 1, "replicas": 2}
+    ## Request Body
+    - 없음. GPU/CPU·GPU 장 수·노드 지정 등은 백엔드가 사전정의 모델 메타 및 설정으로 결정한다.
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1594,15 +1592,29 @@ async def execute_workflow(
     - 파이프라인 완료 시 워크플로우 상태가 자동으로 ACTIVE로 변경됨
 
     ## Errors
-    - 400: 워크플로우가 ERROR 상태이거나 지식베이스가 모델 뒤에 있음
+    - 400: MODEL 컴포넌트 없음, ERROR 상태, 지식베이스 순서 위반, 서빙 메타 검증 실패
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 이미 배포 중이거나 배포 완료된 상태
     - 500: 실행 중 오류 발생
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    model_component_count = sum(1 for c in workflow.components if c.type == ComponentType.MODEL)
+    if model_component_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="워크플로우에 MODEL 컴포넌트가 없어 배포할 수 없습니다.",
+        )
+
+    if KServeDeploymentService.has_active_deployment(db, workflow_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 배포 중이거나 배포가 완료된 워크플로우입니다. 재배포가 필요하면 삭제·정리 후 다시 시도해 주세요.",
+        )
 
     # ERROR 상태인 경우만 실행 불가
     if workflow.status == WorkflowStatus.ERROR:
@@ -1620,7 +1632,7 @@ async def execute_workflow(
     try:
         # WorkflowExecutor를 사용하여 워크플로우 실행
         executor = WorkflowExecutor(db)
-        execution_result = executor.execute_workflow(workflow=workflow, parameters=execute_data.parameters)
+        execution_result = executor.execute_workflow(workflow=workflow, parameters={})
 
         return WorkflowExecuteResponse(
             workflow_id=execution_result["workflow_id"],
@@ -1628,6 +1640,10 @@ async def execute_workflow(
             status=execution_result["status"],
             message=execution_result["message"],
         )
+
+    except ValueError as e:
+        logger.warning(f"Workflow execution rejected (serving meta / validation): {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     except Exception as e:
         logger.error(f"Failed to execute workflow {workflow_id}: {str(e)}")
@@ -2791,6 +2807,26 @@ def _validate_workflow_definition_checks(
             rule="minimum_model_per_path",
             passed=len(no_model_path_errors) == 0,
             message="; ".join(no_model_path_errors) if no_model_path_errors else None,
+        )
+    )
+
+    # 15b. §7.9 사전정의 서빙 메타(5키) 직접 또는 부모 파생으로 해소 가능한지
+    serving_meta_errors: List[str] = []
+    for comp in definition.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        db_model = db.get(Model, comp.model_id)
+        if not db_model:
+            serving_meta_errors.append(f"{comp.ref_id}: model_id={comp.model_id}에 해당하는 모델이 없습니다.")
+            continue
+        err = serving_meta_validation_error(db, db_model, predefined_configs=PREDEFINED_MODEL_CONFIGS)
+        if err:
+            serving_meta_errors.append(f"{comp.ref_id}: {err}")
+    results.append(
+        ValidationCheckResult(
+            rule="serving_predefined_meta_complete",
+            passed=len(serving_meta_errors) == 0,
+            message="; ".join(serving_meta_errors) if serving_meta_errors else None,
         )
     )
 
