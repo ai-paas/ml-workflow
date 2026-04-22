@@ -66,26 +66,6 @@ def upgrade() -> None:
     op.create_index(
         "ix_model_workflow_deployments_workflow_id", "model_workflow_deployments", ["workflow_id"], unique=False
     )
-    # MySQL 1553: workflow_id FK 인덱스는 DROP INDEX 불가 → 행 이관 후 DROP TABLE 만.
-    # kserve 컬럼이 적으므로 신규 컬럼은 기본값으로 채운다.
-    op.execute(
-        sa.text(
-            """
-            INSERT INTO model_workflow_deployments (
-                id, workflow_id, component_id, service_name, service_hostname, model_name,
-                internal_url, deployment_type, pvc, device_type, remote_api_url,
-                status, deployed_at, deleted_at, error_message,
-                created_at, created_by, updated_at, updated_by, deleted_by
-            )
-            SELECT
-                id, workflow_id, component_id, service_name, service_hostname, model_name,
-                internal_url, 'KSERVE', NULL, NULL, NULL,
-                status, deployed_at, deleted_at, error_message,
-                created_at, created_by, updated_at, updated_by, deleted_by
-            FROM kserve_deployments
-            """
-        )
-    )
     op.drop_table("kserve_deployments")
     # ### end Alembic commands ###
 
@@ -131,21 +111,5 @@ def downgrade() -> None:
     op.create_index("ix_kserve_deployments_status", "kserve_deployments", ["status"], unique=False)
     op.create_index("ix_kserve_deployments_service_name", "kserve_deployments", ["service_name"], unique=False)
     op.create_index("ix_kserve_deployments_component_id", "kserve_deployments", ["component_id"], unique=False)
-    op.execute(
-        sa.text(
-            """
-            INSERT INTO kserve_deployments (
-                id, workflow_id, component_id, service_name, service_hostname, model_name,
-                internal_url, status, deployed_at, deleted_at, error_message,
-                created_at, created_by, updated_at, updated_by, deleted_by
-            )
-            SELECT
-                id, workflow_id, component_id, service_name, service_hostname, model_name,
-                internal_url, status, deployed_at, deleted_at, error_message,
-                created_at, created_by, updated_at, updated_by, deleted_by
-            FROM model_workflow_deployments
-            """
-        )
-    )
     op.drop_table("model_workflow_deployments")
     # ### end Alembic commands ###
