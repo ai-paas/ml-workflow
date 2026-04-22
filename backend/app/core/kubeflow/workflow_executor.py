@@ -89,6 +89,10 @@ class WorkflowExecutor:
                     framework = "yolox"
 
             nodes_override = node_inventories_with_free_overrides(nodes_snapshot, frees) if nodes_snapshot else None
+            planner_log_ctx = (
+                f"component_id={component.id} name={component.name!r} "
+                f"chain_step={step + 1}/{chain_n} model_id={component.model_id} repo_id={model.repo_id!r}"
+            )
             plan = plan_serving_resources_with_k8s(
                 normalized_meta=meta,
                 task=task,
@@ -98,10 +102,11 @@ class WorkflowExecutor:
                 serving_meta_source=source,
                 parent_repo_id=parent_repo,
                 nodes_override=nodes_override,
+                log_context=planner_log_ctx,
             )
 
             if nodes_snapshot and plan.reservation_node_name:
-                apply_chain_reservation_from_plan(frees, plan)
+                apply_chain_reservation_from_plan(frees, plan, planner_log_ctx)
 
             planner_note = plan.planner_note
             if chain_n > 1:

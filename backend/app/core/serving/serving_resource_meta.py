@@ -7,6 +7,7 @@ GPU VRAM·호스트 메모리·CPU 밀리코어는 PREDEFINED_MODEL_CONFIGS에�
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from typing import Any, Literal, Optional, Tuple
 
 from db.models.model import Model, ModelTaskType
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 SERVING_META_KEYS = (
     "serving_vram_need_bytes",
@@ -260,6 +263,7 @@ def build_serving_resource_plan(
     parent_repo_id: Optional[str],
     serving_node_name: Optional[str] = None,
     planner_note: Optional[str] = None,
+    log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
     """
     인벤토리 없이(또는 K8s 조회 실패 시) §7 단순 경로: decide_try_gpu_path + k는 default_gpu_vram_bytes 기준 ceil.
@@ -292,6 +296,25 @@ def build_serving_resource_plan(
         mem_req, cpu_req = mem_cpu, millicores_to_k8s_cpu(cpu_mc)
         device = "CPU"
         k = 0
+
+    ctx = f" | {log_context}" if log_context else ""
+    dev_ko = "GPU" if device == "GPU" else "CPU"
+    try_ko = "예" if try_gpu else "아니오"
+    logger.info(
+        "[serving_planner]%s 노드 정보 없이 단순 계산으로 플랜함 — 최종 디바이스 %s, GPU %d장, "
+        "모델 VRAM 안내 %s, Pod 메모리·CPU %s / %s, GPU 경로를 시도했는지 %s, "
+        "참고사유·메모 %r / %r, 장당 VRAM 기본값 %s",
+        ctx,
+        dev_ko,
+        k,
+        format_k8s_memory_from_bytes(v_need),
+        mem_req,
+        cpu_req,
+        try_ko,
+        fallback_reason,
+        planner_note,
+        format_k8s_memory_from_bytes(int(default_gpu_vram_bytes)),
+    )
 
     return ServingResourcePlan(
         device_type=device,

@@ -26,6 +26,7 @@ from core.serving.serving_resource_meta import (
 def apply_chain_reservation_from_plan(
     frees: dict[str, tuple[int, int, int]],
     plan: ServingResourcePlan,
+    log_context: Optional[str] = None,
 ) -> None:
     """§7.3.2: 확정 플랜의 k·memory·cpu 요청을 선택 노드 잔여에서 차감(max(0,·))."""
     rn = plan.reservation_node_name
@@ -38,10 +39,187 @@ def apply_chain_reservation_from_plan(
     cpu_mc = _cpu_string_to_millicores(plan.cpu_request)
     k = max(0, int(plan.gpu_count))
     g, m, c = frees.get(rn, (0, 0, 0))
-    frees[rn] = (max(0, g - k), max(0, m - mem_b), max(0, c - cpu_mc))
+    before = (g, m, c)
+    frees[rn] = (
+        max(0, g - k),
+        max(0, m - mem_b),
+        max(0, c - cpu_mc),
+    )
+    after = frees[rn]
+    ctx = f" | {log_context}" if log_context else ""
+    logger.info(
+        "[serving_planner]%s 이전 모델 배정 반영: 노드 '%s'의 남은 자원에서 "
+        "GPU %d장·메모리 %s·CPU %s 만큼 빼서 다음 모델이 쓸 잔여를 맞춤. "
+        "차감 전 (남은 GPU장수, 메모리, CPU)=%s → 차감 후=%s",
+        ctx,
+        rn,
+        k,
+        format_k8s_memory_from_bytes(mem_b),
+        millicores_to_k8s_cpu(cpu_mc),
+        before,
+        after,
+    )
 
 
 logger = logging.getLogger(__name__)
+
+_LOG_TAG = "[serving_planner]"
+
+
+def _log_ctx_suffix(log_context: Optional[str]) -> str:
+    return f" | {log_context}" if log_context else ""
+
+
+def _try_gpu_policy_korean(
+    try_gpu: bool,
+    fb_try: Optional[str],
+    task: Optional[str],
+    framework: str,
+    settings: Settings,
+    execute_parameters: dict[str, Any],
+) -> str:
+    """GPU 경로를 탈지 말지에 대한 사람이 읽기 쉬운 한 줄."""
+    if not try_gpu:
+        bits = []
+        task_l = (task or "").lower()
+        if task_l == "embedding":
+            bits.append("임베딩 작업은 정책상 CPU만 사용")
+        if bool(execute_parameters.get("force_cpu")):
+            bits.append("실행 파라미터에서 CPU 강제")
+        if (execute_parameters.get("device_type") or "").strip().upper() == "CPU":
+            bits.append("실행 파라미터에서 CPU만 쓰라고 지정됨")
+        if framework != "ollama" and not settings.KSERVE_GPU:
+            bits.append("KServe 계열인데 서버 설정에서 KServe GPU 사용이 꺼져 있음")
+        if not settings.DEFAULT_TRY_GPU:
+            bits.append("서버 설정에서 GPU 우선 시도가 꺼져 있음")
+        if fb_try and not bits:
+            bits.append(f"내부 사유 코드: {fb_try}")
+        elif fb_try:
+            bits.append(f"참고 코드: {fb_try}")
+        detail = " ".join(bits) if bits else "정책 또는 설정에 따름"
+        return "GPU는 아예 고려하지 않고 CPU 계획만 만듭니다. " + detail
+    return "우선 GPU로 배치할 수 있는지 보고, 안 되면 CPU로 내립니다."
+
+
+def _log_inventory_snapshot(log_context: Optional[str], nodes: Sequence[NodeInventory]) -> None:
+    """§7.3.1: 노드별 잔여를 한국어 한 줄씩만 요약."""
+    suf = _log_ctx_suffix(log_context)
+    for n in nodes:
+        v_card_s = format_k8s_memory_from_bytes(int(n.v_card_bytes)) if n.v_card_bytes else "알 수 없음"
+        pod_note = (
+            "클러스터 다른 Pod의 요청을 반영함"
+            if n.pod_requests_applied
+            else "Pod 합산 실패로 노드 할당량만 사용(보수적)"
+        )
+        logger.info(
+            "%s%s 노드 '%s': %s. 전체 GPU %d장, 배치 가능한 남은 GPU %d장, "
+            "한 장당 VRAM 추정 %s, 남은 메모리 %s, 남은 CPU %s (노드 메모리·CPU 상한 %s / %s)",
+            _LOG_TAG,
+            suf,
+            n.name,
+            pod_note,
+            n.alloc_gpu,
+            n.g_free,
+            v_card_s,
+            format_k8s_memory_from_bytes(n.m_free),
+            millicores_to_k8s_cpu(n.c_free),
+            format_k8s_memory_from_bytes(n.alloc_memory_bytes),
+            millicores_to_k8s_cpu(n.alloc_cpu_millicores),
+        )
+
+
+def _log_try_gpu_gate(
+    log_context: Optional[str],
+    try_gpu: bool,
+    fb_try: Optional[str],
+    task: Optional[str],
+    framework: str,
+    settings: Settings,
+    execute_parameters: dict[str, Any],
+) -> None:
+    suf = _log_ctx_suffix(log_context)
+    logger.info(
+        "%s%s %s (task=%s, 프레임워크=%s)",
+        _LOG_TAG,
+        suf,
+        _try_gpu_policy_korean(try_gpu, fb_try, task, framework, settings, execute_parameters),
+        task or "-",
+        framework,
+    )
+
+
+def _log_gpu_placement_summary(
+    log_context: Optional[str],
+    nodes: list[NodeInventory],
+    v_need: int,
+    wl: list[str],
+) -> None:
+    """GPU 후보를 노드별로 한두 줄로 요약."""
+    suf = _log_ctx_suffix(log_context)
+    v_need_s = format_k8s_memory_from_bytes(v_need)
+    eligible: list[str] = []
+    skipped: list[str] = []
+    for n in nodes:
+        if n.alloc_gpu <= 0:
+            skipped.append(f"{n.name}(GPU 없음·0장)")
+            continue
+        if not n.v_card_bytes or n.v_card_bytes <= 0:
+            skipped.append(f"{n.name}(장당 VRAM 정보 없음)")
+            continue
+        v_card = int(n.v_card_bytes)
+        k_need = max(1, math.ceil(v_need / float(v_card)))
+        g_free = n.g_free
+        if k_need > g_free:
+            skipped.append(
+                f"{n.name}(이 모델에 필요한 GPU {k_need}장 > 이 노드에 남은 GPU {g_free}장, "
+                f"장당 VRAM {format_k8s_memory_from_bytes(v_card)})"
+            )
+            continue
+        eligible.append(n.name)
+    wl_note = f"노드 화이트리스트 적용 중: {', '.join(wl)}" if wl else "노드 화이트리스트 없음(Ready 노드 전부 검토)"
+    logger.info(
+        "%s%s GPU 배치 검토: 모델 VRAM 안내값 %s. %s. " "배치 가능해 보이는 노드: %s. 제외된 노드: %s",
+        _LOG_TAG,
+        suf,
+        v_need_s,
+        wl_note,
+        ", ".join(eligible) if eligible else "(없음)",
+        "; ".join(skipped) if skipped else "(없음)",
+    )
+
+
+def _log_cpu_placement_summary(
+    log_context: Optional[str],
+    nodes: list[NodeInventory],
+    mem_req_bytes: int,
+    cpu_req_millicores: int,
+) -> None:
+    suf = _log_ctx_suffix(log_context)
+    mem_s = format_k8s_memory_from_bytes(mem_req_bytes)
+    cpu_s = millicores_to_k8s_cpu(cpu_req_millicores)
+    skipped: list[str] = []
+    ok_count = 0
+    for n in nodes:
+        if n.m_free < mem_req_bytes and n.c_free < cpu_req_millicores:
+            skipped.append(
+                f"{n.name}(메모리·CPU 모두 부족: 남은 메모리 {format_k8s_memory_from_bytes(n.m_free)}, "
+                f"남은 CPU {millicores_to_k8s_cpu(n.c_free)})"
+            )
+        elif n.m_free < mem_req_bytes:
+            skipped.append(f"{n.name}(메모리 부족: 남음 {format_k8s_memory_from_bytes(n.m_free)} < 필요 {mem_s})")
+        elif n.c_free < cpu_req_millicores:
+            skipped.append(f"{n.name}(CPU 부족: 남음 {millicores_to_k8s_cpu(n.c_free)} < 필요 {cpu_s})")
+        else:
+            ok_count += 1
+    logger.info(
+        "%s%s CPU 배치 검토: Pod에 요청할 메모리 %s, CPU %s. " "조건을 만족하는 노드 %d개, 조건 미달로 제외: %s",
+        _LOG_TAG,
+        suf,
+        mem_s,
+        cpu_s,
+        ok_count,
+        "; ".join(skipped[:12]) + (" …(이하 생략)" if len(skipped) > 12 else "") if skipped else "(없음)",
+    )
 
 
 def _append_planner_note(base: str, extra: Optional[str]) -> str:
@@ -143,6 +321,7 @@ def _plan_serving_resources_with_inventory_nodes(
     settings: Settings,
     serving_meta_source: ServingMetaSource,
     parent_repo_id: Optional[str],
+    log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
     """인벤토리 리스트가 비어 있지 않을 때 §7.4~7.7 플랜(§7.3.2는 호출부에서 잔여 조정)."""
     v_need = int(normalized_meta["serving_vram_need_bytes"])
@@ -168,12 +347,49 @@ def _plan_serving_resources_with_inventory_nodes(
     if node_list and not node_list[0].pod_requests_applied:
         pod_inventory_note = "pod_requests_not_applied_allocatable_only"
 
+    suf = _log_ctx_suffix(log_context)
+    wl_human = ", ".join(wl) if wl else "지정 없음(클러스터에서 Ready인 노드 전부)"
+    logger.info(
+        "%s%s 자원 계획 시작 — 모델 VRAM 안내 %s, GPU Pod 메모리·CPU 요청 %s / %s, "
+        "CPU 전용 경로일 때 메모리·CPU %s / %s, 노드 이름 제한: %s",
+        _LOG_TAG,
+        suf,
+        format_k8s_memory_from_bytes(v_need),
+        mem_gpu,
+        millicores_to_k8s_cpu(gpu_pod_mc),
+        mem_cpu,
+        millicores_to_k8s_cpu(cpu_mc),
+        wl_human,
+    )
+    _log_inventory_snapshot(log_context, node_list)
+    _log_try_gpu_gate(log_context, try_gpu, fb_try, task, framework, settings, execute_parameters)
+
     if try_gpu:
+        _log_gpu_placement_summary(log_context, node_list, v_need, wl)
         picked = _choose_gpu_node(node_list, v_need, wl)
         if picked:
             node_name, k, slack = picked
             node = next(n for n in node_list if n.name == node_name)
             mr, cr, ml, cl = _cap_memory_cpu_to_node(mem_gpu, millicores_to_k8s_cpu(gpu_pod_mc), node)
+            v_card = int(node.v_card_bytes or 0)
+            slot_remain = node.g_free - k
+            slack_s = format_k8s_memory_from_bytes(slack)
+            pin_msg = f"스케줄러에 노드 '{node_name}' 고정" if pin else "노드 고정 없이 요청만 전달"
+            logger.info(
+                "%s%s GPU 배정 확정 — 노드 '%s', 이 Pod에 쓸 GPU %d장(모델 VRAM %s 기준·장당 VRAM %s), "
+                "남는 VRAM 여유 약 %s, 같은 노드에 남은 GPU 슬롯 %d장, Pod 메모리·CPU 요청 %s / %s, %s",
+                _LOG_TAG,
+                suf,
+                node_name,
+                k,
+                format_k8s_memory_from_bytes(v_need),
+                format_k8s_memory_from_bytes(v_card),
+                slack_s,
+                slot_remain,
+                mr,
+                cr,
+                pin_msg,
+            )
             return ServingResourcePlan(
                 device_type="GPU",
                 gpu_count=k,
@@ -191,13 +407,42 @@ def _plan_serving_resources_with_inventory_nodes(
             )
         extra = "no_feasible_gpu_node"
         fallback_reason = ", ".join(x for x in (fallback_reason, extra) if x)
-        logger.info("GPU 후보 노드에서 실행 가능한 (k, G_free) 조합 없음 — CPU 경로")
+        logger.info(
+            "%s%s GPU에 둘 곳이 없어 CPU 배치로 넘어갑니다. "
+            "이유: 어느 노드에서도 '필요한 GPU 장 수'가 '남은 GPU 슬롯' 이하가 되지 않거나, "
+            "GPU·장당 VRAM 정보가 없어 계산할 수 없었습니다. (위 로그의 '제외된 노드' 참고)",
+            _LOG_TAG,
+            suf,
+        )
 
     mem_req_b = k8s_memory_quantity_to_bytes(mem_cpu)
+    _log_cpu_placement_summary(log_context, node_list, mem_req_b, cpu_mc)
     cpu_node = _choose_cpu_node(node_list, mem_req_b, cpu_mc, wl)
     if cpu_node:
         node = next(n for n in node_list if n.name == cpu_node)
         mr, cr, ml, cl = _cap_memory_cpu_to_node(mem_cpu, millicores_to_k8s_cpu(cpu_mc), node)
+        pool_ko = (
+            "GPU가 달리지 않은 노드를 우선" if node.alloc_gpu == 0 else "GPU가 있는 노드이지만 CPU 요청만으로 배치"
+        )
+        margin_m = node.m_free - mem_req_b
+        margin_c = node.c_free - cpu_mc
+        pin_msg = f"스케줄러에 노드 '{cpu_node}' 고정" if pin else "노드 고정 없이 요청만 전달"
+        came_from_gpu = try_gpu and ("no_feasible_gpu_node" in (fallback_reason or ""))
+        transition = " (GPU 배치가 불가능해 CPU로 내려옴)" if came_from_gpu else ""
+        logger.info(
+            "%s%s CPU 배정 확정%s — 노드 '%s', 선정 방식: %s. "
+            "요청 메모리·CPU %s / %s, 노드 잔여에서 남는 여유 약 메모리 %s·CPU %s, %s",
+            _LOG_TAG,
+            suf,
+            transition,
+            cpu_node,
+            pool_ko,
+            mr,
+            cr,
+            format_k8s_memory_from_bytes(margin_m),
+            millicores_to_k8s_cpu(margin_c),
+            pin_msg,
+        )
         return ServingResourcePlan(
             device_type="CPU",
             gpu_count=0,
@@ -214,7 +459,11 @@ def _plan_serving_resources_with_inventory_nodes(
             reservation_node_name=cpu_node,
         )
 
-    logger.warning("CPU 배치 후보도 없음 — allocatable 미충족 가능, 기본 플랜 폴백")
+    logger.warning(
+        "%s%s 어떤 노드도 CPU 조건(메모리·CPU)을 만족하지 못해, 클러스터 정보 없이 기본 공식으로만 플랜합니다.",
+        _LOG_TAG,
+        suf,
+    )
     return build_serving_resource_plan(
         normalized_meta=normalized_meta,
         task=task,
@@ -227,6 +476,7 @@ def _plan_serving_resources_with_inventory_nodes(
         parent_repo_id=parent_repo_id,
         fallback_reason=fallback_reason,
         planner_note=_append_planner_note("fallback_no_cpu_node_match", pod_inventory_note),
+        log_context=log_context,
     )
 
 
@@ -240,6 +490,7 @@ def plan_serving_resources_with_k8s(
     serving_meta_source: ServingMetaSource,
     parent_repo_id: Optional[str],
     nodes_override: Optional[Sequence[NodeInventory]] = None,
+    log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
     """
     nodes_override 가 있으면 그 스냅샷(연쇄 잔여 반영본)으로만 플랜한다.
@@ -256,7 +507,12 @@ def plan_serving_resources_with_k8s(
     )
 
     if not nodes:
-        logger.info("서빙 노드 인벤토리가 비어 있음 — 기본 VRAM ceil 플랜으로 폴백")
+        logger.info(
+            "%s%s 클러스터 노드 목록을 가져오지 못했거나 대상 노드가 없어, "
+            "노드 잔여 없이 기본 VRAM·요청값만으로 플랜합니다.",
+            _LOG_TAG,
+            _log_ctx_suffix(log_context),
+        )
         return build_serving_resource_plan(
             normalized_meta=normalized_meta,
             task=task,
@@ -268,6 +524,7 @@ def plan_serving_resources_with_k8s(
             serving_meta_source=serving_meta_source,
             parent_repo_id=parent_repo_id,
             planner_note="fallback_no_k8s_inventory",
+            log_context=log_context,
         )
 
     return _plan_serving_resources_with_inventory_nodes(
@@ -279,4 +536,5 @@ def plan_serving_resources_with_k8s(
         settings=settings,
         serving_meta_source=serving_meta_source,
         parent_repo_id=parent_repo_id,
+        log_context=log_context,
     )
