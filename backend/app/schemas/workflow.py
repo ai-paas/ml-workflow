@@ -5,12 +5,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from config.settings import get_settings
+from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.service import ComponentType
 from pydantic import BaseModel, Field, computed_field, model_serializer, model_validator
 from schemas.base import TimeStampSchemaMixin
-from schemas.kserve_deployment import KServeDeploymentReadSchema
 from schemas.model import ModelBriefReadSchema
+from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
 from schemas.user import UserSchema
+from services.workflow_serving_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 
 if TYPE_CHECKING:
     from db.models.service import ComponentConnection
@@ -216,7 +218,7 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     kubeflow_run_id: Optional[str] = None
     components: List[ComponentReadSchema] = Field(default_factory=list)
     component_connections: List[ConnectionReadSchema] = Field(default_factory=list)
-    kserve_deployments: List[KServeDeploymentReadSchema] = Field(default_factory=list, exclude=True)
+    model_deployments: List[ModelWorkflowDeploymentReadSchema] = Field(default_factory=list, exclude=True)
     service: Optional[Any] = Field(None, exclude=True)  # Service 관계 객체 (직접 접근용, 응답에서 제외)
     template: Optional[Any] = Field(None, exclude=True)  # Workflow 관계 객체 (직접 접근용, 응답에서 제외)
 
@@ -239,34 +241,25 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def public_url(self) -> Optional[str]:
-        """KServe 배포 정보를 기반으로 동적으로 생성된 공개 URL"""
-        if not self.kserve_deployments:
+        """§2.6: KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
+        if not self.model_deployments:
             return None
 
-        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
-        first_deployment = self.kserve_deployments[0]
+        first_deployment = self.model_deployments[0]
+        if first_deployment.deployment_type != WorkflowServingDeploymentType.KSERVE:
+            return None
         settings = get_settings()
-        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.model_name
-
-        # KServe V2 Protocol inference 엔드포인트
-        return f"{gateway_url}/v2/models/{model_name}/infer"
+        return kserve_public_infer_url(settings.KSERVE_GATEWAY_URL or "", first_deployment.model_name)
 
     @computed_field
     @property
     def backend_api_url(self) -> Optional[str]:
-        """KServe 배포 정보를 기반으로 동적으로 생성된 백엔드 API URL"""
-        if not self.kserve_deployments:
+        """§2.6: 배포 레코드의 internal_url 기준."""
+        if not self.model_deployments:
             return None
 
-        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
-        first_deployment = self.kserve_deployments[0]
-        settings = get_settings()
-        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.model_name
-
-        # KServe V2 Protocol inference 엔드포인트
-        return f"{gateway_url}/v2/models/{model_name}/infer"
+        first_deployment = self.model_deployments[0]
+        return backend_api_url_from_internal(first_deployment.internal_url)
 
     class Config:
         from_attributes = True

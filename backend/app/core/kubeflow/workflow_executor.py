@@ -13,7 +13,7 @@ from db.models.model import Model
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
 from kfp.compiler import Compiler
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -157,6 +157,7 @@ class WorkflowExecutor:
         # REST API 설정을 parameters에 추가 (DB 업데이트용)
         parameters["rest_api_url"] = settings.REST_API_URL
         parameters["internal_api_key"] = settings.INTERNAL_API_KEY
+        parameters["kserve_gateway_url"] = settings.KSERVE_GATEWAY_URL or ""
 
         # KServe imagePullSecret 설정 추가
         parameters["image_pull_secret_name"] = settings.KUBEFLOW_IMAGE_PULL_SECRET
@@ -188,24 +189,48 @@ class WorkflowExecutor:
             workflow.kubeflow_run_id = run_id
 
             # KServe 배포 정보 초기화
-            from services.kserve_deployment import KServeDeploymentService
+            from services.model_workflow_deployment import ModelWorkflowDeploymentService
+            from services.workflow_serving_deployment_policy import (
+                parse_serving_device_type,
+                resolve_workflow_serving_deployment_type,
+            )
 
             for component in workflow.components:
-                if component.type == ComponentType.MODEL:
-                    # KServeDeployment 레코드 생성
-                    KServeDeploymentService.create_deployment(
-                        db=self.db,
-                        workflow_id=workflow.id,
-                        component_id=component.id,
-                        model_name=component.name,
+                if component.type != ComponentType.MODEL:
+                    continue
+                model = None
+                if component.model_id:
+                    model = (
+                        self.db.query(Model)
+                        .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                        .filter(Model.id == component.model_id)
+                        .first()
                     )
+                # deployment_type: REMOTE(§2.5 1순위)는 §6에서 resolve_workflow_serving_deployment_type에 추가.
+                dtype = resolve_workflow_serving_deployment_type(model, settings)
+                plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+                device_type = parse_serving_device_type(plan)
+                pvc_val = model.registry.pvc if model and model.registry else None
+                # remote_api_url: §6 Remote LLM 연동 시에만 저장.
+                remote_api_url = None
+
+                ModelWorkflowDeploymentService.create_deployment(
+                    db=self.db,
+                    workflow_id=workflow.id,
+                    component_id=component.id,
+                    model_name=component.name,
+                    deployment_type=dtype,
+                    pvc=pvc_val,
+                    device_type=device_type,
+                    remote_api_url=remote_api_url,
+                )
 
             self.db.commit()
 
             logger.info(f"Workflow {workflow.id} successfully executed with run ID: {run_id}")
 
-            # 배포된 모델 정보 조회 (KServeDeployment 테이블에서)
-            deployed_models = KServeDeploymentService.get_deployed_models(
+            # 배포된 모델 정보 조회 (model_workflow_deployments)
+            deployed_models = ModelWorkflowDeploymentService.get_deployed_models(
                 self.db, workflow.id, include_component_info=True
             )
 
@@ -299,7 +324,12 @@ class WorkflowExecutor:
             framework = "pytorch"
 
             if db and component.model_id:
-                model = db.query(Model).filter(Model.id == component.model_id).first()
+                model = (
+                    db.query(Model)
+                    .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                    .filter(Model.id == component.model_id)
+                    .first()
+                )
                 if model:
                     # Ollama 모델 감지 (provider가 ollama이고 format이 gguf인 경우)
                     if (
@@ -369,6 +399,8 @@ class WorkflowExecutor:
                 cpu_request: str = "500m",
                 memory_limit: str = "4Gi",
                 cpu_limit: str = "2000m",
+                kserve_gateway_url: str = "",
+                deployment_mode: str = "kserve",
             ) -> str:
                 import json
                 import logging
@@ -388,10 +420,14 @@ class WorkflowExecutor:
                 logging.basicConfig(level=logging.INFO)
                 logger = logging.getLogger(__name__)
 
+                namespace = "kubeflow-user-example-com"
+
+                # deployment_mode == "remote" (§6): KFP 내 REMOTE 전용 배포 경로는 미구현.
+                # §2.5 REMOTE 판별이 스텁이므로 현재 이 분기는 호출되지 않는다.
+
                 # Kubernetes 설정
                 k8s_config.load_incluster_config()
                 kserve_client = KServeClient()
-                namespace = "kubeflow-user-example-com"
 
                 # 인퍼런스 서비스 이름 생성 (DNS 1035 규칙 준수)
                 # DNS 1035 규칙:
@@ -1006,8 +1042,9 @@ class WorkflowExecutor:
                     # 서비스 URL 정보 생성
                     internal_url = f"http://{service_name}.{namespace}.svc.cluster.local"
 
-                    # 외부 접근을 위한 정보 (Istio Gateway 경유)
-                    gateway_url = "http://10.10.30.154:80"  # Istio Gateway External IP
+                    # 외부 접근을 위한 정보 (Istio Gateway 경유) — 파이프라인에 주입된 설정만 사용(§2.6)
+                    gw = (kserve_gateway_url or "").strip().rstrip("/")
+                    gateway_url = gw if gw else ""
                     service_hostname = f"{service_name}.{namespace}.example.com"
 
                     config_dict = json.loads(config)
@@ -1105,10 +1142,16 @@ class WorkflowExecutor:
 
                     # 메시지 생성
                     if service_ready:
-                        message = (
-                            f"Model deployed successfully. Access via gateway: {gateway_url} "
-                            f"with Host: {service_hostname}"
-                        )
+                        if gateway_url:
+                            message = (
+                                f"Model deployed successfully. Access via gateway: {gateway_url} "
+                                f"with Host: {service_hostname}"
+                            )
+                        else:
+                            message = (
+                                f"Model deployed successfully. KSERVE_GATEWAY_URL is not set; "
+                                f"use in-cluster URL: {internal_url}"
+                            )
                     else:
                         message = deploy_error_message or (
                             f"Model deployment failed for service {service_name}. "
@@ -1201,6 +1244,12 @@ class WorkflowExecutor:
             cpu_lim = plan.get("cpu_limit") or cpu_req
             pin_node = (plan.get("serving_node_name") or parameters.get("node_name") or "").strip()
 
+            # §6 전까지 REMOTE는 deployment_type/파이프라인 분기 모두 미연동(resolve는 KSERVE|OLLAMA만).
+            if framework == "ollama":
+                deployment_mode = "ollama"
+            else:
+                deployment_mode = "kserve"
+
             return model_deployment_component(
                 workflow_id=str(workflow.id),
                 component_id=component.id,
@@ -1226,6 +1275,8 @@ class WorkflowExecutor:
                 cpu_request=cpu_req,
                 memory_limit=mem_lim,
                 cpu_limit=cpu_lim,
+                kserve_gateway_url=parameters.get("kserve_gateway_url", ""),
+                deployment_mode=deployment_mode,
             )
 
         return None
@@ -1686,7 +1737,7 @@ class WorkflowExecutor:
         워크플로우 실행 상태 조회 (DB 기반)
 
         워크플로우의 기본 상태와 배포된 모델들의 상태를 조회합니다.
-        kserve_deployments 테이블의 정보를 기반으로 상태를 반환하며,
+        model_workflow_deployments 테이블의 정보를 기반으로 상태를 반환하며,
         Kubernetes나 Kubeflow를 직접 조회하지 않습니다.
 
         Args:
@@ -1698,19 +1749,19 @@ class WorkflowExecutor:
                 - status (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
                 - kubeflow_run_id (str, optional): Kubeflow 파이프라인 실행 ID
                 - deployed_models (List[Dict]): 배포된 모델 목록
-                    - 각 항목은 KServeDeploymentService.get_deployed_models()의 반환 형식과 동일
+                    - 각 항목은 ModelWorkflowDeploymentService.get_deployed_models()의 반환 형식과 동일
 
         Process:
             1. 워크플로우 기본 정보 수집 (id, status, kubeflow_run_id)
-            2. KServeDeploymentService.get_deployed_models()로 배포 정보 조회
+            2. ModelWorkflowDeploymentService.get_deployed_models()로 배포 정보 조회
             3. 결과 반환
 
         Note:
             - 모든 조회는 DB 기반으로 수행됩니다
             - kubeflow_run_id는 참조용으로만 포함되며, 실제 파이프라인 상태는 조회하지 않습니다
-            - 배포 상태는 kserve_deployments 테이블의 정보를 기반으로 합니다
+            - 배포 상태는 model_workflow_deployments 테이블의 정보를 기반으로 합니다
         """
-        from services.kserve_deployment import KServeDeploymentService
+        from services.model_workflow_deployment import ModelWorkflowDeploymentService
 
         status = {
             "workflow_id": str(workflow.id),
@@ -1719,10 +1770,10 @@ class WorkflowExecutor:
             "deployed_models": [],
         }
 
-        # DB 기반 배포 상태 조회 (kserve_deployments 테이블)
+        # DB 기반 배포 상태 조회 (model_workflow_deployments)
         if self.db:
             try:
-                deployed_models = KServeDeploymentService.get_deployed_models(
+                deployed_models = ModelWorkflowDeploymentService.get_deployed_models(
                     self.db, str(workflow.id), include_component_info=True
                 )
 

@@ -213,7 +213,7 @@ def create_deployment_management_ui(app_state):
 
         """
 
-        # 배포 상태 조회 (kserve_deployments 테이블에서)
+        # 배포 상태 조회 (model_workflow_deployments / API)
         deployment_status_html = ""
         try:
             if app_state.api_client:
@@ -288,7 +288,7 @@ def create_deployment_management_ui(app_state):
         if not app_state.api_client:
             return "❌ 로그인이 필요합니다."
 
-        # 배포 상태 조회 (kserve_deployments 테이블에서)
+        # 배포 상태 조회 (model_workflow_deployments / API)
         deployment_status_html = ""
         try:
             models_result = app_state.api_client.get_deployed_models(workflow_id)

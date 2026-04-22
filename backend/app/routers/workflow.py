@@ -20,8 +20,8 @@ from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
 from core.serving.serving_resource_meta import serving_meta_validation_error
-from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
 from db.models.model import Model
+from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.prompt import PromptVariableType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -59,8 +59,8 @@ from schemas.workflow import (
 )
 from services.app_service import ServiceMonitoringService
 from services.knowledge_base import KnowledgeBaseService
-from services.kserve_deployment import KServeDeploymentService
 from services.model import PREDEFINED_MODEL_CONFIGS, ModelService
+from services.model_workflow_deployment import ModelWorkflowDeploymentService
 from services.workflow import WorkflowService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user, get_current_user_or_internal, verify_internal_api_key
@@ -1048,19 +1048,14 @@ def get_workflow(
         - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
             - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
         - created_at (datetime): 연결 생성 시각
-    - **public_url** (str): KServe 공개 엔드포인트 URL
-        - 배포 후 동적으로 생성되는 공개 접근 URL
-        - 배포 전이면 null
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
-    - **backend_api_url** (str): 백엔드 API URL
-        - 배포 후 동적으로 생성되는 백엔드 API URL
-        - 배포 전이면 null
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **public_url** (str|None): §2.6 — 첫 배포가 KSERVE이고 KSERVE_GATEWAY_URL이 설정된 경우에만
+        `{게이트웨이}/v2/models/{model_name}/infer`, 그 외 null
+    - **backend_api_url** (str|None): §2.6 — 첫 배포 레코드의 `internal_url`(없으면 null)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
     ## Notes
-    - public_url과 backend_api_url은 워크플로우 실행 후 배포가 완료되면 동적으로 생성됨
+    - public_url·backend_api_url은 배포 레코드·설정에 따라 §2.6 정책으로 계산됨
     - 템플릿인 경우 is_template=true (템플릿 조회 API 사용 권장)
     - kubeflow_run_id가 있으면 /workflows/{workflow_id}/status로 실행 상태 확인 가능
     - 배포된 모델 정보는 /workflows/{workflow_id}/models로 확인 가능
@@ -1175,7 +1170,7 @@ def update_workflow(
     """
     try:
         if workflow_data.workflow_definition:
-            if KServeDeploymentService.has_active_deployment(db, workflow_id):
+            if ModelWorkflowDeploymentService.has_active_deployment(db, workflow_id):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="배포 중이거나 배포된 워크플로우는 수정할 수 없습니다. 먼저 배포를 삭제한 후 수정해주세요.",
@@ -1324,7 +1319,7 @@ async def delete_workflow(
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-        if KServeDeploymentService.has_deploying(db, workflow_id):
+        if ModelWorkflowDeploymentService.has_deploying(db, workflow_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="배포가 진행 중인 워크플로우는 삭제할 수 없습니다. 배포가 완료된 후 다시 시도해주세요.",
@@ -1581,7 +1576,7 @@ async def execute_workflow(
     2. MODEL 컴포넌트를 KServe InferenceService로 배포
     3. 워크플로우를 Kubeflow 파이프라인으로 변환
     4. 파이프라인 실행 및 모니터링 시작
-    5. KServeDeployment 테이블에 배포 정보 기록
+    5. model_workflow_deployments 테이블에 배포 정보 기록
 
     ## Notes
     - 워크플로우 상태가 ERROR인 경우만 실행 불가
@@ -1610,7 +1605,7 @@ async def execute_workflow(
             detail="워크플로우에 MODEL 컴포넌트가 없어 배포할 수 없습니다.",
         )
 
-    if KServeDeploymentService.has_active_deployment(db, workflow_id):
+    if ModelWorkflowDeploymentService.has_active_deployment(db, workflow_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="이미 배포 중이거나 배포가 완료된 워크플로우입니다. 재배포가 필요하면 삭제·정리 후 다시 시도해 주세요.",
@@ -1717,7 +1712,7 @@ def get_workflow_execution_status(
     - 워크플로우가 실행되지 않았다면 `kubeflow_run_id`는 null
     - `deployed_models`는 MODEL 타입 컴포넌트가 있는 경우만 포함
     - 모든 조회는 DB 기반으로 수행되며, Kubernetes나 Kubeflow를 직접 조회하지 않음
-    - 배포 상태는 `kserve_deployments` 테이블의 정보를 기반으로 함
+    - 배포 상태는 `model_workflow_deployments` 테이블의 정보를 기반으로 함
     - `deployed_models` 조회 실패 시에도 에러를 발생시키지 않고 빈 리스트로 처리됨
 
     ## Errors
@@ -1812,7 +1807,7 @@ async def update_component_deployment_status(
             )
 
         # Service를 통한 배포 상태 업데이트
-        deployment = KServeDeploymentService.update_deployment_status(
+        deployment = ModelWorkflowDeploymentService.update_deployment_status(
             db=db,
             workflow_id=workflow_id,
             component_id=component_id,
@@ -1965,7 +1960,9 @@ async def inference_workflow_model(
         # 서비스가 없어도 추론은 진행 (하위 호환성)
 
     # Service를 통한 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component_id)
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component_id
+    )
 
     if not is_ready:
         raise HTTPException(
@@ -1973,8 +1970,13 @@ async def inference_workflow_model(
             detail=error_msg,
         )
 
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="REMOTE 배포 유형 추론은 §6 Remote LLM API 연동 구현 후 지원됩니다.",
+        )
+
     # 배포 정보에서 필요한 값들 추출
-    infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"  # settings에서 가져오기
     service_hostname = deployment.service_hostname
     model_name = deployment.model_name  # 이미 정제된 이름 (슬래시가 하이픈으로 변경됨)
     service_name = deployment.service_name
@@ -2146,15 +2148,23 @@ async def inference_workflow_model(
         # V2 프로토콜 요청 형식
         data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
 
-        # 헤더 설정 (Istio Virtual Service routing을 위한 Host 헤더)
-        headers = {"Content-Type": "application/json", "Host": service_hostname}  # Istio가 라우팅하는데 사용
-
         # Kubeflow 인증이 필요한 경우
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
-        # V2 프로토콜 엔드포인트로 요청 (Istio Gateway 경유)
-        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            gateway = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not gateway:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="KServe 추론에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{gateway}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
 
         logger.info(f"Sending KServe inference request to {url}")
 
@@ -3236,7 +3246,9 @@ async def _execute_llm_inference(
                     model_repo_id = model.repo_id
 
     # 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
 
     if not is_ready:
         return ComponentTestErrorResult(
@@ -3245,6 +3257,15 @@ async def _execute_llm_inference(
             component_type="MODEL",
             model_type=model_type_name,
             error=error_msg,
+        )
+
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 §6 Remote LLM API 연동 전까지 컴포넌트 테스트를 지원하지 않습니다.",
         )
 
     # 입력 검증
@@ -3417,7 +3438,9 @@ async def _execute_odm_inference(
             model_type_name = model.type_info.name if model.type_info else None
 
     # 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
 
     if not is_ready:
         return ComponentTestErrorResult(
@@ -3426,6 +3449,15 @@ async def _execute_odm_inference(
             component_type="MODEL",
             model_type=model_type_name,
             error=error_msg,
+        )
+
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 §6 Remote LLM API 연동 전까지 ODM 테스트를 지원하지 않습니다.",
         )
 
     # 입력 검증
@@ -3455,7 +3487,15 @@ async def _execute_odm_inference(
             headers = {"Content-Type": "application/json"}
         else:
             # 게이트웨이 URL 사용 (Istio Gateway 경유)
-            infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe ODM 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
             url = f"{infer_svc_url}/v2/models/{model_name}/infer"
             # 게이트웨이 사용 시 Host 헤더 필요 (Istio 라우팅용)
             headers = {"Content-Type": "application/json", "Host": service_hostname}
@@ -3863,8 +3903,7 @@ def get_deployed_models(
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **backend_api_url** (str): 추론 API URL (첫 번째 모델 기준)
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **backend_api_url** (str|None): 첫 번째 배포의 `internal_url`(§2.6). 없으면 null
     - **deployed_models** (List[dict]): 배포된 모델 목록
         - workflow_id (str): 소속 워크플로우 ID
         - component_id (str): 컴포넌트 ID
@@ -3880,7 +3919,10 @@ def get_deployed_models(
             - "FAILED": 배포 실패
             - "DELETED": 삭제됨
         - internal_url (str): 내부 접근 URL
-        - gateway_url (str): 외부 게이트웨이 URL
+        - deployment_type (str): KSERVE | OLLAMA | REMOTE
+        - public_url (str|None): KSERVE+게이트웨이 설정 시에만
+        - backend_api_url (str|None): internal_url 기반
+        - gateway_url (str|None): 설정된 KServe 게이트웨이 베이스 URL(없으면 null)
         - deployed_at (datetime): 배포 시각
         - deleted_at (datetime): 삭제 시각 (삭제된 경우)
         - error_message (str): 오류 메시지 (실패 시)
@@ -3889,7 +3931,7 @@ def get_deployed_models(
     - **total** (int): 배포된 모델 총 개수
 
     ## Notes
-    - backend_api_url은 첫 번째 배포된 모델 기준으로 생성
+    - backend_api_url·public_url은 §2.6 정책(첫 번째 배포 기준 요약 필드)
     - 각 모델마다 고유한 service_name과 hostname을 가짐
     - 배포 상태가 DEPLOYED인 모델만 추론 가능
 
@@ -3904,15 +3946,13 @@ def get_deployed_models(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
     # DB에서 배포된 모델 목록 조회
-    deployed_models = KServeDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
+    deployed_models = ModelWorkflowDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
 
-    # backend_api_url 동적 생성
+    # backend_api_url — §2.6: 첫 배포의 internal_url 기준
     backend_api_url = None
     if deployed_models:
         first_deployment = deployed_models[0]
-        gateway_url = first_deployment.get("gateway_url") or settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.get("sanitized_model_name") or first_deployment.get("model_name")
-        backend_api_url = f"{gateway_url}/v2/models/{model_name}/infer"
+        backend_api_url = first_deployment.get("backend_api_url")
 
     return {
         "workflow_id": workflow_id,
@@ -4040,7 +4080,7 @@ async def finalize_cleanup(
        - Ollama Deployment/Service 조회
     3. 리소스가 모두 삭제된 경우:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
-       - KServe 배포 데이터(kserve_deployments) 삭제
+       - KServe 배포 데이터(model_workflow_deployments) 삭제
        - 재실행 가능한 상태로 업데이트
     4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
     5. 확인 중 오류 발생: 실패 상태 반환
@@ -4167,7 +4207,7 @@ async def finalize_cleanup(
                 workflow_updated = True
 
             # KServe 배포 데이터 삭제
-            deleted_count = KServeDeploymentService.delete_workflow_deployments(db, workflow_id)
+            deleted_count = ModelWorkflowDeploymentService.delete_workflow_deployments(db, workflow_id)
             logger.info(f"Deleted {deleted_count} deployment records for workflow {workflow_id}")
 
             db.commit()

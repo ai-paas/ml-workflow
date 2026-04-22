@@ -1,20 +1,38 @@
-"""KServe 배포 관리 Service"""
+"""워크플로 모델 컴포넌트 배포 관리 Service."""
 
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from config.settings import get_settings
-from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
-from repos.kserve_deployment import kserve_deployment_repository
-from schemas.kserve_deployment import KServeDeploymentBaseSchema
+from db.models.model_workflow_deployment import (
+    DeploymentStatus,
+    ModelWorkflowDeployment,
+    ServingDeviceType,
+    WorkflowServingDeploymentType,
+)
+from repos.model_workflow_deployment import model_workflow_deployment_repository
+from schemas.model_workflow_deployment import ModelWorkflowDeploymentBaseSchema
 from services.workflow import WorkflowService
+from services.workflow_serving_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from sqlalchemy.orm import Session
 
-settings = get_settings()
 
+class ModelWorkflowDeploymentService:
+    """워크플로 MODEL 배포 레코드 관리 (KServe·Ollama 등)."""
 
-class KServeDeploymentService:
-    """KServe 배포 관리 Service"""
+    @staticmethod
+    def _urls_for(
+        deployment: ModelWorkflowDeployment,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """(gateway_url, public_url, backend_api_url) — §2.6."""
+        s = get_settings()
+        gw_raw = (s.KSERVE_GATEWAY_URL or "").strip()
+        gateway_url = gw_raw if gw_raw else None
+        public_url = None
+        if deployment.deployment_type == WorkflowServingDeploymentType.KSERVE:
+            public_url = kserve_public_infer_url(s.KSERVE_GATEWAY_URL or "", deployment.model_name)
+        backend_api_url = backend_api_url_from_internal(deployment.internal_url)
+        return gateway_url, public_url, backend_api_url
 
     @staticmethod
     def create_deployment(
@@ -24,29 +42,35 @@ class KServeDeploymentService:
         model_name: str,
         service_name: Optional[str] = None,
         service_hostname: Optional[str] = None,
-    ) -> KServeDeployment:
-        """배포 정보 생성"""
-        # 기존 배포가 있는지 확인
-        existing = kserve_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
+        *,
+        deployment_type: WorkflowServingDeploymentType = WorkflowServingDeploymentType.KSERVE,
+        pvc: Optional[str] = None,
+        device_type: Optional[ServingDeviceType] = None,
+        remote_api_url: Optional[str] = None,
+    ) -> ModelWorkflowDeployment:
+        existing = model_workflow_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
         if existing:
             return existing
 
-        # 임시 서비스 이름 생성
         if not service_name:
             service_name = f"pending-{workflow_id[:8]}-{component_id[:8]}"
         if not service_hostname:
             service_hostname = "pending"
 
-        deployment_data = KServeDeploymentBaseSchema(
+        deployment_data = ModelWorkflowDeploymentBaseSchema(
             workflow_id=workflow_id,
             component_id=component_id,
             service_name=service_name,
             service_hostname=service_hostname,
-            model_name=model_name.replace("/", "-"),  # 모델 이름 정제
+            model_name=model_name.replace("/", "-"),
+            deployment_type=deployment_type,
+            pvc=pvc,
+            device_type=device_type,
+            remote_api_url=remote_api_url,
             status=DeploymentStatus.DEPLOYING,
         )
 
-        return kserve_deployment_repository.create(db, obj_in=deployment_data)
+        return model_workflow_deployment_repository.create(db, obj_in=deployment_data)
 
     @staticmethod
     def update_deployment_status(
@@ -59,19 +83,15 @@ class KServeDeploymentService:
         status: str,
         internal_url: Optional[str] = None,
         error_message: Optional[str] = None,
-    ) -> KServeDeployment:
-        """배포 상태 업데이트"""
-        # 기존 배포 정보 조회 또는 생성
-        deployment = kserve_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
+    ) -> ModelWorkflowDeployment:
+        deployment = model_workflow_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
 
         if deployment:
-            # 기존 레코드 업데이트
             deployment.service_name = service_name
             deployment.service_hostname = service_hostname
             deployment.model_name = model_name
             deployment.internal_url = internal_url
 
-            # 상태 업데이트
             if status == "deployed":
                 deployment.status = DeploymentStatus.DEPLOYED
                 deployment.deployed_at = datetime.utcnow()
@@ -86,7 +106,6 @@ class KServeDeploymentService:
             db.commit()
             db.refresh(deployment)
         else:
-            # 새 레코드 생성 (첫 콜백이 failed/deployed 등인 경우 포함)
             if status == "deployed":
                 dep_status = DeploymentStatus.DEPLOYED
                 deployed_at = datetime.utcnow()
@@ -100,7 +119,7 @@ class KServeDeploymentService:
                 dep_status = DeploymentStatus.DEPLOYING
                 deployed_at = None
 
-            deployment_data = KServeDeploymentBaseSchema(
+            deployment_data = ModelWorkflowDeploymentBaseSchema(
                 workflow_id=workflow_id,
                 component_id=component_id,
                 service_name=service_name,
@@ -111,24 +130,28 @@ class KServeDeploymentService:
                 deployed_at=deployed_at,
                 error_message=error_message if status == "failed" else None,
             )
-            deployment = kserve_deployment_repository.create(db, obj_in=deployment_data)
+            deployment = model_workflow_deployment_repository.create(db, obj_in=deployment_data)
 
         return deployment
 
     @staticmethod
     def get_deployment_info(db: Session, workflow_id: str, component_id: str) -> Optional[Dict]:
-        """배포 정보 조회"""
-        deployment = kserve_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
+        deployment = model_workflow_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
 
         if not deployment:
             return None
+
+        gateway_url, public_url, backend_api_url = ModelWorkflowDeploymentService._urls_for(deployment)
 
         return {
             "service_name": deployment.service_name,
             "service_hostname": deployment.service_hostname,
             "model_name": deployment.model_name,
+            "deployment_type": deployment.deployment_type.value,
             "internal_url": deployment.internal_url,
-            "gateway_url": settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80",
+            "gateway_url": gateway_url,
+            "public_url": public_url,
+            "backend_api_url": backend_api_url,
             "status": deployment.status.value,
             "deployed_at": deployment.deployed_at.isoformat() if deployment.deployed_at else None,
             "error_message": deployment.error_message,
@@ -136,25 +159,28 @@ class KServeDeploymentService:
 
     @staticmethod
     def get_deployed_models(db: Session, workflow_id: str, include_component_info: bool = True) -> List[Dict]:
-        """워크플로우의 배포된 모델 목록 조회"""
-        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        deployments = model_workflow_deployment_repository.get_by_workflow(db, workflow_id)
 
         deployed_models = []
         for deployment in deployments:
+            gateway_url, public_url, backend_api_url = ModelWorkflowDeploymentService._urls_for(deployment)
+
             model_info = {
                 "component_id": deployment.component_id,
                 "service_name": deployment.service_name,
                 "service_hostname": deployment.service_hostname,
                 "model_name": deployment.model_name,
                 "sanitized_model_name": deployment.model_name,
+                "deployment_type": deployment.deployment_type.value,
                 "internal_url": deployment.internal_url,
-                "gateway_url": settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80",
+                "gateway_url": gateway_url,
+                "public_url": public_url,
+                "backend_api_url": backend_api_url,
                 "status": deployment.status.value,
                 "deployed_at": deployment.deployed_at.isoformat() if deployment.deployed_at else None,
                 "error_message": deployment.error_message,
             }
 
-            # 컴포넌트 정보 추가
             if include_component_info:
                 component = WorkflowService.get_component_by_id_and_workflow_id(
                     db, deployment.component_id, workflow_id
@@ -175,13 +201,8 @@ class KServeDeploymentService:
     @staticmethod
     def validate_deployment_ready(
         db: Session, workflow_id: str, component_id: str
-    ) -> tuple[bool, str, Optional[KServeDeployment]]:
-        """배포가 준비되었는지 검증
-
-        Returns:
-            (is_ready, error_message, deployment)
-        """
-        deployment = kserve_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
+    ) -> tuple[bool, str, Optional[ModelWorkflowDeployment]]:
+        deployment = model_workflow_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
 
         if not deployment:
             return False, f"Model component {component_id} not deployed", None
@@ -193,27 +214,22 @@ class KServeDeploymentService:
 
     @staticmethod
     def has_active_deployment(db: Session, workflow_id: str) -> bool:
-        """워크플로우에 DEPLOYING 또는 DEPLOYED 상태의 배포가 존재하는지 확인"""
-        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        deployments = model_workflow_deployment_repository.get_by_workflow(db, workflow_id)
         return any(d.status in (DeploymentStatus.DEPLOYING, DeploymentStatus.DEPLOYED) for d in deployments)
 
     @staticmethod
     def has_deploying(db: Session, workflow_id: str) -> bool:
-        """워크플로우에 DEPLOYING 상태의 배포가 존재하는지 확인"""
-        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        deployments = model_workflow_deployment_repository.get_by_workflow(db, workflow_id)
         return any(d.status == DeploymentStatus.DEPLOYING for d in deployments)
 
     @staticmethod
     def cleanup_workflow_deployments(db: Session, workflow_id: str) -> int:
-        """워크플로우의 모든 배포 정보 정리"""
-        # 상태를 DELETED로 변경
-        deployments = kserve_deployment_repository.get_by_workflow(db, workflow_id)
+        deployments = model_workflow_deployment_repository.get_by_workflow(db, workflow_id)
         for deployment in deployments:
-            kserve_deployment_repository.update_status(db, deployment, DeploymentStatus.DELETED)
+            model_workflow_deployment_repository.update_status(db, deployment, DeploymentStatus.DELETED)
 
         return len(deployments)
 
     @staticmethod
     def delete_workflow_deployments(db: Session, workflow_id: str) -> int:
-        """워크플로우의 모든 배포 정보를 DB에서 삭제"""
-        return kserve_deployment_repository.cleanup_workflow_deployments(db, workflow_id)
+        return model_workflow_deployment_repository.cleanup_workflow_deployments(db, workflow_id)

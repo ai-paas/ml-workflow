@@ -26,7 +26,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
                 joinedload(Workflow.template),
                 joinedload(Workflow.components).joinedload(WorkflowComponent.model),
                 joinedload(Workflow.component_connections),
-                joinedload(Workflow.kserve_deployments),
+                joinedload(Workflow.model_deployments),
             )
             .filter(Workflow.id == workflow_id)
             .first()

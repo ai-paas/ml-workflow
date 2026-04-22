@@ -13,8 +13,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .base import BaseModel, TimestampMixin
 
 if TYPE_CHECKING:
-    from .kserve_deployment import KServeDeployment
     from .model import Model
+    from .model_workflow_deployment import ModelWorkflowDeployment
     from .user import UserModel
 
 
@@ -94,8 +94,8 @@ class Workflow(BaseModel, TimestampMixin):
         back_populates="workflow",
         cascade="all, delete-orphan",
     )
-    kserve_deployments: Mapped[List["KServeDeployment"]] = relationship(
-        "KServeDeployment", back_populates="workflow", cascade="all, delete-orphan"
+    model_deployments: Mapped[List["ModelWorkflowDeployment"]] = relationship(
+        "ModelWorkflowDeployment", back_populates="workflow", cascade="all, delete-orphan"
     )
 
 

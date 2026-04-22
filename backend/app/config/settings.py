@@ -126,9 +126,16 @@ class Settings(BaseSettings):
         description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임(§7.7).",
     )
     KSERVE_GATEWAY_URL: str = Field(
-        default="http://10.10.30.154:80",
-        description="KServe Istio Gateway URL \
-(외부 접근용)",
+        default="",
+        description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공(§2.6).",
+    )
+    REMOTE_SERVING_API_URL: str = Field(
+        default="",
+        description="§6: 원격 LLM 단일 추론 베이스 URL. REMOTE 배포 시 remote_api_url에 저장·추론 시 사용(스펙·인증은 §6.5 미정).",
+    )
+    REMOTE_SERVING_MODEL_MAP: str = Field(
+        default="{}",
+        description='§6: 플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
     )
 
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
