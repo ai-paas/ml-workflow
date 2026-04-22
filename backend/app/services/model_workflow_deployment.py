@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from config.settings import get_settings
+from core.serving.serving_workflow_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from db.models.model_workflow_deployment import (
     DeploymentStatus,
     ModelWorkflowDeployment,
@@ -13,7 +14,6 @@ from db.models.model_workflow_deployment import (
 from repos.model_workflow_deployment import model_workflow_deployment_repository
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentBaseSchema
 from services.workflow import WorkflowService
-from services.workflow_serving_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from sqlalchemy.orm import Session
 
 

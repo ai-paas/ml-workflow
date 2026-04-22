@@ -35,7 +35,7 @@ class WorkflowExecutor:
             apply_chain_reservation_from_plan,
             plan_serving_resources_with_k8s,
         )
-        from core.serving.serving_workflow_model_order import topological_order_model_components
+        from core.serving.serving_workflow_deployment_policy import topological_order_model_components
         from services.model import PREDEFINED_MODEL_CONFIGS
 
         plans: Dict[str, Dict[str, Any]] = {}
@@ -189,11 +189,11 @@ class WorkflowExecutor:
             workflow.kubeflow_run_id = run_id
 
             # KServe 배포 정보 초기화
-            from services.model_workflow_deployment import ModelWorkflowDeploymentService
-            from services.workflow_serving_deployment_policy import (
+            from core.serving.serving_workflow_deployment_policy import (
                 parse_serving_device_type,
                 resolve_workflow_serving_deployment_type,
             )
+            from services.model_workflow_deployment import ModelWorkflowDeploymentService
 
             for component in workflow.components:
                 if component.type != ComponentType.MODEL:

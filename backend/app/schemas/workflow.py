@@ -5,6 +5,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from config.settings import get_settings
+from core.serving.serving_workflow_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.service import ComponentType
 from pydantic import BaseModel, Field, computed_field, model_serializer, model_validator
@@ -12,7 +13,6 @@ from schemas.base import TimeStampSchemaMixin
 from schemas.model import ModelBriefReadSchema
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
 from schemas.user import UserSchema
-from services.workflow_serving_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 
 if TYPE_CHECKING:
     from db.models.service import ComponentConnection
