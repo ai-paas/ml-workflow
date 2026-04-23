@@ -416,15 +416,15 @@ def get_service_resource_usages(
     - **service_id** (str): 서비스 고유 ID (UUID)
     - **service_name** (str): 서비스 이름
     - **deployments** (List[DeploymentResourceUsage]): 배포별 리소스 사용량 목록
-        - **deployment_id** (str): KServe 배포 ID
-        - **service_name** (str): 서비스 이름
+        - **deployment_id** (str): `model_workflow_deployments` 레코드 ID
+        - **service_name** (str): Kubernetes 서비스·InferenceService 이름
         - **workflow_id** (str): 워크플로우 ID
         - **component_id** (str): 컴포넌트 ID
         - **model_name** (str): 모델 이름
         - **pods** (List[PodResourceUsage]): Pod별 리소스 사용량 목록
             - **pod_name** (str): Pod 이름
             - **namespace** (str): 네임스페이스
-            - **deployment_type** (str): 배포 타입 (inferenceservice 또는 service)
+            - **deployment_type** (str): `inferenceservice`(KServe) 또는 `service`(Ollama 등 일반 Service)
             - **resource_usage** (ResourceUsage): 리소스 사용량
                 - **cpu_usage_millicores** (float, optional): CPU 사용량 (밀리코어 단위)
                 - **cpu_request_millicores** (float, optional): CPU 요청량 (밀리코어 단위)
@@ -443,6 +443,7 @@ def get_service_resource_usages(
     - Metrics Server가 설치되어 있어야 실제 사용량을 조회할 수 있습니다.
     - Metrics Server가 없는 경우 리소스 요청/제한 정보만 반환됩니다.
     - GPU 사용량은 별도의 메트릭 수집기(dcgm-exporter 등)가 필요합니다.
+    - 클러스터에 대응 Pod가 없는 배포(REMOTE 등)는 집계 목록에서 생략될 수 있습니다.
 
     ## Errors
     - 401: 인증되지 않은 사용자

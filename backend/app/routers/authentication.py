@@ -40,7 +40,7 @@ async def login_for_access_token(*, db: Session = SessionDepends, form_data: OAu
     - **access_token** (str): JWT 액세스 토큰
         - 이후 API 요청 시 Authorization 헤더에 사용
         - 형식: `Bearer {access_token}`
-        - 토큰 유효기간: 24시간 (86400초)
+        - 토큰 유효기간: 앱 설정 기준(기본 86400초, 약 24시간)
         - HS256 알고리즘으로 서명됨
     - **token_type** (str): 토큰 타입
         - 항상 `"bearer"`로 고정

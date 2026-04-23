@@ -906,7 +906,7 @@ def delete_workflow_template(
     """
     워크플로우 템플릿 삭제
 
-    템플릿은 배포된 KServe InferenceService가 없으므로 즉시 DB에서 삭제됩니다.
+    템플릿은 워크플로 실행으로 생성된 클러스터 서빙 리소스가 없는 레코드이므로 DB에서 즉시 삭제됩니다.
     파생된 워크플로우가 있으면 삭제 불가
     """
     # 템플릿인지 확인
@@ -1049,9 +1049,10 @@ def get_workflow(
         - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
             - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
         - created_at (datetime): 연결 생성 시각
-    - **public_url** (str|None): §2.6 — 첫 배포가 KSERVE이고 KSERVE_GATEWAY_URL이 설정된 경우에만
+    - **public_url** (str|None): §2.6 — 요약용 첫 배포가 **KSERVE**이고 `KSERVE_GATEWAY_URL`이 설정된 경우에만
         `{게이트웨이}/v2/models/{model_name}/infer`, 그 외 null
-    - **backend_api_url** (str|None): §2.6 — 첫 배포 레코드의 `internal_url`(없으면 null)
+    - **backend_api_url** (str|None): §2.6 — 요약용 첫 `model_workflow_deployments` 배포의 `internal_url` 기반(없으면 null;
+        REMOTE 등은 스키마 계산상 null일 수 있음 — 상세는 `/workflows/{id}/models` 참고)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
@@ -1145,8 +1146,8 @@ def update_workflow(
     - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
     - **components** (List[ComponentReadSchema]): 컴포넌트 목록
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
-    - **public_url** (str): KServe 공개 엔드포인트 URL
-    - **backend_api_url** (str): 백엔드 API URL
+    - **public_url** (str|None): §2.6 — 첫 배포가 KSERVE이고 게이트웨이가 설정된 경우에만 공개 추론 URL
+    - **backend_api_url** (str|None): §2.6 — 첫 배포 기준 요약 URL(없으면 null)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
@@ -1283,9 +1284,9 @@ async def delete_workflow(
     """
     워크플로우 삭제 시작 (2단계 프로세스)
 
-    워크플로우 삭제를 시작합니다. KServe InferenceService를 정리하는
-    Kubeflow Pipeline을 실행하고 cleanup_run_id를 반환합니다.
-    실제 DB 삭제는 finalize-deletion API를 통해 완료 확인 후 수행됩니다.
+    워크플로우 삭제를 시작합니다. Kubeflow 정리 파이프라인으로 **KServe InferenceService**,
+    **Ollama Deployment/Service** 등 워크플로에 연결된 클러스터 서빙 리소스를 제거하고 `cleanup_run_id`를 반환합니다.
+    실제 DB 삭제는 finalize-deletion API에서 클러스터 잔존 여부를 확인한 뒤 수행됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
@@ -1300,12 +1301,13 @@ async def delete_workflow(
 
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
-    2. Kubeflow Pipeline: KServe InferenceService 삭제
-    3. finalize-deletion API 호출: Kubernetes 리소스 직접 확인 및 DB 삭제
+    2. Kubeflow Pipeline: 라벨 `workflow-id` 기준 InferenceService·Deployment·Service 등 삭제
+    3. finalize-deletion API 호출: Kubernetes 잔존 리소스 확인 후 DB에서 워크플로 삭제
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
-    - KServe 리소스 정리에 시간이 걸릴 수 있음
+    - 클러스터 정리에 시간이 걸릴 수 있음
+    - REMOTE 배포는 전용 클러스터 리소스가 없을 수 있음(파이프라인은 noop·콜백 위주)
     - 템플릿은 바로 DB에서 삭제됨 (배포 리소스 없음)
 
     ## Errors
@@ -1326,7 +1328,7 @@ async def delete_workflow(
                 detail="배포가 진행 중인 워크플로우는 삭제할 수 없습니다. 배포가 완료된 후 다시 시도해주세요.",
             )
 
-        # Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제 시작
+        # Kubeflow Pipeline을 통해 워크플로 서빙 리소스(InferenceService·Ollama 등) 삭제 시작
         cleanup_run_id = None
         try:
             executor = WorkflowExecutor(db)
@@ -1401,6 +1403,7 @@ async def finalize_workflow_deletion(
     5. 확인 중 오류 발생: 실패 상태 반환
 
     ## Notes
+    - REMOTE 전용 배포는 클러스터에 남는 리소스가 없을 수 있어, 위 k8s 검사만으로는 곧바로 DB 삭제로 이어질 수 있음
     - 이미 삭제된 워크플로우 호출 시 "already deleted" 반환
     - Kubernetes 리소스 확인에 실패해도 DB 조회 시도
     - 삭제는 되돌릴 수 없는 작업
@@ -1550,11 +1553,11 @@ async def execute_workflow(
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    워크플로우 실행 (KServe 배포 + Kubeflow 파이프라인 실행)
+    워크플로우 실행 (서빙 배포 + Kubeflow 파이프라인)
 
-    워크플로우를 실행하여 ML 모델을 배포합니다.
-    Kubeflow 파이프라인을 통해 KServe InferenceService를 생성하고,
-    모델 서빙 엔드포인트를 활성화합니다.
+    워크플로우를 실행하여 MODEL 컴포넌트를 배포합니다. 배포 유형(`deployment_type`)은 모델·설정에 따라
+    **KServe InferenceService**, **Ollama Deployment/Service**, 또는 **REMOTE**(원격 LLM 스텁·콜백만)로 결정됩니다.
+    Kubeflow 파이프라인은 위 유형에 맞는 태스크(또는 REMOTE 알림용 경량 컴포넌트)를 실행합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
@@ -1574,10 +1577,9 @@ async def execute_workflow(
 
     ## Process
     1. 지식베이스가 모델 앞에 있는지 검증
-    2. MODEL 컴포넌트를 KServe InferenceService로 배포
-    3. 워크플로우를 Kubeflow 파이프라인으로 변환
-    4. 파이프라인 실행 및 모니터링 시작
-    5. model_workflow_deployments 테이블에 배포 정보 기록
+    2. MODEL별 서빙 계획·PVC(Ollama)·`model_workflow_deployments` 레코드 생성(REMOTE는 즉시 DEPLOYED 처리 가능)
+    3. 워크플로우를 Kubeflow 파이프라인으로 변환·실행
+    4. 파이프라인·콜백으로 배포 상태 및 워크플로 ACTIVE 반영
 
     ## Notes
     - 워크플로우 상태가 ERROR인 경우만 실행 불가
@@ -1665,7 +1667,7 @@ def get_workflow_execution_status(
     워크플로우 실행 상태 조회
 
     워크플로우의 실행 상태와 배포된 모델들의 상태를 종합적으로 조회합니다.
-    KServe 배포 상태와 Kubeflow 파이프라인 실행 상태를 모두 포함합니다.
+    `model_workflow_deployments` 기반 배포 요약(KSERVE·OLLAMA·REMOTE)과 Kubeflow 파이프라인 실행 ID를 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
@@ -1685,25 +1687,16 @@ def get_workflow_execution_status(
         - 각 항목은 다음 필드를 포함:
         - **component_id** (str): 컴포넌트 UUID
             - 워크플로우 컴포넌트의 고유 ID
-        - **service_name** (str): KServe InferenceService 이름
-            - Kubernetes 리소스 이름 (DNS 1035 규칙 준수)
-        - **service_hostname** (str): KServe 서비스 호스트명
-            - Istio Virtual Service 라우팅에 사용
-            - 형식: `{service_name}.{namespace}.example.com`
-        - **model_name** (str): 컴포넌트 이름
-            - 워크플로우 컴포넌트의 표시명 (사용자가 지정한 이름)
-        - **sanitized_model_name** (str): 정제된 모델 이름
-            - DNS 규칙에 맞게 변환된 모델 이름 (슬래시가 하이픈으로 변경됨)
-            - KServe 엔드포인트에서 실제로 사용되는 이름
-            - `model_name`과는 다를 수 있음 (model_name은 컴포넌트 이름, sanitized_model_name은 실제 배포된 모델 이름)
-        - **model_id** (int, optional): 모델 ID
-            - 컴포넌트에 연결된 모델의 ID
-            - MODEL 타입 컴포넌트인 경우에만 포함
-        - **internal_url** (str, optional): 내부 접근 URL
-            - 클러스터 내부에서 접근 가능한 URL
-            - 형식: `http://{service_name}.{namespace}.svc.cluster.local`
-        - **gateway_url** (str): 게이트웨이 URL
-            - 외부에서 접근 가능한 KServe Gateway 엔드포인트 URL
+        - **deployment_type** (str, optional): `KSERVE` | `OLLAMA` | `REMOTE`
+        - **service_name** (str): Kubernetes 리소스 또는 식별용 이름 (DNS 1035 규칙 준수)
+        - **service_hostname** (str): KServe 게이트웨이 라우팅용 호스트명 등 (Ollama·REMOTE는 빈 문자열일 수 있음)
+        - **model_name** (str): 배포 레코드에 저장된 모델/컴포넌트 식별명 (REMOTE 시 맵 기준 원격 모델명 등)
+        - **sanitized_model_name** (str): API 응답용 정제 이름 (레거시 필드, `model_name`과 동일할 수 있음)
+        - **model_id** (int, optional): 컴포넌트에 연결된 모델 ID
+        - **internal_url** (str, optional): 클러스터 내부 접근 URL (Ollama ClusterIP 등) 또는 REMOTE 베이스 URL
+        - **gateway_url** (str|None): 설정된 KServe 게이트웨이 베이스 URL(없으면 null)
+        - **public_url** (str|None): KSERVE+게이트웨이 설정 시에만 추론 URL
+        - **backend_api_url** (str|None): §2.6 — `internal_url` 우선, REMOTE는 `remote_api_url` 폴백
         - **status** (str): 배포 상태
             - 가능한 값:
                 - "DEPLOYING": 배포 중
@@ -1768,25 +1761,25 @@ async def update_component_deployment_status(
     error_message: Optional[str] = Body(None),
 ):
     """
-    컴포넌트의 KServe 배포 상태를 업데이트합니다.
+    컴포넌트의 워크플로 서빙 배포 상태를 업데이트합니다.
 
-    **중요**: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
+    **중요**: 이 API는 Kubeflow Pipeline(또는 파이프라인 내 경량 컴포넌트)에서만 호출되는 내부 API입니다.
     프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
 
-    Kubeflow Pipeline 실행 중 컴포넌트의 KServe 배포가 완료되면,
-    Pipeline 내부에서 자동으로 이 API를 호출하여 배포 상태를 업데이트합니다.
+    MODEL 배포(KServe·Ollama·REMOTE 알림 등)가 끝나면 파이프라인이 이 API를 호출해
+    `model_workflow_deployments` 상태를 갱신하고, 콜백 로직에 따라 워크플로를 ACTIVE로 전환할 수 있습니다.
 
     ## Path Parameters
     - **workflow_id** (str): 워크플로우 ID
     - **component_id** (str): 컴포넌트 UUID
 
     ## Request Body
-    - **service_name** (str, required): KServe 서비스 이름
-    - **service_hostname** (str, required): KServe 서비스 호스트명
-    - **model_name** (str, required): 배포된 모델 이름
-    - **status** (str, required): 배포 상태 (예: "ready", "failed")
-    - **internal_url** (str, optional): 내부 서비스 URL
-    - **error_message** (str, optional): 배포 실패 시 에러 메시지
+    - **service_name** (str, required): 식별용 서비스/리소스 이름
+    - **service_hostname** (str, required): KServe 라우팅용 호스트명(없으면 빈 문자열 가능)
+    - **model_name** (str, required): 배포 레코드에 반영할 모델명(정제명 등)
+    - **status** (str, required): `"deployed"` | `"failed"` 등 파이프라인에서 전달하는 상태 문자열
+    - **internal_url** (str, optional): Ollama ClusterIP URL, REMOTE 베이스 URL 등
+    - **error_message** (str, optional): 배포 실패 시 메시지
 
     ## Response
     - **message** (str): 업데이트 결과 메시지
@@ -1794,13 +1787,12 @@ async def update_component_deployment_status(
         - service_name (str): 서비스 이름
         - service_hostname (str): 서비스 호스트명
         - model_name (str): 모델 이름
-        - status (str): 배포 상태
-        - internal_url (str, optional): 내부 서비스 URL
+        - status (str): DB상 배포 상태 (`DEPLOYED`/`FAILED` 등 enum 값)
+        - deployed_at (str, optional): 배포 완료 시각
 
     ## Notes
-    - 이 API는 Kubeflow Pipeline의 컴포넌트 내부에서만 호출됩니다
-    - 프론트엔드나 사용자 애플리케이션에서는 직접 호출하지 않아야 합니다
-    - 배포 상태는 Pipeline 실행 중 자동으로 업데이트됩니다
+    - `X-Internal-API-Key` 헤더(설정 시)로만 호출 가능
+    - KServe·Ollama·REMOTE noop 경로가 동일 엔드포인트를 사용할 수 있음
 
     ## Errors
     - 404: 워크플로우를 찾을 수 없음
@@ -3120,9 +3112,9 @@ async def test_rag_workflow(
     """
     RAG 워크플로우 테스트
 
-    Knowledge Base와 LLM 모델을 사용하는 RAG 워크플로우를 테스트합니다.
-    지식베이스가 있으면 검색 후 결과를 LLM 모델에 전달하여 추론하고,
-    지식베이스가 없으면 LLM 모델만 실행합니다.
+    Knowledge Base와 LLM(MODEL) 컴포넌트를 사용하는 RAG 워크플로우를 테스트합니다.
+    지식베이스가 있으면 검색 후 결과를 LLM에 전달하고, 없으면 LLM만 실행합니다.
+    LLM 배포 유형은 Ollama·REMOTE(원격 API 스텁) 등에 따라 `_execute_llm_inference`에서 분기됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 테스트할 워크플로우 UUID
@@ -3153,7 +3145,7 @@ async def test_rag_workflow(
         - **model_type** (str): "LLM"
         - **result** (ModelLLMTestResult): LLM 추론 결과
             - **response** (str): LLM 응답 텍스트
-            - **full_response** (dict, optional): Ollama API 전체 응답 (디버깅용)
+            - **full_response** (dict, optional): 업스트림 LLM 전체 응답(Ollama 등·REMOTE 스텁은 null일 수 있음)
 
         **ComponentTestErrorResult** (오류 발생 시):
         - **component_id** (str): 컴포넌트 UUID
@@ -3171,6 +3163,7 @@ async def test_rag_workflow(
     ## Notes
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
+    - ODM(Object Detection) 전용 ML 그래프는 `POST .../test/ml`을 사용
     - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
     - 지식베이스 검색 결과는 자동으로 LLM 모델의 context 파라미터로 전달됨
     - prompt_id가 설정된 경우:
@@ -3387,34 +3380,30 @@ def get_deployed_models(
     """
     워크플로우에 배포된 모델 목록 조회
 
-    워크플로우에서 배포된 모든 ML 모델의 상세 정보를 조회합니다.
-    KServe InferenceService로 배포된 모델들의 엔드포인트와 상태를 포함합니다.
+    워크플로우의 `model_workflow_deployments` 레코드를 조회합니다.
+    KServe·Ollama·REMOTE 유형별 `internal_url`, `public_url`, `backend_api_url`(§2.6) 등을 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **backend_api_url** (str|None): 첫 번째 배포의 `internal_url`(§2.6). 없으면 null
+    - **backend_api_url** (str|None): 첫 번째 배포 기준 §2.6 요약 URL(없으면 null)
     - **deployed_models** (List[dict]): 배포된 모델 목록
         - workflow_id (str): 소속 워크플로우 ID
         - component_id (str): 컴포넌트 ID
         - component_name (str): 컴포넌트 이름
         - model_id (int): 모델 ID
-        - model_name (str): 원본 모델 이름
+        - model_name (str): 표시/배포용 모델 이름
         - sanitized_model_name (str): DNS 규칙에 맞게 변환된 모델 이름
-        - service_name (str): KServe 서비스 이름
-        - service_hostname (str): KServe 서비스 호스트명
-        - status (str): 배포 상태
-            - "PENDING": 배포 대기중
-            - "DEPLOYED": 배포 완료
-            - "FAILED": 배포 실패
-            - "DELETED": 삭제됨
-        - internal_url (str): 내부 접근 URL
+        - service_name (str): Kubernetes 리소스 또는 식별용 이름
+        - service_hostname (str): KServe 라우팅용 호스트명(없을 수 있음)
+        - status (str): 배포 상태 (`DEPLOYING`/`DEPLOYED`/`FAILED`/`DELETED`)
+        - internal_url (str|None): 클러스터 내부 URL 또는 REMOTE 베이스 URL
         - deployment_type (str): KSERVE | OLLAMA | REMOTE
         - public_url (str|None): KSERVE+게이트웨이 설정 시에만
-        - backend_api_url (str|None): internal_url 기반
-        - gateway_url (str|None): 설정된 KServe 게이트웨이 베이스 URL(없으면 null)
+        - backend_api_url (str|None): §2.6 — REMOTE는 internal·remote_api 폴백
+        - gateway_url (str|None): KServe 게이트웨이 베이스 URL(없으면 null)
         - deployed_at (datetime): 배포 시각
         - deleted_at (datetime): 삭제 시각 (삭제된 경우)
         - error_message (str): 오류 메시지 (실패 시)
@@ -3423,9 +3412,8 @@ def get_deployed_models(
     - **total** (int): 배포된 모델 총 개수
 
     ## Notes
-    - backend_api_url·public_url은 §2.6 정책(첫 번째 배포 기준 요약 필드)
-    - 각 모델마다 고유한 service_name과 hostname을 가짐
-    - 배포 상태가 DEPLOYED인 모델만 추론 가능
+    - 요약 필드 `backend_api_url`(루트)는 첫 배포 기준 §2.6과 동일
+    - 컴포넌트 테스트·RAG/ML 테스트는 워크플로가 ACTIVE이고 해당 배포가 DEPLOYED일 때 가능
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -3461,8 +3449,8 @@ async def cleanup_workflow_resources(
     """
     워크플로우 리소스 정리 시작
 
-    배포된 KServe InferenceService들을 정리합니다.
-    워크플로우 자체는 유지하면서 배포된 리소스만 제거합니다.
+    배포된 **KServe InferenceService**·**Ollama Deployment/Service** 등 워크플로 서빙 리소스를 정리하는
+    Kubeflow 파이프라인을 시작합니다. 워크플로우 레코드 자체는 유지됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
@@ -3481,10 +3469,10 @@ async def cleanup_workflow_resources(
     - 워크플로우 구조 변경 전 리소스 정리
 
     ## Process
-    1. KServe InferenceService 삭제 파이프라인 시작
+    1. 정리용 Kubeflow 파이프라인 시작(라벨 `workflow-id` 기준 클러스터 리소스 삭제)
     2. cleanup_run_id 반환
     3. finalize-cleanup API로 완료 확인
-    4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
+    4. 완료 시 `model_workflow_deployments` 정리 및(조건부) 워크플로 DRAFT 전환
 
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리
@@ -3572,7 +3560,7 @@ async def finalize_cleanup(
        - Ollama Deployment/Service 조회
     3. 리소스가 모두 삭제된 경우:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
-       - KServe 배포 데이터(model_workflow_deployments) 삭제
+       - 워크플로 서빙 배포 데이터(`model_workflow_deployments`) 삭제
        - 재실행 가능한 상태로 업데이트
     4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
     5. 확인 중 오류 발생: 실패 상태 반환
@@ -3698,7 +3686,7 @@ async def finalize_cleanup(
                 workflow.status = WorkflowStatus.DRAFT
                 workflow_updated = True
 
-            # KServe 배포 데이터 삭제
+            # 워크플로 서빙 배포 레코드(model_workflow_deployments) 삭제
             deleted_count = ModelWorkflowDeploymentService.delete_workflow_deployments(db, workflow_id)
             logger.info(f"Deleted {deleted_count} deployment records for workflow {workflow_id}")
 
