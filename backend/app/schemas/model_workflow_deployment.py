@@ -10,6 +10,7 @@ from pydantic import BaseModel
 class ModelWorkflowDeploymentBaseSchema(BaseModel):
     workflow_id: str
     component_id: str
+    serving_node_name: Optional[str] = None
     service_name: str
     service_hostname: str
     model_name: str
@@ -32,6 +33,7 @@ class ModelWorkflowDeploymentUpdateSchema(BaseModel):
     service_name: Optional[str] = None
     service_hostname: Optional[str] = None
     model_name: Optional[str] = None
+    serving_node_name: Optional[str] = None
     internal_url: Optional[str] = None
     deployment_type: Optional[WorkflowServingDeploymentType] = None
     pvc: Optional[str] = None

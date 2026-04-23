@@ -1625,6 +1625,8 @@ async def execute_workflow(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     try:
+        from core.serving.serving_model_workflow_pvc import PvcReplicationConflict
+
         # WorkflowExecutor를 사용하여 워크플로우 실행
         executor = WorkflowExecutor(db)
         execution_result = executor.execute_workflow(workflow=workflow, parameters={})
@@ -1634,6 +1636,13 @@ async def execute_workflow(
             kubeflow_run_id=execution_result["kubeflow_run_id"],
             status=execution_result["status"],
             message=execution_result["message"],
+        )
+
+    except PvcReplicationConflict as e:
+        logger.warning(f"Workflow execute PVC lock conflict: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=e.message,
         )
 
     except ValueError as e:

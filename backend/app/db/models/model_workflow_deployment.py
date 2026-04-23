@@ -56,6 +56,8 @@ class ModelWorkflowDeployment(BaseModel, TimestampMixin):
     workflow_id: Mapped[str] = mapped_column(String(36), ForeignKey("workflows.id"), nullable=False)
     component_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    serving_node_name: Mapped[Optional[str]] = mapped_column(String(253), nullable=True)
+
     service_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     service_hostname: Mapped[str] = mapped_column(String(500), nullable=False)
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)

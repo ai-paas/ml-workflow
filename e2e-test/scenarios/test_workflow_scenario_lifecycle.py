@@ -41,6 +41,7 @@ from config import (
     TARGET_EMBEDDING_MODEL_NAME,
     TARGET_MODEL_NAME,
 )
+from workflow_deploy_wait import expected_model_component_count, workflow_deploy_poll_should_fail
 from workflow_scenarios import build_workflow_definition, get_scenario
 
 SCENARIO = get_scenario(SCENARIO_NUM)
@@ -238,6 +239,11 @@ class TestWorkflowScenarioLifecycle:
         wf_id = self.__class__.workflow_id
         assert wf_id
 
+        wf_read = requests.get(f"{api_url}/workflows/{wf_id}", headers=auth_headers)
+        assert wf_read.status_code == 200, f"워크플로 조회 실패: {wf_read.status_code} {wf_read.text}"
+        expected_deployments = expected_model_component_count(wf_read.json())
+        assert expected_deployments > 0, "MODEL 컴포넌트가 없으면 배포 대기를 진행할 수 없습니다."
+
         deadline = time.time() + DEPLOY_TIMEOUT_SEC
         last_statuses: list[str] = []
 
@@ -246,6 +252,10 @@ class TestWorkflowScenarioLifecycle:
             assert resp.status_code == 200
 
             data = resp.json()
+            fail_reason = workflow_deploy_poll_should_fail(data, expected_model_deployments=expected_deployments)
+            if fail_reason:
+                pytest.fail(fail_reason)
+
             deployed_models = data.get("deployed_models", [])
             last_statuses = [m.get("status", "UNKNOWN") for m in deployed_models]
 

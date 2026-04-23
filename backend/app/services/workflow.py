@@ -196,6 +196,10 @@ class WorkflowService:
             return False
 
         try:
+            from services.model_workflow_deployment import ModelWorkflowDeploymentService
+
+            ModelWorkflowDeploymentService.delete_workflow_deployments(db, workflow_id)
+
             # 템플릿인 경우 파생된 워크플로우가 있는지 확인
             if workflow.is_template:
                 derived_count = workflow_repository.get_derived_workflows_count(db, workflow_id)

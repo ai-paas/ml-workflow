@@ -47,6 +47,7 @@ class ModelWorkflowDeploymentService:
         pvc: Optional[str] = None,
         device_type: Optional[ServingDeviceType] = None,
         remote_api_url: Optional[str] = None,
+        serving_node_name: Optional[str] = None,
     ) -> ModelWorkflowDeployment:
         existing = model_workflow_deployment_repository.get_by_workflow_component(db, workflow_id, component_id)
         if existing:
@@ -60,6 +61,7 @@ class ModelWorkflowDeploymentService:
         deployment_data = ModelWorkflowDeploymentBaseSchema(
             workflow_id=workflow_id,
             component_id=component_id,
+            serving_node_name=(serving_node_name or None),
             service_name=service_name,
             service_hostname=service_hostname,
             model_name=model_name.replace("/", "-"),
@@ -232,4 +234,7 @@ class ModelWorkflowDeploymentService:
 
     @staticmethod
     def delete_workflow_deployments(db: Session, workflow_id: str) -> int:
+        from core.serving.serving_model_workflow_pvc import process_deployments_before_hard_delete
+
+        process_deployments_before_hard_delete(db, workflow_id)
         return model_workflow_deployment_repository.cleanup_workflow_deployments(db, workflow_id)

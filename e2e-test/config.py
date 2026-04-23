@@ -25,7 +25,8 @@ if not _scenario_raw:
     )
 SCENARIO_NUM: int = int(_scenario_raw)
 
-DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "600"))
+# PVC 복제(Longhorn 등)·배포 지연을 감안해 기본 20분 (환경변수 E2E_DEPLOY_TIMEOUT_SEC로 조정)
+DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "1200"))
 POLL_INTERVAL_SEC: int = int(os.environ.get("E2E_POLL_INTERVAL_SEC", "10"))
 DELETE_TIMEOUT_SEC: int = int(os.environ.get("E2E_DELETE_TIMEOUT_SEC", "300"))
 

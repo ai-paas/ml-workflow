@@ -102,12 +102,11 @@ class Settings(BaseSettings):
         description="내부 전용 API 인증에 사용할 키 (KFP 컴포넌트 콜백용). 서버 시작 시 SHA-256 해시로 검증.",
     )
 
-    # KServe 설정
-    KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")
+    # KServe / 워크플로 서빙 공통
     DEFAULT_TRY_GPU: bool = Field(
         default=True,
-        description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU).\
-        Ollama는 이 값만 사용, HuggingFace/KServe는 KSERVE_GPU와 함께 적용.",
+        description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU). "
+        "Ollama·KServe(HF 등) 워크플로 서빙 플래너가 동일하게 참고(§7.4).",
     )
     SERVING_DEFAULT_GPU_VRAM_BYTES: int = Field(
         default=16 * 1024 * 1024 * 1024,
@@ -116,6 +115,11 @@ class Settings(BaseSettings):
     SERVING_NODE_NAMES: str = Field(
         default="",
         description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체(§7.3).",
+    )
+    SERVING_INCLUDE_CONTROL_PLANE_NODES: bool = Field(
+        default=False,
+        description="True일 때만 인벤토리에 control-plane/master 역할 노드 포함. "
+        "기본 False — 서빙 자원 집계·노드 선택에서 제외(단일 노드 클러스터 테스트 시에만 True 권장).",
     )
     SERVING_NODE_VRAM_OVERRIDES_JSON: str = Field(
         default="{}",

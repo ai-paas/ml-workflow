@@ -88,8 +88,6 @@ def _try_gpu_policy_korean(
             bits.append("실행 파라미터에서 CPU 강제")
         if (execute_parameters.get("device_type") or "").strip().upper() == "CPU":
             bits.append("실행 파라미터에서 CPU만 쓰라고 지정됨")
-        if framework != "ollama" and not settings.KSERVE_GPU:
-            bits.append("KServe 계열인데 서버 설정에서 KServe GPU 사용이 꺼져 있음")
         if not settings.DEFAULT_TRY_GPU:
             bits.append("서버 설정에서 GPU 우선 시도가 꺼져 있음")
         if fb_try and not bits:
@@ -332,9 +330,7 @@ def _plan_serving_resources_with_inventory_nodes(
 
     try_gpu, fb_try = decide_try_gpu_path(
         task=task,
-        framework=framework,
         execute_parameters=execute_parameters,
-        kserve_gpu_enabled=settings.KSERVE_GPU,
         default_try_gpu=settings.DEFAULT_TRY_GPU,
     )
 
@@ -469,7 +465,6 @@ def _plan_serving_resources_with_inventory_nodes(
         task=task,
         framework=framework,
         execute_parameters=execute_parameters,
-        kserve_gpu_enabled=settings.KSERVE_GPU,
         default_try_gpu=settings.DEFAULT_TRY_GPU,
         default_gpu_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
         serving_meta_source=serving_meta_source,
@@ -503,6 +498,7 @@ def plan_serving_resources_with_k8s(
             default_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
             vram_overrides_json=settings.SERVING_NODE_VRAM_OVERRIDES_JSON,
             serving_node_names_csv=settings.SERVING_NODE_NAMES or "",
+            exclude_control_plane_nodes=not settings.SERVING_INCLUDE_CONTROL_PLANE_NODES,
         )
     )
 
@@ -518,7 +514,6 @@ def plan_serving_resources_with_k8s(
             task=task,
             framework=framework,
             execute_parameters=execute_parameters,
-            kserve_gpu_enabled=settings.KSERVE_GPU,
             default_try_gpu=settings.DEFAULT_TRY_GPU,
             default_gpu_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
             serving_meta_source=serving_meta_source,

@@ -58,6 +58,30 @@ def _node_ready(node: Any) -> bool:
     return False
 
 
+# Kubernetes 표준 control-plane 식별(라벨·taints). 워커만 서빙 인벤토리에 넣기 위해 제외한다.
+_CONTROL_PLANE_LABEL_KEYS = (
+    "node-role.kubernetes.io/control-plane",
+    "node-role.kubernetes.io/master",
+)
+_CONTROL_PLANE_TAINT_KEYS = (
+    "node-role.kubernetes.io/control-plane",
+    "node-role.kubernetes.io/master",
+)
+
+
+def _is_kubernetes_control_plane_node(node: Any) -> bool:
+    meta = getattr(node, "metadata", None)
+    labels = (meta.labels if meta else None) or {}
+    for k in _CONTROL_PLANE_LABEL_KEYS:
+        if k in labels:
+            return True
+    spec = getattr(node, "spec", None)
+    for t in getattr(spec, "taints", None) or []:
+        if (getattr(t, "key", None) or "") in _CONTROL_PLANE_TAINT_KEYS:
+            return True
+    return False
+
+
 def _parse_quantity_cpu_to_millicores(q: str) -> int:
     s = (q or "").strip()
     if not s:
@@ -233,10 +257,12 @@ def collect_node_inventory(
     vram_overrides_json: str,
     serving_node_names_csv: str,
     gpu_resource_key: str = _GPU_RESOURCE_KEY,
+    exclude_control_plane_nodes: bool = True,
 ) -> list[NodeInventory]:
     """
     Ready·스케줄 가능 노드 목록. SERVING_NODE_NAMES 비면 클러스터 전체(필터: Ready).
     §7.3.1: Pod requests 합산으로 g_free / m_free / c_free 채움.
+    exclude_control_plane_nodes: control-plane/master 역할 노드는 서빙 후보에서 제외(기본 True).
     """
     core = _try_load_core_v1()
     if core is None:
@@ -260,6 +286,8 @@ def collect_node_inventory(
         if not name:
             continue
         if whitelist and name not in whitelist:
+            continue
+        if exclude_control_plane_nodes and _is_kubernetes_control_plane_node(node):
             continue
         if node.spec and getattr(node.spec, "unschedulable", False):
             continue

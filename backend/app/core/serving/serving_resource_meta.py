@@ -208,13 +208,12 @@ def resolve_normalized_serving_meta(
 def decide_try_gpu_path(
     *,
     task: Optional[str],
-    framework: str,
     execute_parameters: dict[str, Any],
-    kserve_gpu_enabled: bool,
     default_try_gpu: bool,
 ) -> Tuple[bool, Optional[str]]:
     """
     GPU 경로를 시도할지(인벤토리·k 산정 전 단계). False면 CPU 경로.
+    Ollama·KServe 공통으로 DEFAULT_TRY_GPU·force_cpu·device_type·임베딩만 본다.
     """
     force_cpu = bool(execute_parameters.get("force_cpu"))
     device_override = (execute_parameters.get("device_type") or "").strip().upper()
@@ -224,17 +223,12 @@ def decide_try_gpu_path(
 
     try_gpu = default_try_gpu and not force_cpu and device_override != "CPU" and not embedding
 
-    if framework != "ollama" and not kserve_gpu_enabled:
-        try_gpu = False
-
     fallback_reason: Optional[str] = None
     if not try_gpu:
         if embedding:
             fallback_reason = "task_embedding_cpu"
         elif force_cpu or device_override == "CPU":
             fallback_reason = "user_cpu"
-        elif framework != "ollama" and not kserve_gpu_enabled:
-            fallback_reason = "kserve_gpu_disabled"
         elif not default_try_gpu:
             fallback_reason = "default_try_gpu_false"
 
@@ -256,7 +250,6 @@ def build_serving_resource_plan(
     task: Optional[str],
     framework: str,
     execute_parameters: dict[str, Any],
-    kserve_gpu_enabled: bool,
     default_try_gpu: bool,
     default_gpu_vram_bytes: int,
     serving_meta_source: ServingMetaSource,
@@ -276,9 +269,7 @@ def build_serving_resource_plan(
 
     try_gpu, fallback_reason = decide_try_gpu_path(
         task=task,
-        framework=framework,
         execute_parameters=execute_parameters,
-        kserve_gpu_enabled=kserve_gpu_enabled,
         default_try_gpu=default_try_gpu,
     )
 

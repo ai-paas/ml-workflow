@@ -46,6 +46,7 @@ class WorkflowExecutor:
             default_vram_bytes=s.SERVING_DEFAULT_GPU_VRAM_BYTES,
             vram_overrides_json=s.SERVING_NODE_VRAM_OVERRIDES_JSON,
             serving_node_names_csv=s.SERVING_NODE_NAMES or "",
+            exclude_control_plane_nodes=not s.SERVING_INCLUDE_CONTROL_PLANE_NODES,
         )
         frees: dict[str, tuple[int, int, int]] = (
             {n.name: (n.g_free, n.m_free, n.c_free) for n in nodes_snapshot} if nodes_snapshot else {}
@@ -169,6 +170,72 @@ class WorkflowExecutor:
 
         self._prepare_serving_plans_for_workflow(workflow, parameters)
 
+        from core.serving.serving_model_workflow_pvc import (
+            PvcReplicationConflict,
+            prepare_ollama_pvc_for_workflow_models,
+            rollback_new_clone_pvcs,
+        )
+        from core.serving.serving_workflow_deployment_policy import (
+            parse_serving_device_type,
+            resolve_workflow_serving_deployment_type,
+        )
+        from db.models.model_workflow_deployment import WorkflowServingDeploymentType
+        from services.model_workflow_deployment import ModelWorkflowDeploymentService
+
+        try:
+            prepare_ollama_pvc_for_workflow_models(self.db, workflow, parameters)
+        except PvcReplicationConflict:
+            self.db.rollback()
+            raise
+        except Exception:
+            self.db.rollback()
+            rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
+            raise
+
+        try:
+            for component in workflow.components:
+                if component.type != ComponentType.MODEL:
+                    continue
+                model = None
+                if component.model_id:
+                    model = (
+                        self.db.query(Model)
+                        .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                        .filter(Model.id == component.model_id)
+                        .first()
+                    )
+                dtype = resolve_workflow_serving_deployment_type(model, settings)
+                plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+                device_type = parse_serving_device_type(plan)
+                serving_node = (plan.get("serving_node_name") or "").strip() or None
+
+                if dtype == WorkflowServingDeploymentType.OLLAMA:
+                    pvc_val = plan.get("resolved_ollama_pvc") or (
+                        model.registry.pvc if model and model.registry else None
+                    )
+                else:
+                    pvc_val = model.registry.pvc if model and model.registry else None
+
+                remote_api_url = None
+
+                ModelWorkflowDeploymentService.create_deployment(
+                    db=self.db,
+                    workflow_id=workflow.id,
+                    component_id=component.id,
+                    model_name=component.name,
+                    deployment_type=dtype,
+                    pvc=pvc_val,
+                    device_type=device_type,
+                    remote_api_url=remote_api_url,
+                    serving_node_name=serving_node,
+                )
+
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
+            raise
+
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
             logger.info(f"Creating and executing Kubeflow pipeline for workflow {workflow.id}")
@@ -193,43 +260,6 @@ class WorkflowExecutor:
             # 워크플로우 kubeflow_run_id만 업데이트 (상태는 MODEL 컴포넌트 배포 콜백에서 업데이트)
             workflow.kubeflow_run_id = run_id
 
-            # KServe 배포 정보 초기화
-            from core.serving.serving_workflow_deployment_policy import (
-                parse_serving_device_type,
-                resolve_workflow_serving_deployment_type,
-            )
-            from services.model_workflow_deployment import ModelWorkflowDeploymentService
-
-            for component in workflow.components:
-                if component.type != ComponentType.MODEL:
-                    continue
-                model = None
-                if component.model_id:
-                    model = (
-                        self.db.query(Model)
-                        .options(joinedload(Model.provider_info), joinedload(Model.registry))
-                        .filter(Model.id == component.model_id)
-                        .first()
-                    )
-                # deployment_type: REMOTE(§2.5 1순위)는 §6에서 resolve_workflow_serving_deployment_type에 추가.
-                dtype = resolve_workflow_serving_deployment_type(model, settings)
-                plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
-                device_type = parse_serving_device_type(plan)
-                pvc_val = model.registry.pvc if model and model.registry else None
-                # remote_api_url: §6 Remote LLM 연동 시에만 저장.
-                remote_api_url = None
-
-                ModelWorkflowDeploymentService.create_deployment(
-                    db=self.db,
-                    workflow_id=workflow.id,
-                    component_id=component.id,
-                    model_name=component.name,
-                    deployment_type=dtype,
-                    pvc=pvc_val,
-                    device_type=device_type,
-                    remote_api_url=remote_api_url,
-                )
-
             self.db.commit()
 
             logger.info(f"Workflow {workflow.id} successfully executed with run ID: {run_id}")
@@ -247,6 +277,8 @@ class WorkflowExecutor:
                 "deployed_models": deployed_models,
             }
 
+        except PvcReplicationConflict:
+            raise
         except Exception as e:
             logger.error(f"Failed to execute workflow {workflow.id}: {str(e)}")
 
@@ -1236,12 +1268,11 @@ class WorkflowExecutor:
             # repo_id 추출 (Ollama 모델용)
             repo_id_value = model.repo_id if model and model.repo_id else ""
 
-            # PVC 이름 추출 (Ollama 모델용)
-            pvc_name_value = ""
-            if model and hasattr(model, "registry") and model.registry:
-                pvc_name_value = model.registry.pvc or ""
-
             plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+            # §3: prepare 단계에서 확정한 PVC(원본 또는 노드 전용 복제본)
+            pvc_name_value = (plan.get("resolved_ollama_pvc") or "").strip()
+            if not pvc_name_value and model and hasattr(model, "registry") and model.registry:
+                pvc_name_value = model.registry.pvc or ""
             gpu_n = int(plan.get("gpu_count", parameters.get("gpus", 0)) or 0)
             mem_req = plan.get("memory_request") or "2Gi"
             cpu_req = plan.get("cpu_request") or "500m"
