@@ -440,14 +440,18 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     - **child_models** (List[ModelReadChildSchema], optional): 자식 모델 목록
         - id (int): 자식 모델 ID
         - name (str): 자식 모델 이름
-        - description (str): 자식 모델 설명
+        - description (str, optional): 자식 모델 설명
         - child_models (List[ModelReadChildSchema], optional): 하위 자식 모델 (재귀적)
+    - **learning_enable_yn** (bool): 학습 파이프라인(§2)에 소스로 쓸 수 있는지(카탈로그/권한 기준)
+    - **opt_enable_yn** (bool): `POST /model-improvements`(§6) 최적화/경량화 **task**의 소스로 쓸 수 있는지
+    - **visibility** (str): 목록/상세 공통 — `CATALOG` (초기 카탈로그·학습·최적화 제약) / `CUSTOM` (파생·학습·최적화 가능 모델)
     - **created_at** (datetime): 모델 생성 시각
     - **updated_at** (datetime): 모델 수정 시각
 
     ## Notes
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환합니다
     - 부모/자식 모델 관계는 재귀적으로 조회됩니다
+    - `visibility`는 `parent_model_id` 또는 `opt_enable_yn`에 따라 `CUSTOM`이 됨(목록 §5.1과 동일 규칙)
 
     ## Errors
     - 401: 인증되지 않은 사용자

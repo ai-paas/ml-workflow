@@ -31,6 +31,15 @@ async def list_experiments(
 
     모든 학습 실험의 목록을 반환합니다.
     모델 등록 상태, 경과 시간, 종료 시간 등 요약 정보를 포함합니다.
+
+    ## 응답 원소(`ExperimentListResponse`) — status·등록 관련
+    - **status** (str, 필수): 학습 실험 진행 상태. 예: `CREATED`, `RUNNING`, `COMPLETED`, `FAILED`
+      (리모델링 설계서에는 완료를 `FINISHED`로 적는 경우가 있으나, DB/동기화에서는 `COMPLETED`가 쓰임)
+    - **registration_status** (str, 필수): 모델 등록 파이프라인/`registered_model` 기준
+      `NOT_REQUESTED` | `PIPELINE_SUBMITTED` | `SUCCESS` | `FAILED`
+    - **registered_model_id** (int, 선택): `registration_status` 가 `SUCCESS`일 때만 의미 있음(등록된 모델 ID)
+    - **elapsed_time** (int, 선택): 경과 시간(초)
+    - **end_time** (datetime, 선택): 학습 종료 시각(메트릭 기반)
     """
     try:
         skip = ((page - 1) * page_size) if (page and page_size) else 0
@@ -106,7 +115,7 @@ async def update_experiment(
     - **mlflow_run_id** (str, optional): MLflow 실행 ID
         - MLflow에서 학습 실행 시 생성된 ID
     - **status** (str): 실험 상태
-        - 학습 진행 상태를 나타내는 문자열
+        - 예: `CREATED`, `RUNNING`, `COMPLETED`, `FAILED` (리모델링 설계서의 `FINISHED`는 구현에서 `COMPLETED`로 저장될 수 있음)
     - **reference_model** (ModelReadSchema): 참조 모델 상세 정보
         - id (int): 모델 ID
         - name (str): 모델 이름
@@ -187,6 +196,16 @@ async def get_experiment(
 
     특정 실험의 상세 정보를 조회합니다.
     목록 필드에 더해 학습 메트릭, 등록 상태, 메시지 정보를 통합 제공합니다.
+
+    ## 응답 — status·등록·메시지(문서 §7.2과 정합)
+    - **status** (str): `CREATED`, `RUNNING`, `COMPLETED`, `FAILED` 등(완료는 주로 `COMPLETED`)
+    - **registration_status** (str): `NOT_REQUESTED` | `PIPELINE_SUBMITTED` | `SUCCESS` | `FAILED`
+    - **registered_model_id** (int, 선택): 등록 성공 시에만 값
+    - **train_msg** (str, 선택): 학습 단계 안내(예: 실패/완료 메시지; 메트릭 폴링이 갱신)
+    - **model_register_msg** (str, 선택): 모델 등록 파이프라인 결과 안내
+    - **mlflow_run_id** (str, 선택): MLflow run(상세·디버깅용; 설계에 따라 내부용으로 둘 수 있음)
+    - 메트릭: **max_epoch**, **current_epoch**, **loss**, **loss_history**, **average_precision**, **accuracy**,
+      **precision**, **recall** 등(일부는 UI·기획용으로 null일 수 있음)
     """
     try:
         experiment = ExperimentService().get(db, pk=experiment_id)
@@ -281,13 +300,13 @@ async def update_experiment_internal(
     - **experiment_id** (int): 수정할 실험 ID
 
     ## Request Body (ExperimentInternalUpdateRequest)
-    - **status** (str, optional): 실험 상태
-        - 예: "RUNNING", "COMPLETED", "FAILED"
-    - **mlflow_run_id** (str, optional): MLflow 실행 ID
-    - **kubeflow_run_id** (str, optional): Kubeflow 파이프라인 실행 ID
+    - **status** (str, optional): `experiment` 행의 학습 상태. 예: `CREATED`, `RUNNING`, `COMPLETED`, `FAILED`
+    - **mlflow_run_id** (str, optional): MLflow run ID(학습 컨테이너가 run 생성 후 갱신)
+    - **kubeflow_run_id** (str, optional): Kubeflow 학습 파이프라인 run ID(해당되면)
+    - **registration_kubeflow_run_id** (str, optional): 모델 **등록**용 Kubeflow run ID(등록 API가 설정)
 
     ## Response (ExperimentReadSchema)
-    - 실험의 전체 정보를 반환합니다.
+    - 실험의 전체 정보(참조 모델·데이터셋·하이퍼파라미터·status·run id 등)를 반환합니다.
 
     ## Errors
     - 401: 인증되지 않은 사용자
