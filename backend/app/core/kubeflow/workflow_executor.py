@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from config.db.enums import ModelFormatEnum, ModelProviderEnum
@@ -176,10 +177,11 @@ class WorkflowExecutor:
             rollback_new_clone_pvcs,
         )
         from core.serving.serving_workflow_deployment_policy import (
+            parse_remote_serving_model_map,
             parse_serving_device_type,
             resolve_workflow_serving_deployment_type,
         )
-        from db.models.model_workflow_deployment import WorkflowServingDeploymentType
+        from db.models.model_workflow_deployment import DeploymentStatus, WorkflowServingDeploymentType
         from services.model_workflow_deployment import ModelWorkflowDeploymentService
 
         try:
@@ -209,16 +211,25 @@ class WorkflowExecutor:
                 device_type = parse_serving_device_type(plan)
                 serving_node = (plan.get("serving_node_name") or "").strip() or None
 
-                if dtype == WorkflowServingDeploymentType.OLLAMA:
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    api_base = (settings.REMOTE_SERVING_API_URL or "").strip()
+                    if not api_base:
+                        raise ValueError(
+                            "REMOTE_SERVING_API_URL이 비어 있으면 REMOTE 모델 워크플로 배포를 실행할 수 없습니다."
+                        )
+                    pvc_val = None
+                elif dtype == WorkflowServingDeploymentType.OLLAMA:
                     pvc_val = plan.get("resolved_ollama_pvc") or (
                         model.registry.pvc if model and model.registry else None
                     )
                 else:
                     pvc_val = model.registry.pvc if model and model.registry else None
 
-                remote_api_url = None
+                remote_api_url: Optional[str] = None
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    remote_api_url = api_base.rstrip("/")
 
-                ModelWorkflowDeploymentService.create_deployment(
+                dep = ModelWorkflowDeploymentService.create_deployment(
                     db=self.db,
                     workflow_id=workflow.id,
                     component_id=component.id,
@@ -229,6 +240,16 @@ class WorkflowExecutor:
                     remote_api_url=remote_api_url,
                     serving_node_name=serving_node,
                 )
+
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    mmap = parse_remote_serving_model_map(settings)
+                    rid = (model.repo_id or "").strip() if model else ""
+                    remote_mn = mmap.get(rid, rid).replace("/", "-")
+                    dep.model_name = remote_mn
+                    dep.internal_url = remote_api_url
+                    dep.remote_api_url = remote_api_url
+                    dep.status = DeploymentStatus.DEPLOYED
+                    dep.deployed_at = datetime.utcnow()
 
             self.db.commit()
         except Exception:
@@ -401,6 +422,81 @@ class WorkflowExecutor:
                         elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
 
+            from core.serving.serving_workflow_deployment_policy import (
+                parse_remote_serving_model_map,
+                resolve_workflow_serving_deployment_type,
+            )
+            from db.models.model_workflow_deployment import WorkflowServingDeploymentType as WSDType
+
+            dtype_rt = resolve_workflow_serving_deployment_type(model, settings)
+            if dtype_rt == WSDType.REMOTE:
+                mmap_rt = parse_remote_serving_model_map(settings)
+                rid_rt = (model.repo_id or "").strip() if model else ""
+                remote_model_nm = mmap_rt.get(rid_rt, rid_rt).replace("/", "-")
+                remote_base = (settings.REMOTE_SERVING_API_URL or "").strip().rstrip("/")
+
+                @dsl.component(base_image="python:3.10", packages_to_install=["requests==2.31.0"])
+                def remote_deployment_notify(
+                    workflow_id: str,
+                    component_id: str,
+                    rest_api_url: str,
+                    internal_api_key: str,
+                    remote_base_url: str,
+                    remote_model_name: str,
+                ) -> str:
+                    import json
+                    import logging
+
+                    import requests
+
+                    logging.basicConfig(level=logging.INFO)
+                    log = logging.getLogger(__name__)
+                    safe_cid = component_id.replace("_", "-").lower()[:24]
+                    service_name = f"remote-{safe_cid}".strip("-") or "remote-svc"
+                    if rest_api_url and internal_api_key:
+                        try:
+                            base = rest_api_url.rstrip("/")
+                            up = f"{base}/api/v1/workflows/{workflow_id}/components/{component_id}/deployment-status"
+                            payload = {
+                                "service_name": service_name,
+                                "service_hostname": "",
+                                "model_name": remote_model_name,
+                                "status": "deployed",
+                                "internal_url": remote_base_url,
+                                "error_message": None,
+                            }
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
+                            resp = requests.post(up, json=payload, headers=headers, timeout=30)
+                            if resp.status_code == 200:
+                                try:
+                                    wu = f"{base}/api/v1/workflows/{workflow_id}"
+                                    requests.put(wu, json={"status": "ACTIVE"}, headers=headers, timeout=10)
+                                except Exception as werr:
+                                    log.warning("REMOTE noop: workflow ACTIVE update failed: %s", werr)
+                            else:
+                                log.warning(
+                                    "REMOTE noop: deployment-status failed %s %s",
+                                    resp.status_code,
+                                    resp.text[:300],
+                                )
+                        except Exception as e:
+                            log.error("REMOTE noop: callback error: %s", e)
+                    return json.dumps(
+                        {"status": "REMOTE_NOTIFY", "workflow_id": workflow_id, "component_id": component_id}
+                    )
+
+                return remote_deployment_notify(
+                    workflow_id=str(workflow.id),
+                    component_id=component.id,
+                    rest_api_url=parameters.get("rest_api_url", ""),
+                    internal_api_key=parameters.get("internal_api_key", ""),
+                    remote_base_url=remote_base,
+                    remote_model_name=remote_model_nm,
+                )
+
             # KServe 배포만 수행하는 컴포넌트 (추론은 별도로 수행)
             @dsl.component(
                 base_image="python:3.10",
@@ -459,8 +555,7 @@ class WorkflowExecutor:
 
                 namespace = "kubeflow-user-example-com"
 
-                # deployment_mode == "remote" (§6): KFP 내 REMOTE 전용 배포 경로는 미구현.
-                # §2.5 REMOTE 판별이 스텁이므로 현재 이 분기는 호출되지 않는다.
+                # REMOTE는 파이프라인 상에서 `remote_deployment_notify` 컴포넌트로만 처리한다.
 
                 # Kubernetes 설정
                 k8s_config.load_incluster_config()

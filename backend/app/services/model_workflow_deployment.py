@@ -31,6 +31,11 @@ class ModelWorkflowDeploymentService:
         public_url = None
         if deployment.deployment_type == WorkflowServingDeploymentType.KSERVE:
             public_url = kserve_public_infer_url(s.KSERVE_GATEWAY_URL or "", deployment.model_name)
+        if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+            internal = (deployment.internal_url or "").strip()
+            remote = (deployment.remote_api_url or "").strip()
+            backend_api_url = backend_api_url_from_internal(internal) or (remote if remote else None)
+            return None, None, backend_api_url
         backend_api_url = backend_api_url_from_internal(deployment.internal_url)
         return gateway_url, public_url, backend_api_url
 

@@ -219,8 +219,9 @@ ml_workflow_ui/
 #### 배포된 모델
 - `get_deployed_models(workflow_id)`: 배포된 모델 목록 조회
 
-#### 추론
-- `inference(workflow_id, component_id, image_path, labels)`: 추론 수행
+#### 워크플로 테스트 (전체 그래프)
+- `test_rag_workflow(workflow_id, text)`: RAG/LLM — `POST /api/v1/workflows/{id}/test/rag`
+- `test_ml_workflow(workflow_id, image_path)`: ODM — `POST /api/v1/workflows/{id}/test/ml`
 
 ### 사용 예시
 
@@ -238,13 +239,8 @@ templates = client.get_workflow_templates()
 # 워크플로우 생성
 workflow = client.clone_from_template(template_id=1, workflow_name="my-workflow")
 
-# 추론 수행
-result = client.inference(
-    workflow_id=workflow["id"],
-    component_id="model_component",
-    image_path="image.jpg",
-    labels=["a cat", "a dog"]
-)
+# RAG/LLM 워크플로 테스트 (워크플로가 ACTIVE일 때)
+result = client.test_rag_workflow(workflow_id=workflow["id"], text="질문 텍스트")
 ```
 
 ## 트러블슈팅

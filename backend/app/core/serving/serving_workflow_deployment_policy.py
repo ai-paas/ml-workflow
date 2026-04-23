@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict, deque
 from typing import Any, Optional
 
@@ -12,16 +13,37 @@ from db.models.model_workflow_deployment import ServingDeviceType, WorkflowServi
 from db.models.service import ComponentType, Workflow, WorkflowComponent
 
 
+def parse_remote_serving_model_map(settings: Settings) -> dict[str, str]:
+    """§6: `REMOTE_SERVING_MODEL_MAP` JSON → repo_id → 원격 서버 모델명. 잘못된 JSON은 빈 dict."""
+    raw = (settings.REMOTE_SERVING_MODEL_MAP or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in data.items():
+        ks, vs = str(k).strip(), str(v).strip()
+        if ks and vs:
+            out[ks] = vs
+    return out
+
+
 def resolve_workflow_serving_deployment_type(
     model: Optional[Model],
     _settings: Settings,
 ) -> WorkflowServingDeploymentType:
     """MODEL 컴포넌트의 deployment_type (§2.5).
 
-    REMOTE 1순위는 §6: `REMOTE_SERVING_MODEL_MAP`에 모델 repo_id가 있으면 REMOTE (구현 예정). 예시만 주석으로 둔다:
-      # if repo_id_in_remote_serving_model_map(model, _settings):
-      #     return WorkflowServingDeploymentType.REMOTE
+    우선순위: §6 REMOTE(`REMOTE_SERVING_MODEL_MAP`에 repo_id 존재) → Ollama → KServe.
     """
+    rid = (model.repo_id or "").strip() if model is not None else ""
+    if rid:
+        if rid in parse_remote_serving_model_map(_settings):
+            return WorkflowServingDeploymentType.REMOTE
     if model is not None and model.provider_info is not None:
         if model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower():
             return WorkflowServingDeploymentType.OLLAMA
