@@ -1,12 +1,38 @@
-"""E2E 테스트 설정 — .env 파일에서 로딩, 환경 변수로 오버라이드 가능"""
+"""E2E 테스트 설정 — .env 파일에서 로딩, 환경 변수로 오버라이드 가능
+
+도트엔브 로딩 순서 (백엔드 make … ENV=dev 과 동일한 환경 변수 ENV 사용):
+
+1. e2e-test/.env 가 있으면 먼저 로드 (공통 기본값, 기존 키는 덮어쓰지 않음).
+2. ENV 가 비어 있지 않으면 e2e-test/.env.{ENV} 를 로드 (같은 키는 위 설정을 덮어씀).
+   해당 파일이 없으면 경고만 하고, 셸에 이미 설정된 환경 변수만 사용.
+
+예: make e2e-wf-scenario-deploy SCENARIO=1 ENV=dev → .env 후 .env.dev 적용.
+"""
 
 import json
 import os
+import warnings
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+_E2E_ROOT = Path(__file__).parent
+_SHARED_ENV = _E2E_ROOT / ".env"
+_ENV_SUFFIX = (os.environ.get("ENV") or "").strip()
+
+if _SHARED_ENV.is_file():
+    load_dotenv(_SHARED_ENV, override=False)
+
+if _ENV_SUFFIX:
+    _specific = _E2E_ROOT / f".env.{_ENV_SUFFIX}"
+    if _specific.is_file():
+        load_dotenv(_specific, override=True)
+    else:
+        warnings.warn(
+            f"E2E: ENV={_ENV_SUFFIX!r} 인데 {_specific.name} 이(가) 없습니다. "
+            f"공통 {_SHARED_ENV.name} 및 셸 환경 변수만 사용합니다.",
+            stacklevel=1,
+        )
 
 BASE_URL: str = os.environ.get("E2E_BASE_URL", "http://localhost:8000")
 API_PREFIX: str = "/api/v1"

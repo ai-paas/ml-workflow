@@ -198,35 +198,36 @@ lint-fix: isort black flake8-fix
 
 # ─── E2E Tests ─────────────────────────────────────────────────────────────
 E2E_DIR := e2e-test
+# 선택: ENV=dev / ENV=innogrid → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
 
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
-	uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s
 
 # ─── E2E: 워크플로우 시나리오 (9개) ─────────────────────────────────────────────
 # SCENARIO=1~9 로 시나리오를 선택한다.
 # 1: 단순 LLM  2: 단순 RAG  3~9: 복합 시나리오 (체인/병렬/쿼리정제 등)
 #   make e2e-wf-scenario-info                    # 전체 시나리오 목록
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
-#   make e2e-wf-scenario-deploy SCENARIO=3              # 3번 시나리오 배포
+#   make e2e-wf-scenario-deploy SCENARIO=3 ENV=dev     # 3번 배포 (.env.dev 적용)
 #   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 저장 건별 삭제 확인(y)
 #   make e2e-wf-scenario-lifecycle SCENARIO=3           # 3번 시나리오 전체 생명주기
 
 e2e-wf-scenario-info:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-info SCENARIO=1" && exit 1)
-	@uv run --group e2e python $(E2E_DIR)/workflow_scenarios.py $(SCENARIO)
+	@$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e python $(E2E_DIR)/workflow_scenarios.py $(SCENARIO)
 
 e2e-wf-scenario-deploy:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-deploy SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 배포 테스트"
-	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
 
 e2e-wf-scenario-delete:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-delete SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 삭제 테스트"
-	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_delete.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_delete.py -v -s
 
 e2e-wf-scenario-lifecycle:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
-	E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s
