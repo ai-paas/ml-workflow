@@ -381,16 +381,19 @@ def create_workflow_template(
     - **name** (str, required): 템플릿 이름
     - **description** (str, optional): 템플릿 설명
     - **category** (str, optional): 템플릿 카테고리
-    - **workflow_definition** (WorkflowDefinition, required): 템플릿 구조
+    - **workflow_definition** (WorkflowDefinition, optional): 템플릿 구조 (생성 시 검증·저장에 사용)
         - components (List[ComponentCreateRequest]): 컴포넌트 정의
+            - ref_id (str): 프론트·스크립트용 임시 참조 ID (연결의 source_ref_id/target_ref_id와 매칭)
             - name (str): 컴포넌트 이름
             - type (str): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionCreateRequest]): 연결 정의
-            - source_component_id (str): 소스 컴포넌트 ID
-            - target_component_id (str): 타겟 컴포넌트 ID
+            - config (dict, optional): 타입별 세부 설정 (MODEL/KB 등, START/END는 미사용)
+        - connections (List[ConnectionCreateRequest]): 연결 정의 (요청 시 ref_id 기준)
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowTemplateBriefSchema)
     - **id** (str): 템플릿 UUID
@@ -814,11 +817,14 @@ def update_workflow_template(
         - 템플릿은 일반적으로 DRAFT 상태 유지 (실행 불가)
     - **workflow_definition** (WorkflowDefinition, optional): 새 템플릿 구조
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 임시 참조 ID (연결과 매칭)
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
+            - config (dict, optional): 타입별 세부 설정
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_ref_id (str): 소스 컴포넌트 ref_id
             - target_ref_id (str): 타겟 컴포넌트 ref_id
@@ -1120,12 +1126,14 @@ def update_workflow(
                 - "END": 워크플로우 종료점
                 - "MODEL": ML 모델 실행 노드
                 - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
                 - MODEL 타입인 경우 필수, 다른 타입은 null
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
                 - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
                 - MODEL 타입인 경우 선택, 다른 타입은 null
+            - config (dict, optional): 타입별 세부 설정
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_ref_id (str): 소스 컴포넌트 ref_id
             - target_ref_id (str): 타겟 컴포넌트 ref_id
