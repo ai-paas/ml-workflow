@@ -191,7 +191,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
 class ModelReadParentSchema(BaseModel):
     id: int
     name: str
-    description: str
+    description: str | None = None
 
     parent_model: Optional[ModelReadParentSchema]
 
@@ -202,7 +202,7 @@ class ModelReadParentSchema(BaseModel):
 class ModelReadChildSchema(BaseModel):
     id: int
     name: str
-    description: str
+    description: str | None = None
 
     child_models: Optional[list[ModelReadChildSchema]]
 

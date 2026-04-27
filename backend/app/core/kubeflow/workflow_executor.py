@@ -4,15 +4,17 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from db.models.model import Model
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
 from kfp.compiler import Compiler
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -25,6 +27,113 @@ class WorkflowExecutor:
         self.db = db
         self.kf_manager = KubeflowManager()
         self.deployed_services = {}  # component_id -> inference_service_name
+
+    def _prepare_serving_plans_for_workflow(self, workflow: Workflow, parameters: Dict[str, Any]) -> None:
+        """§7.9·§7.9.1 사전정의 메타 조회 및 컴포넌트별 동결 리소스 계획을 parameters['serving_plans']에 적재."""
+        from core.serving.serving_k8s_inventory import collect_node_inventory, node_inventories_with_free_overrides
+        from core.serving.serving_resource_meta import resolve_normalized_serving_meta
+        from core.serving.serving_resource_planner import (
+            apply_chain_reservation_from_plan,
+            plan_serving_resources_with_k8s,
+        )
+        from core.serving.serving_workflow_deployment_policy import topological_order_model_components
+        from services.model import PREDEFINED_MODEL_CONFIGS
+
+        plans: Dict[str, Dict[str, Any]] = {}
+        s = get_settings()
+
+        model_order = topological_order_model_components(workflow)
+        nodes_snapshot = collect_node_inventory(
+            default_vram_bytes=s.SERVING_DEFAULT_GPU_VRAM_BYTES,
+            vram_overrides_json=s.SERVING_NODE_VRAM_OVERRIDES_JSON,
+            serving_node_names_csv=s.SERVING_NODE_NAMES or "",
+            exclude_control_plane_nodes=not s.SERVING_INCLUDE_CONTROL_PLANE_NODES,
+        )
+        frees: dict[str, tuple[int, int, int]] = (
+            {n.name: (n.g_free, n.m_free, n.c_free) for n in nodes_snapshot} if nodes_snapshot else {}
+        )
+        chain_n = len(model_order)
+
+        for step, component in enumerate(model_order):
+            model = self.db.get(Model, component.model_id)
+            if not model:
+                raise ValueError(
+                    f"워크플로우 MODEL 컴포넌트 '{component.name}'(id={component.id}): "
+                    f"model_id={component.model_id} 모델을 찾을 수 없습니다."
+                )
+
+            meta, source, parent_repo = resolve_normalized_serving_meta(
+                self.db, model, predefined_configs=PREDEFINED_MODEL_CONFIGS
+            )
+
+            pre_cfg = PREDEFINED_MODEL_CONFIGS.get(model.repo_id or "", {})
+            task = pre_cfg.get("task") or model.task
+
+            framework = "pytorch"
+            if (
+                getattr(model, "provider_info", None)
+                and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
+                and getattr(model, "format_info", None)
+                and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
+            ):
+                framework = "ollama"
+            elif getattr(model, "format_info", None):
+                format_name = model.format_info.name.lower()
+                if ModelFormatEnum.TENSORFLOW.value.lower() in format_name or "tf" in format_name:
+                    framework = "tensorflow"
+                elif ModelFormatEnum.ONNX.value.lower() in format_name:
+                    framework = "onnx"
+                elif ModelFormatEnum.TRANSFORMERS.value.lower() in format_name:
+                    framework = "transformers"
+                elif ModelFormatEnum.KERAS.value.lower() in format_name:
+                    framework = "keras"
+                elif ModelFormatEnum.YOLOX.value.lower() in format_name:
+                    framework = "yolox"
+
+            nodes_override = node_inventories_with_free_overrides(nodes_snapshot, frees) if nodes_snapshot else None
+            planner_log_ctx = (
+                f"component_id={component.id} name={component.name!r} "
+                f"chain_step={step + 1}/{chain_n} model_id={component.model_id} repo_id={model.repo_id!r}"
+            )
+            plan = plan_serving_resources_with_k8s(
+                normalized_meta=meta,
+                task=task,
+                framework=framework,
+                execute_parameters=parameters,
+                settings=s,
+                serving_meta_source=source,
+                parent_repo_id=parent_repo,
+                nodes_override=nodes_override,
+                log_context=planner_log_ctx,
+            )
+
+            if nodes_snapshot and plan.reservation_node_name:
+                apply_chain_reservation_from_plan(frees, plan, planner_log_ctx)
+
+            planner_note = plan.planner_note
+            if chain_n > 1:
+                chain_tag = f"7.3.2_chain_step={step + 1}/{chain_n}"
+                planner_note = f"{planner_note};{chain_tag}" if planner_note else chain_tag
+
+            plans[component.id] = {
+                "device_type": plan.device_type,
+                "gpu_count": plan.gpu_count,
+                "memory_request": plan.memory_request,
+                "cpu_request": plan.cpu_request,
+                "memory_limit": plan.memory_limit,
+                "cpu_limit": plan.cpu_limit,
+                "serving_vram_need_bytes": plan.serving_vram_need_bytes,
+                "serving_meta_source": plan.serving_meta_source,
+                "parent_repo_id": plan.parent_repo_id,
+                "fallback_reason": plan.fallback_reason,
+                "serving_node_name": plan.serving_node_name,
+                "planner_note": planner_note,
+                "reservation_node_name": plan.reservation_node_name,
+                "chain_step": step,
+                "chain_model_count": chain_n,
+            }
+
+        parameters["serving_plans"] = plans
 
     def execute_workflow(self, workflow: Workflow, parameters: Dict[str, Any] = None) -> Dict[str, Any]:
         """
@@ -54,11 +163,99 @@ class WorkflowExecutor:
 
         # REST API 설정을 parameters에 추가 (DB 업데이트용)
         parameters["rest_api_url"] = settings.REST_API_URL
-        parameters["restapi_username"] = "surromind"  # 고정 사용자명
-        parameters["restapi_password"] = settings.DEMO_PASSWORD
+        parameters["internal_api_key"] = settings.INTERNAL_API_KEY
+        parameters["kserve_gateway_url"] = settings.KSERVE_GATEWAY_URL or ""
 
         # KServe imagePullSecret 설정 추가
         parameters["image_pull_secret_name"] = settings.KUBEFLOW_IMAGE_PULL_SECRET
+
+        self._prepare_serving_plans_for_workflow(workflow, parameters)
+
+        from core.serving.serving_model_workflow_pvc import (
+            PvcReplicationConflict,
+            prepare_ollama_pvc_for_workflow_models,
+            rollback_new_clone_pvcs,
+        )
+        from core.serving.serving_workflow_deployment_policy import (
+            parse_remote_serving_model_map,
+            parse_serving_device_type,
+            resolve_workflow_serving_deployment_type,
+        )
+        from db.models.model_workflow_deployment import DeploymentStatus, WorkflowServingDeploymentType
+        from services.model_workflow_deployment import ModelWorkflowDeploymentService
+
+        try:
+            prepare_ollama_pvc_for_workflow_models(self.db, workflow, parameters)
+        except PvcReplicationConflict:
+            self.db.rollback()
+            raise
+        except Exception:
+            self.db.rollback()
+            rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
+            raise
+
+        try:
+            for component in workflow.components:
+                if component.type != ComponentType.MODEL:
+                    continue
+                model = None
+                if component.model_id:
+                    model = (
+                        self.db.query(Model)
+                        .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                        .filter(Model.id == component.model_id)
+                        .first()
+                    )
+                dtype = resolve_workflow_serving_deployment_type(model, settings)
+                plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+                device_type = parse_serving_device_type(plan)
+                serving_node = (plan.get("serving_node_name") or "").strip() or None
+
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    api_base = (settings.REMOTE_SERVING_API_URL or "").strip()
+                    if not api_base:
+                        raise ValueError(
+                            "REMOTE_SERVING_API_URL이 비어 있으면 REMOTE 모델 워크플로 배포를 실행할 수 없습니다."
+                        )
+                    pvc_val = None
+                elif dtype == WorkflowServingDeploymentType.OLLAMA:
+                    pvc_val = plan.get("resolved_ollama_pvc") or (
+                        model.registry.pvc if model and model.registry else None
+                    )
+                else:
+                    pvc_val = model.registry.pvc if model and model.registry else None
+
+                remote_api_url: Optional[str] = None
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    remote_api_url = api_base.rstrip("/")
+
+                dep = ModelWorkflowDeploymentService.create_deployment(
+                    db=self.db,
+                    workflow_id=workflow.id,
+                    component_id=component.id,
+                    model_name=component.name,
+                    deployment_type=dtype,
+                    pvc=pvc_val,
+                    device_type=device_type,
+                    remote_api_url=remote_api_url,
+                    serving_node_name=serving_node,
+                )
+
+                if dtype == WorkflowServingDeploymentType.REMOTE:
+                    mmap = parse_remote_serving_model_map(settings)
+                    rid = (model.repo_id or "").strip() if model else ""
+                    remote_mn = mmap.get(rid, rid).replace("/", "-")
+                    dep.model_name = remote_mn
+                    dep.internal_url = remote_api_url
+                    dep.remote_api_url = remote_api_url
+                    dep.status = DeploymentStatus.DEPLOYED
+                    dep.deployed_at = datetime.utcnow()
+
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
+            raise
 
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
@@ -81,28 +278,15 @@ class WorkflowExecutor:
                 parameters=parameters,
             )
 
-            # 워크플로우 kubeflow_run_id만 업데이트 (상태는 파이프라인 완료 시 END 컴포넌트에서 업데이트)
+            # 워크플로우 kubeflow_run_id만 업데이트 (상태는 MODEL 컴포넌트 배포 콜백에서 업데이트)
             workflow.kubeflow_run_id = run_id
-
-            # KServe 배포 정보 초기화
-            from services.kserve_deployment import KServeDeploymentService
-
-            for component in workflow.components:
-                if component.type == ComponentType.MODEL:
-                    # KServeDeployment 레코드 생성
-                    KServeDeploymentService.create_deployment(
-                        db=self.db,
-                        workflow_id=workflow.id,
-                        component_id=component.id,
-                        model_name=component.name,
-                    )
 
             self.db.commit()
 
             logger.info(f"Workflow {workflow.id} successfully executed with run ID: {run_id}")
 
-            # 배포된 모델 정보 조회 (KServeDeployment 테이블에서)
-            deployed_models = KServeDeploymentService.get_deployed_models(
+            # 배포된 모델 정보 조회 (model_workflow_deployments)
+            deployed_models = ModelWorkflowDeploymentService.get_deployed_models(
                 self.db, workflow.id, include_component_info=True
             )
 
@@ -114,6 +298,8 @@ class WorkflowExecutor:
                 "deployed_models": deployed_models,
             }
 
+        except PvcReplicationConflict:
+            raise
         except Exception as e:
             logger.error(f"Failed to execute workflow {workflow.id}: {str(e)}")
 
@@ -183,32 +369,9 @@ class WorkflowExecutor:
         Returns:
             Kubeflow 태스크
         """
-        # START 컴포넌트
-        if component.type == ComponentType.START:
-
-            @dsl.component(base_image="python:3.10-slim", packages_to_install=["requests", "pandas"])
-            def start_component(workflow_id: str, component_id: str, config: str = "{}") -> str:
-                import json
-                import logging
-
-                logging.info(f"Starting workflow {workflow_id}, component {component_id}")
-                config_dict = json.loads(config)
-
-                # 입력 데이터 처리 로직
-                result = {
-                    "workflow_id": workflow_id,
-                    "component_id": component_id,
-                    "status": "started",
-                    "config": config_dict,
-                }
-
-                return json.dumps(result)
-
-            return start_component(
-                workflow_id=str(workflow.id),
-                component_id=component.id,
-                config=json.dumps(component.config or {}),
-            )
+        # START/END는 UI 시각화 전용이므로 파이프라인 태스크로 생성하지 않음
+        if component.type in (ComponentType.START, ComponentType.END):
+            return None
 
         # MODEL 컴포넌트
         elif component.type == ComponentType.MODEL:
@@ -219,9 +382,12 @@ class WorkflowExecutor:
             framework = "pytorch"
 
             if db and component.model_id:
-                from db.models.model import Model
-
-                model = db.query(Model).filter(Model.id == component.model_id).first()
+                model = (
+                    db.query(Model)
+                    .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                    .filter(Model.id == component.model_id)
+                    .first()
+                )
                 if model:
                     # Ollama 모델 감지 (provider가 ollama이고 format이 gguf인 경우)
                     if (
@@ -256,6 +422,81 @@ class WorkflowExecutor:
                         elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
 
+            from core.serving.serving_workflow_deployment_policy import (
+                parse_remote_serving_model_map,
+                resolve_workflow_serving_deployment_type,
+            )
+            from db.models.model_workflow_deployment import WorkflowServingDeploymentType as WSDType
+
+            dtype_rt = resolve_workflow_serving_deployment_type(model, settings)
+            if dtype_rt == WSDType.REMOTE:
+                mmap_rt = parse_remote_serving_model_map(settings)
+                rid_rt = (model.repo_id or "").strip() if model else ""
+                remote_model_nm = mmap_rt.get(rid_rt, rid_rt).replace("/", "-")
+                remote_base = (settings.REMOTE_SERVING_API_URL or "").strip().rstrip("/")
+
+                @dsl.component(base_image="python:3.10", packages_to_install=["requests==2.31.0"])
+                def remote_deployment_notify(
+                    workflow_id: str,
+                    component_id: str,
+                    rest_api_url: str,
+                    internal_api_key: str,
+                    remote_base_url: str,
+                    remote_model_name: str,
+                ) -> str:
+                    import json
+                    import logging
+
+                    import requests
+
+                    logging.basicConfig(level=logging.INFO)
+                    log = logging.getLogger(__name__)
+                    safe_cid = component_id.replace("_", "-").lower()[:24]
+                    service_name = f"remote-{safe_cid}".strip("-") or "remote-svc"
+                    if rest_api_url and internal_api_key:
+                        try:
+                            base = rest_api_url.rstrip("/")
+                            up = f"{base}/api/v1/workflows/{workflow_id}/components/{component_id}/deployment-status"
+                            payload = {
+                                "service_name": service_name,
+                                "service_hostname": "",
+                                "model_name": remote_model_name,
+                                "status": "deployed",
+                                "internal_url": remote_base_url,
+                                "error_message": None,
+                            }
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
+                            resp = requests.post(up, json=payload, headers=headers, timeout=30)
+                            if resp.status_code == 200:
+                                try:
+                                    wu = f"{base}/api/v1/workflows/{workflow_id}"
+                                    requests.put(wu, json={"status": "ACTIVE"}, headers=headers, timeout=10)
+                                except Exception as werr:
+                                    log.warning("REMOTE noop: workflow ACTIVE update failed: %s", werr)
+                            else:
+                                log.warning(
+                                    "REMOTE noop: deployment-status failed %s %s",
+                                    resp.status_code,
+                                    resp.text[:300],
+                                )
+                        except Exception as e:
+                            log.error("REMOTE noop: callback error: %s", e)
+                    return json.dumps(
+                        {"status": "REMOTE_NOTIFY", "workflow_id": workflow_id, "component_id": component_id}
+                    )
+
+                return remote_deployment_notify(
+                    workflow_id=str(workflow.id),
+                    component_id=component.id,
+                    rest_api_url=parameters.get("rest_api_url", ""),
+                    internal_api_key=parameters.get("internal_api_key", ""),
+                    remote_base_url=remote_base,
+                    remote_model_name=remote_model_nm,
+                )
+
             # KServe 배포만 수행하는 컴포넌트 (추론은 별도로 수행)
             @dsl.component(
                 base_image="python:3.10",
@@ -279,8 +520,7 @@ class WorkflowExecutor:
                 aws_access_key_id: str,
                 aws_secret_access_key: str,
                 rest_api_url: str,
-                restapi_username: str,
-                restapi_password: str,
+                internal_api_key: str,
                 infer_image_url: str,
                 config: str = "{}",
                 gpus: int = 0,
@@ -288,6 +528,12 @@ class WorkflowExecutor:
                 pvc_name: str = "",
                 image_pull_secret_name: str = "harbor",
                 node_name: str = "",
+                memory_request: str = "2Gi",
+                cpu_request: str = "500m",
+                memory_limit: str = "4Gi",
+                cpu_limit: str = "2000m",
+                kserve_gateway_url: str = "",
+                deployment_mode: str = "kserve",
             ) -> str:
                 import json
                 import logging
@@ -307,10 +553,13 @@ class WorkflowExecutor:
                 logging.basicConfig(level=logging.INFO)
                 logger = logging.getLogger(__name__)
 
+                namespace = "kubeflow-user-example-com"
+
+                # REMOTE는 파이프라인 상에서 `remote_deployment_notify` 컴포넌트로만 처리한다.
+
                 # Kubernetes 설정
                 k8s_config.load_incluster_config()
                 kserve_client = KServeClient()
-                namespace = "kubeflow-user-example-com"
 
                 # 인퍼런스 서비스 이름 생성 (DNS 1035 규칙 준수)
                 # DNS 1035 규칙:
@@ -389,23 +638,32 @@ class WorkflowExecutor:
                                 f"Please ensure model download pipeline completed successfully."
                             )
 
-                        # Ollama용 리소스 설정
+                        # Ollama용 리소스 설정 (§7.9 사전정의 메타 → 백엔드에서 동결된 request/limit)
                         ollama_resources = client.V1ResourceRequirements(
                             requests={
-                                "memory": "4Gi",
-                                "cpu": "500m",
+                                "memory": memory_request,
+                                "cpu": cpu_request,
                             },
                             limits={
-                                "memory": "8Gi",
-                                "cpu": "2000m",
+                                "memory": memory_limit,
+                                "cpu": cpu_limit,
                             },
                         )
+
+                        ollama_env = [
+                            client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
+                            client.V1EnvVar(name="COMPONENT_ID", value=component_id),
+                            client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                        ]
 
                         if gpus > 0:
                             gpu_count = str(gpus)
                             ollama_resources.requests["nvidia.com/gpu"] = gpu_count
                             ollama_resources.limits["nvidia.com/gpu"] = gpu_count
                             logger.info(f"Allocating {gpu_count} GPU(s) for model: {ollama_model_name}")
+                        else:
+                            ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
+                            logger.info(f"CPU-only mode for model: {ollama_model_name} (GPU access blocked)")
 
                         # 2. Deployment 생성
                         deployment = client.V1Deployment(
@@ -446,11 +704,7 @@ class WorkflowExecutor:
                                                     )
                                                 ],
                                                 resources=ollama_resources,
-                                                env=[
-                                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
-                                                    client.V1EnvVar(name="COMPONENT_ID", value=component_id),
-                                                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
-                                                ],
+                                                env=ollama_env,
                                                 volume_mounts=[
                                                     client.V1VolumeMount(
                                                         name="model-data",
@@ -556,8 +810,10 @@ class WorkflowExecutor:
                                 time.sleep(wait_interval)
                                 elapsed += wait_interval
 
+                        deploy_error_message: Optional[str] = None
                         if not deployment_ready:
-                            logger.warning(f"Deployment {service_name} not ready after {max_wait} seconds")
+                            deploy_error_message = f"Deployment {service_name} not ready after {max_wait} seconds"
+                            logger.warning(deploy_error_message)
 
                         # Deployment가 준비된 경우 모델을 미리 로드
                         if deployment_ready:
@@ -591,8 +847,11 @@ class WorkflowExecutor:
                                 # 모델 미리 로드 실패는 치명적이지 않으므로 경고만 기록하고 계속 진행
                                 logger.warning(f"Failed to preload Ollama model {ollama_model_name}: {preload_error}")
 
-                        # 배포 상태 결정
-                        deployment_status = "deployed" if deployment_ready else "deploying"
+                        # 배포 상태 결정 (준비 타임아웃은 failed로 기록 → DEPLOYING 잠금 해제·삭제 가능)
+                        if deployment_ready:
+                            deployment_status = "deployed"
+                        else:
+                            deployment_status = "failed"
 
                         # DB 업데이트를 위해 Backend API 호출
                         try:
@@ -601,23 +860,6 @@ class WorkflowExecutor:
                             if not rest_api_url:
                                 logger.warning("REST_API_URL not provided, skipping DB update")
                             else:
-                                # 토큰 발급
-                                auth_token = None
-                                if restapi_username and restapi_password:
-                                    try:
-                                        token_response = requests.post(
-                                            f"{rest_api_url}/api/v1/authentications/token",
-                                            data={"username": restapi_username, "password": restapi_password},
-                                            timeout=10,
-                                        )
-                                        if token_response.status_code == 200:
-                                            auth_token = token_response.json().get("access_token")
-                                            logger.info("Successfully obtained authentication token")
-                                        else:
-                                            logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                                    except Exception as token_error:
-                                        logger.warning(f"Failed to obtain auth token: {token_error}")
-
                                 update_url = (
                                     f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                     f"components/{component_id}/deployment-status"
@@ -625,16 +867,17 @@ class WorkflowExecutor:
 
                                 update_payload = {
                                     "service_name": service_name,
-                                    "service_hostname": service_hostname,  # Ollama는 빈 문자열이지만 형식 유지
+                                    "service_hostname": service_hostname,
                                     "model_name": ollama_model_name,
                                     "status": deployment_status,
                                     "internal_url": internal_url,
-                                    "error_message": None,
+                                    "error_message": deploy_error_message,
                                 }
 
-                                headers = {"Content-Type": "application/json"}
-                                if auth_token:
-                                    headers["Authorization"] = f"Bearer {auth_token}"
+                                headers = {
+                                    "Content-Type": "application/json",
+                                    "X-Internal-API-Key": internal_api_key,
+                                }
 
                                 logger.info("Updating Ollama deployment status via API: %s", update_url)
                                 response = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
@@ -667,6 +910,29 @@ class WorkflowExecutor:
                                         except Exception as workflow_update_error:
                                             logger.error(
                                                 f"Error updating workflow status to ACTIVE: {workflow_update_error}"
+                                            )
+                                    elif deployment_status == "failed":
+                                        try:
+                                            workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                            workflow_update_response = requests.put(
+                                                workflow_update_url,
+                                                json={"status": "ERROR"},
+                                                headers=headers,
+                                                timeout=10,
+                                            )
+                                            if workflow_update_response.status_code == 200:
+                                                logger.info(
+                                                    f"Successfully updated workflow {workflow_id} status to ERROR"
+                                                )
+                                            else:
+                                                logger.warning(
+                                                    "Failed to update workflow status to ERROR: "
+                                                    f"{workflow_update_response.status_code} - "
+                                                    f"{workflow_update_response.text}"
+                                                )
+                                        except Exception as workflow_update_error:
+                                            logger.error(
+                                                f"Error updating workflow status to ERROR: {workflow_update_error}"
                                             )
                                 else:
                                     status_code = response.status_code
@@ -706,39 +972,49 @@ class WorkflowExecutor:
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
 
-                    # 리소스 설정 (ephemeral-storage requests는 제거)
+                    # 리소스 설정 (§7.9 사전정의 메타 기반, ephemeral-storage requests는 제거)
                     resources = client.V1ResourceRequirements(
                         requests={
-                            "memory": "2Gi",
-                            "cpu": "200m",
-                            # ephemeral-storage requests 제거 - 노드 리소스 부족 시 스케줄링 방해 방지
+                            "memory": memory_request,
+                            "cpu": cpu_request,
                         },
-                        limits={"memory": "4Gi", "cpu": "500m", "ephemeral-storage": "1Gi"},  # 폭주 방지용 제한만 설정
+                        limits={
+                            "memory": memory_limit,
+                            "cpu": cpu_limit,
+                            "ephemeral-storage": "1Gi",
+                        },
                     )
+
+                    kserve_env = [
+                        client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
+                        client.V1EnvVar(name="COMPONENT_ID", value=component_id),
+                    ]
 
                     if gpus > 0:
                         gpu_count = str(gpus)
                         resources.requests["nvidia.com/gpu"] = gpu_count
                         resources.limits["nvidia.com/gpu"] = gpu_count
                         logger.info(f"Allocating {gpu_count} GPU(s) for MLflow model: {model_name}")
+                    else:
+                        kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
-                    # Predictor 스펙 생성
-                    predictor_spec = V1beta1PredictorSpec(
-                        min_replicas=1,
-                        containers=[
+                    # Predictor 스펙 생성 (§7: 백엔드에서 확정한 노드 → nodeSelector)
+                    pred_kwargs: Dict[str, Any] = {
+                        "min_replicas": 1,
+                        "containers": [
                             client.V1Container(
                                 name="kserve-container",
                                 image=infer_image_url,
                                 args=container_args,
                                 resources=resources,
-                                env=[
-                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id),
-                                    client.V1EnvVar(name="COMPONENT_ID", value=component_id),
-                                ],
+                                env=kserve_env,
                             )
                         ],
-                        image_pull_secrets=[client.V1LocalObjectReference(name=image_pull_secret_name)],
-                    )
+                        "image_pull_secrets": [client.V1LocalObjectReference(name=image_pull_secret_name)],
+                    }
+                    if node_name:
+                        pred_kwargs["node_selector"] = {"kubernetes.io/hostname": node_name}
+                    predictor_spec = V1beta1PredictorSpec(**pred_kwargs)
 
                     # InferenceService 생성
                     inference_service = V1beta1InferenceService(
@@ -770,6 +1046,7 @@ class WorkflowExecutor:
                     service_ready = False
                     evicted_count = 0
                     last_status = None
+                    rollout_failure_reason: Optional[str] = None
 
                     # Pod 상태 확인을 위한 k8s client
                     k8s_v1 = client.CoreV1Api()
@@ -792,12 +1069,27 @@ class WorkflowExecutor:
                             failed = any(c.get("type") == "Ready" and c.get("status") == "False" for c in conditions)
 
                             if failed:
-                                # 실패 이유 확인
+                                rollout_abort = False
+                                fatal_markers = (
+                                    "ImagePullBackOff",
+                                    "ErrImagePull",
+                                    "InvalidImageName",
+                                    "CreateContainerConfigError",
+                                )
                                 for c in conditions:
                                     if c.get("type") == "Ready" and c.get("status") == "False":
                                         reason = c.get("reason", "")
                                         message = c.get("message", "")
                                         logger.warning(f"Service not ready: {reason} - {message}")
+
+                                        combined = f"{reason} {message}"
+                                        if any(m in combined for m in fatal_markers):
+                                            rollout_failure_reason = (
+                                                f"InferenceService fatal readiness: {reason} — {message}"
+                                            )
+                                            logger.error(rollout_failure_reason)
+                                            rollout_abort = True
+                                            break
 
                                         # RevisionMissing은 Pod가 생성 중이거나 Evicted된 경우
                                         if "RevisionMissing" in reason or "Evicted" in message:
@@ -806,6 +1098,8 @@ class WorkflowExecutor:
                                                 f"Pod may have been evicted (count: {evicted_count}), "
                                                 f"waiting for retry..."
                                             )
+                                if rollout_abort:
+                                    break
 
                             # Pod 직접 확인 (Evicted 상태 감지)
                             try:
@@ -862,33 +1156,36 @@ class WorkflowExecutor:
                         time.sleep(wait_interval)
                         elapsed += wait_interval
 
+                    deploy_error_message: Optional[str] = None
                     if not service_ready:
-                        if evicted_count > 0:
-                            logger.warning(
-                                f"Service {service_name} not ready after {max_wait}s, "
-                                f"but detected {evicted_count} eviction(s)"
+                        if rollout_failure_reason:
+                            deploy_error_message = rollout_failure_reason
+                            logger.error(deploy_error_message)
+                        elif evicted_count > 0:
+                            deploy_error_message = (
+                                f"InferenceService {service_name} not ready after {max_wait}s "
+                                f"({evicted_count} pod eviction(s) observed; cluster may still retry)."
                             )
-                            logger.info("KServe will continue retrying in the background")
+                            logger.warning(deploy_error_message)
                         else:
-                            logger.warning(f"Service {service_name} may not be fully ready after {max_wait} seconds")
+                            deploy_error_message = f"InferenceService {service_name} not ready after {max_wait} seconds"
+                            logger.warning(deploy_error_message)
 
                     # 서비스 URL 정보 생성
                     internal_url = f"http://{service_name}.{namespace}.svc.cluster.local"
 
-                    # 외부 접근을 위한 정보 (Istio Gateway 경유)
-                    gateway_url = "http://10.10.30.154:80"  # Istio Gateway External IP
+                    # 외부 접근을 위한 정보 (Istio Gateway 경유) — 파이프라인에 주입된 설정만 사용(§2.6)
+                    gw = (kserve_gateway_url or "").strip().rstrip("/")
+                    gateway_url = gw if gw else ""
                     service_hostname = f"{service_name}.{namespace}.example.com"
 
                     config_dict = json.loads(config)
 
-                    # 상태 결정 (evicted 포함)
+                    # 상태 결정: 준비 완료만 deployed, 그 외(타임아웃·치명 조건)는 failed
                     if service_ready:
                         deployment_status = "deployed"
-                    elif evicted_count > 0:
-                        deployment_status = "deploying"  # Evicted 후 재시도 중
-                        logger.info(f"Setting status to 'deploying' due to {evicted_count} eviction(s)")
                     else:
-                        deployment_status = "deploying"  # 아직 배포 중
+                        deployment_status = "failed"
 
                     # DB 업데이트를 위해 Backend API 호출
                     try:
@@ -897,35 +1194,10 @@ class WorkflowExecutor:
                         if not rest_api_url:
                             logger.warning("REST_API_URL not provided, skipping DB update")
                         else:
-                            # 토큰 발급
-                            auth_token = None
-                            if restapi_username and restapi_password:
-                                try:
-                                    token_response = requests.post(
-                                        f"{rest_api_url}/api/v1/authentications/token",
-                                        data={"username": restapi_username, "password": restapi_password},
-                                        timeout=10,
-                                    )
-                                    if token_response.status_code == 200:
-                                        auth_token = token_response.json().get("access_token")
-                                        logger.info("Successfully obtained authentication token")
-                                    else:
-                                        logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                                except Exception as token_error:
-                                    logger.warning(f"Failed to obtain auth token: {token_error}")
-
                             update_url = (
                                 f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                 f"components/{component_id}/deployment-status"
                             )
-
-                            # error_message 설정
-                            error_msg = None
-                            if evicted_count > 0:
-                                error_msg = (
-                                    f"Pod evicted {evicted_count} time(s) due to node resource shortage, "
-                                    f"KServe retrying..."
-                                )
 
                             update_payload = {
                                 "service_name": service_name,
@@ -933,12 +1205,13 @@ class WorkflowExecutor:
                                 "model_name": model_name,
                                 "status": deployment_status,
                                 "internal_url": internal_url,
-                                "error_message": error_msg,
+                                "error_message": deploy_error_message,
                             }
 
-                            headers = {"Content-Type": "application/json"}
-                            if auth_token:
-                                headers["Authorization"] = f"Bearer {auth_token}"
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
 
                             logger.info("Updating deployment status via API: %s", update_url)
                             response = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
@@ -969,6 +1242,27 @@ class WorkflowExecutor:
                                         logger.error(
                                             f"Error updating workflow status to ACTIVE: {workflow_update_error}"
                                         )
+                                elif deployment_status == "failed":
+                                    try:
+                                        workflow_update_url = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                        workflow_update_response = requests.put(
+                                            workflow_update_url,
+                                            json={"status": "ERROR"},
+                                            headers=headers,
+                                            timeout=10,
+                                        )
+                                        if workflow_update_response.status_code == 200:
+                                            logger.info(f"Successfully updated workflow {workflow_id} status to ERROR")
+                                        else:
+                                            logger.warning(
+                                                "Failed to update workflow status to ERROR: "
+                                                f"{workflow_update_response.status_code} - "
+                                                f"{workflow_update_response.text}"
+                                            )
+                                    except Exception as workflow_update_error:
+                                        logger.error(
+                                            f"Error updating workflow status to ERROR: {workflow_update_error}"
+                                        )
                             else:
                                 logger.warning(
                                     f"Failed to update deployment status: {response.status_code} - {response.text}"
@@ -980,20 +1274,20 @@ class WorkflowExecutor:
 
                     # 메시지 생성
                     if service_ready:
-                        message = (
-                            f"Model deployed successfully. Access via gateway: {gateway_url} "
-                            f"with Host: {service_hostname}"
-                        )
-                    elif evicted_count > 0:
-                        message = (
-                            f"Model deployment in progress. Pod evicted {evicted_count} time(s) due to "
-                            f"node resource shortage. KServe is retrying automatically. "
-                            f"Service: {service_name}"
-                        )
+                        if gateway_url:
+                            message = (
+                                f"Model deployed successfully. Access via gateway: {gateway_url} "
+                                f"with Host: {service_hostname}"
+                            )
+                        else:
+                            message = (
+                                f"Model deployed successfully. KSERVE_GATEWAY_URL is not set; "
+                                f"use in-cluster URL: {internal_url}"
+                            )
                     else:
-                        message = (
-                            f"Model deployment in progress. Service: {service_name}. "
-                            f"Check status at gateway: {gateway_url} with Host: {service_hostname}"
+                        message = deploy_error_message or (
+                            f"Model deployment failed for service {service_name}. "
+                            f"See deployment-status error_message in DB."
                         )
 
                     result = {
@@ -1021,20 +1315,6 @@ class WorkflowExecutor:
                         import requests
 
                         if rest_api_url:
-                            # 토큰 발급
-                            auth_token = None
-                            if restapi_username and restapi_password:
-                                try:
-                                    token_response = requests.post(
-                                        f"{rest_api_url}/api/v1/authentications/token",
-                                        data={"username": restapi_username, "password": restapi_password},
-                                        timeout=10,
-                                    )
-                                    if token_response.status_code == 200:
-                                        auth_token = token_response.json().get("access_token")
-                                except Exception as token_error:
-                                    logger.warning(f"Failed to obtain auth token for failure update: {token_error}")
-
                             update_url = (
                                 f"{rest_api_url}/api/v1/workflows/{workflow_id}/"
                                 f"components/{component_id}/deployment-status"
@@ -1053,11 +1333,18 @@ class WorkflowExecutor:
                                 "error_message": str(e),
                             }
 
-                            headers = {"Content-Type": "application/json"}
-                            if auth_token:
-                                headers["Authorization"] = f"Bearer {auth_token}"
+                            headers = {
+                                "Content-Type": "application/json",
+                                "X-Internal-API-Key": internal_api_key,
+                            }
 
-                            requests.post(update_url, json=update_payload, headers=headers, timeout=10)
+                            fail_resp = requests.post(update_url, json=update_payload, headers=headers, timeout=10)
+                            if fail_resp.status_code == 200:
+                                try:
+                                    wu = f"{rest_api_url}/api/v1/workflows/{workflow_id}"
+                                    requests.put(wu, json={"status": "ERROR"}, headers=headers, timeout=10)
+                                except Exception as werr:
+                                    logger.warning(f"Could not set workflow to ERROR after deploy failure: {werr}")
                     except Exception as db_error:
                         logger.error(f"Failed to update DB with failure status: {db_error}")
 
@@ -1076,10 +1363,23 @@ class WorkflowExecutor:
             # repo_id 추출 (Ollama 모델용)
             repo_id_value = model.repo_id if model and model.repo_id else ""
 
-            # PVC 이름 추출 (Ollama 모델용)
-            pvc_name_value = ""
-            if model and hasattr(model, "registry") and model.registry:
+            plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
+            # §3: prepare 단계에서 확정한 PVC(원본 또는 노드 전용 복제본)
+            pvc_name_value = (plan.get("resolved_ollama_pvc") or "").strip()
+            if not pvc_name_value and model and hasattr(model, "registry") and model.registry:
                 pvc_name_value = model.registry.pvc or ""
+            gpu_n = int(plan.get("gpu_count", parameters.get("gpus", 0)) or 0)
+            mem_req = plan.get("memory_request") or "2Gi"
+            cpu_req = plan.get("cpu_request") or "500m"
+            mem_lim = plan.get("memory_limit") or mem_req
+            cpu_lim = plan.get("cpu_limit") or cpu_req
+            pin_node = (plan.get("serving_node_name") or parameters.get("node_name") or "").strip()
+
+            # §6 전까지 REMOTE는 deployment_type/파이프라인 분기 모두 미연동(resolve는 KSERVE|OLLAMA만).
+            if framework == "ollama":
+                deployment_mode = "ollama"
+            else:
+                deployment_mode = "kserve"
 
             return model_deployment_component(
                 workflow_id=str(workflow.id),
@@ -1094,60 +1394,20 @@ class WorkflowExecutor:
                 aws_access_key_id=parameters.get("aws_access_key_id", ""),
                 aws_secret_access_key=parameters.get("aws_secret_access_key", ""),
                 rest_api_url=parameters.get("rest_api_url", ""),
-                restapi_username=parameters.get("restapi_username", ""),
-                restapi_password=parameters.get("restapi_password", ""),
+                internal_api_key=parameters.get("internal_api_key", ""),
                 infer_image_url=settings.INFER_IMAGE_URL,
                 config=json.dumps(component.config or {}),
-                gpus=parameters.get("gpus", 0),
+                gpus=gpu_n,
                 repo_id=repo_id_value,
                 pvc_name=pvc_name_value,
                 image_pull_secret_name=parameters.get("image_pull_secret_name", "harbor"),
-                node_name=parameters.get("node_name", ""),
-            )
-
-        # END 컴포넌트
-        elif component.type == ComponentType.END:
-
-            @dsl.component(base_image="python:3.10-slim", packages_to_install=["requests"])
-            def end_component(
-                workflow_id: str,
-                component_id: str,
-                input_data: str = "{}",
-                config: str = "{}",
-                rest_api_url: str = "",
-                restapi_username: str = "",
-                restapi_password: str = "",
-            ) -> str:
-                import json
-                import logging
-
-                import requests
-
-                logging.info(f"Ending workflow {workflow_id}, component {component_id}")
-
-                input_dict = json.loads(input_data)
-                config_dict = json.loads(config)
-
-                # 결과 처리 로직
-                # 참고: 워크플로우 상태는 MODEL component에서 배포 완료 시 ACTIVE로 업데이트됨
-                result = {
-                    "workflow_id": workflow_id,
-                    "component_id": component_id,
-                    "status": "completed",
-                    "results": input_dict,
-                    "config": config_dict,
-                }
-
-                return json.dumps(result)
-
-            return end_component(
-                workflow_id=str(workflow.id),
-                component_id=component.id,
-                input_data="{}",  # 이전 태스크 출력 연결 필요
-                config=json.dumps(component.config or {}),
-                rest_api_url=parameters.get("rest_api_url", ""),
-                restapi_username=parameters.get("restapi_username", ""),
-                restapi_password=parameters.get("restapi_password", ""),
+                node_name=pin_node,
+                memory_request=mem_req,
+                cpu_request=cpu_req,
+                memory_limit=mem_lim,
+                cpu_limit=cpu_lim,
+                kserve_gateway_url=parameters.get("kserve_gateway_url", ""),
+                deployment_mode=deployment_mode,
             )
 
         return None
@@ -1162,10 +1422,10 @@ class WorkflowExecutor:
         Returns:
             정렬된 컴포넌트 리스트
         """
-        # 간단한 타입 기반 정렬 (실제로는 연결 정보 기반 토폴로지 정렬 필요)
-        type_order = {ComponentType.START: 0, ComponentType.MODEL: 1, ComponentType.END: 2}
+        # START/END는 파이프라인 태스크 없이 스킵되므로 MODEL만 정렬
+        model_components = [c for c in workflow.components if c.type not in (ComponentType.START, ComponentType.END)]
 
-        return sorted(workflow.components, key=lambda c: type_order.get(c.type, 99))
+        return sorted(model_components, key=lambda c: c.id)
 
     def _get_component_dependencies(self, component: WorkflowComponent, workflow: Workflow) -> List[str]:
         """
@@ -1180,12 +1440,13 @@ class WorkflowExecutor:
         """
         dependencies = []
 
-        # 컴포넌트 연결 정보에서 의존성 찾기
+        # START/END는 파이프라인 태스크가 없으므로 의존성에서 제외
+        skip_types = (ComponentType.START, ComponentType.END)
+
         for connection in workflow.component_connections:
             if connection.target_component_id == component.id:
-                # 소스 컴포넌트의 id 찾기
                 for comp in workflow.components:
-                    if comp.id == connection.source_component_id:
+                    if comp.id == connection.source_component_id and comp.type not in skip_types:
                         dependencies.append(comp.id)
                         break
 
@@ -1607,7 +1868,7 @@ class WorkflowExecutor:
         워크플로우 실행 상태 조회 (DB 기반)
 
         워크플로우의 기본 상태와 배포된 모델들의 상태를 조회합니다.
-        kserve_deployments 테이블의 정보를 기반으로 상태를 반환하며,
+        model_workflow_deployments 테이블의 정보를 기반으로 상태를 반환하며,
         Kubernetes나 Kubeflow를 직접 조회하지 않습니다.
 
         Args:
@@ -1619,19 +1880,19 @@ class WorkflowExecutor:
                 - status (str): 워크플로우 상태 (DRAFT/ACTIVE/ERROR)
                 - kubeflow_run_id (str, optional): Kubeflow 파이프라인 실행 ID
                 - deployed_models (List[Dict]): 배포된 모델 목록
-                    - 각 항목은 KServeDeploymentService.get_deployed_models()의 반환 형식과 동일
+                    - 각 항목은 ModelWorkflowDeploymentService.get_deployed_models()의 반환 형식과 동일
 
         Process:
             1. 워크플로우 기본 정보 수집 (id, status, kubeflow_run_id)
-            2. KServeDeploymentService.get_deployed_models()로 배포 정보 조회
+            2. ModelWorkflowDeploymentService.get_deployed_models()로 배포 정보 조회
             3. 결과 반환
 
         Note:
             - 모든 조회는 DB 기반으로 수행됩니다
             - kubeflow_run_id는 참조용으로만 포함되며, 실제 파이프라인 상태는 조회하지 않습니다
-            - 배포 상태는 kserve_deployments 테이블의 정보를 기반으로 합니다
+            - 배포 상태는 model_workflow_deployments 테이블의 정보를 기반으로 합니다
         """
-        from services.kserve_deployment import KServeDeploymentService
+        from services.model_workflow_deployment import ModelWorkflowDeploymentService
 
         status = {
             "workflow_id": str(workflow.id),
@@ -1640,10 +1901,10 @@ class WorkflowExecutor:
             "deployed_models": [],
         }
 
-        # DB 기반 배포 상태 조회 (kserve_deployments 테이블)
+        # DB 기반 배포 상태 조회 (model_workflow_deployments)
         if self.db:
             try:
-                deployed_models = KServeDeploymentService.get_deployed_models(
+                deployed_models = ModelWorkflowDeploymentService.get_deployed_models(
                     self.db, str(workflow.id), include_component_info=True
                 )
 

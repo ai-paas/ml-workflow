@@ -319,3 +319,7 @@ pyrightconfig.json
 
 # Credentials (접속 정보 등 민감 파일)
 .credentials.md
+
+# E2E 테스트 상태 파일 (ENV 미지정 / ENV별)
+.state.json
+.state.*.json

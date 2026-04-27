@@ -3,91 +3,13 @@
 import base64
 import io
 import logging
-import os
-import tempfile
-from typing import List, Optional
+from typing import Optional
 
 import gradio as gr
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 logger = logging.getLogger(__name__)
-
-
-def draw_predictions_on_image(image_path: str, predictions: List[dict], image_info: dict = None) -> np.ndarray:
-    """이미지에 예측 결과(bbox, label)를 그려서 반환"""
-    try:
-        # 이미지 로드
-        image = Image.open(image_path)
-        original_width, original_height = image.size
-        draw = ImageDraw.Draw(image)
-
-        # 폰트 설정 (기본 폰트 사용)
-        try:
-            font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 20)
-        except Exception:
-            font = ImageFont.load_default()
-
-        # 크기 비율 계산 (bbox를 원본 이미지 크기로 스케일링)
-        scale_x = 1.0
-        scale_y = 1.0
-
-        if image_info:
-            model_input_size = image_info.get("model_input_size", {})
-            model_height = model_input_size.get("height")
-            model_width = model_input_size.get("width")
-
-            if model_height and model_width:
-                scale_x = original_width / model_width
-                scale_y = original_height / model_height
-                logger.info(
-                    f"Scaling bbox: model_input={model_width}x{model_height}, "
-                    f"original={original_width}x{original_height}, "
-                    f"scale=({scale_x:.2f}, {scale_y:.2f})"
-                )
-
-        # 각 prediction에 대해 bbox와 label 그리기
-        for pred in predictions:
-            score = pred.get("score", 0)
-            label = pred.get("label", "unknown")
-            box = pred.get("box", [])
-
-            # box는 [xmin, ymin, xmax, ymax] 형식
-            if len(box) >= 4:
-                # box가 리스트의 리스트인 경우 ([Array(4)]) 처리
-                if isinstance(box[0], list):
-                    box = box[0]
-
-                # bbox를 원본 이미지 크기로 스케일링
-                xmin = box[0] * scale_x
-                ymin = box[1] * scale_y
-                xmax = box[2] * scale_x
-                ymax = box[3] * scale_y
-
-                # 바운딩 박스 그리기 (빨간색, 두께 3)
-                draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=3)
-
-                # 레이블 텍스트 (label + score)
-                text = f"{label}: {score:.2f}"
-
-                # 텍스트 배경 박스
-                text_bbox = draw.textbbox((xmin, ymin - 25), text, font=font)
-                draw.rectangle(text_bbox, fill="red")
-
-                # 텍스트 그리기 (흰색)
-                draw.text((xmin, ymin - 25), text, fill="white", font=font)
-
-        # numpy array로 변환하여 반환
-        return np.array(image)
-
-    except Exception as e:
-        logger.error(f"Failed to draw predictions on image: {e}")
-        # 에러 발생 시 원본 이미지 반환
-        try:
-            image = Image.open(image_path)
-            return np.array(image)
-        except Exception:
-            return None
 
 
 def create_playground_ui(app_state):
@@ -143,19 +65,19 @@ def create_playground_ui(app_state):
 
         with gr.Column(scale=1):
             gr.Markdown(
-                """### 3️⃣ 추론 실행
-            모델 타입에 따라 이미지 또는 텍스트를 입력하세요."""
+                """### 3️⃣ 워크플로 테스트 실행
+            백엔드 `POST .../test/ml`(이미지·ODM) 또는 `POST .../test/rag`(텍스트·RAG/LLM)로 **전체 그래프**를 실행합니다."""
             )
 
             image_input = gr.Image(
-                label="이미지 업로드 (KServe 모델용)",
+                label="이미지 업로드 (ODM / test/ml)",
                 type="filepath",
                 height=300,
                 visible=True,
             )
 
             text_input = gr.Textbox(
-                label="텍스트 입력 (Ollama 모델용)",
+                label="텍스트 입력 (RAG·LLM / test/rag)",
                 placeholder="텍스트를 입력하세요...",
                 lines=5,
                 visible=False,
@@ -506,153 +428,51 @@ def create_playground_ui(app_state):
         image_path: Optional[str],
         text: Optional[str],
     ):
-        """추론 실행"""
+        """워크플로 전체 그래프 테스트 (RAG/LLM: POST .../test/rag, ODM: POST .../test/ml)."""
         if not app_state.api_client:
             return "❌ 로그인이 필요합니다.", None, None, None
 
-        if not workflow_id or not component_id:
-            return "❌ 워크플로우 ID와 Component ID를 입력해주세요.", None, None, None
+        if not workflow_id:
+            return "❌ 워크플로우 ID를 입력해주세요.", None, None, None
 
-        # 모델 타입 확인
-        is_ollama_model = False
-        try:
-            workflow_info = app_state.api_client.get_workflow(workflow_id)
-            components = workflow_info.get("components", [])
-            for comp in components:
-                if comp.get("id") == component_id:
-                    model_info = comp.get("model")
-                    if model_info:
-                        model_format = model_info.get("format_info", {}).get("name", "").lower()
-                        provider_name = model_info.get("provider_info", {}).get("name", "").lower()
-                        if provider_name == "ollama" and model_format == "gguf":
-                            is_ollama_model = True
-                    break
-        except Exception as e:
-            logger.warning(f"Failed to check model type: {e}")
-
-        # 입력 검증
-        if is_ollama_model:
-            if not text:
-                return "❌ Ollama 모델은 텍스트 입력이 필요합니다.", None, None, None
-        else:
-            if not image_path:
-                return "❌ KServe 모델은 이미지 업로드가 필요합니다.", None, None, None
+        hint = ""
+        if not component_id:
+            hint = "\n(Component ID는 표시용입니다. API는 워크플로 전체 그래프를 실행합니다.)"
 
         try:
-            # 이미지가 있는 경우 먼저 메모리로 로드 (파일이 닫히는 것을 방지)
-            loaded_image = None
             if image_path:
-                try:
-                    loaded_image = Image.open(image_path)
-                    # 이미지를 메모리에 복사 (파일 핸들 닫힘 방지)
-                    loaded_image.load()
-                except Exception as e:
-                    logger.error(f"Failed to load image: {e}")
-                    return f"❌ 이미지 로드 실패: {str(e)}", None, None, None
+                result = app_state.api_client.test_ml_workflow(workflow_id, image_path)
+                status_msg = f"✅ ML(ODM) 워크플로 테스트 완료!{hint}\n- workflow_id: {result.get('workflow_id')}"
+                result_image = None
+                fr = result.get("final_result")
+                if fr:
+                    try:
+                        raw = base64.b64decode(fr)
+                        img = Image.open(io.BytesIO(raw))
+                        result_image = np.array(img)
+                    except Exception as e:
+                        logger.error(f"Failed to decode final_result image: {e}")
+                return status_msg, result_image, None, result
 
-            # 추론 요청
-            result = app_state.api_client.inference(
-                workflow_id=workflow_id,
-                component_id=component_id,
-                image_path=image_path,
-                text=text,
+            if text:
+                result = app_state.api_client.test_rag_workflow(workflow_id, text)
+                result_text = result.get("final_result") or ""
+                status_msg = (
+                    f"✅ RAG/LLM 워크플로 테스트 완료!{hint}\n"
+                    f"- workflow_id: {result.get('workflow_id')}\n"
+                    f"- execution_order: {result.get('execution_order', [])}"
+                )
+                return status_msg, None, result_text, result
+
+            return (
+                "❌ RAG/LLM 워크플로는 텍스트, ODM 워크플로는 이미지를 입력하세요.",
+                None,
+                None,
+                None,
             )
-
-            status_msg = (
-                f"✅ 추론 완료!\n"
-                f"- Workflow: {result.get('workflow_id')}\n"
-                f"- Component: {result.get('component_id')}"
-            )
-
-            # 통일된 응답 형식 처리
-            result_data = result.get("result", {})
-            model_type = result_data.get("model_type", "KServe")
-
-            result_image = None
-            result_text = None
-
-            if model_type == "Ollama":
-                # Ollama 모델 응답 처리
-                result_text = result_data.get("response", "")
-                status_msg += "\n- 모델 타입: LLM (Ollama)"
-            else:
-                # KServe 모델 응답 처리
-                predictions = result_data.get("predictions")
-                image_info = result_data.get("image_info", {})
-
-                if predictions:
-                    if isinstance(predictions, list):
-                        # 리스트 형태의 predictions (bbox, label, score 포함)
-                        logger.info(f"Predictions is a list with {len(predictions)} items")
-                        logger.info(f"Image info: {image_info}")
-                        try:
-                            # 로드된 이미지가 있으면 사용, 없으면 경로로 다시 로드
-                            if loaded_image:
-                                # 이미지를 임시 파일로 저장하여 draw_predictions_on_image 함수에 전달
-                                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-                                    loaded_image.save(tmp_file.name, format="JPEG")
-                                    tmp_path = tmp_file.name
-
-                                try:
-                                    # 원본 이미지에 predictions 그리기 (image_info 전달)
-                                    result_image = draw_predictions_on_image(tmp_path, predictions, image_info)
-                                    logger.info(f"Successfully drew {len(predictions)} predictions on image")
-                                finally:
-                                    # 임시 파일 삭제
-                                    try:
-                                        os.unlink(tmp_path)
-                                    except Exception:
-                                        pass
-                            else:
-                                # 이미지가 없는 경우 경로로 다시 시도
-                                result_image = draw_predictions_on_image(image_path, predictions, image_info)
-                                logger.info(f"Successfully drew {len(predictions)} predictions on image")
-
-                            # 상태 메시지에 감지된 객체 수 추가
-                            status_msg += f"\n- 감지된 객체: {len(predictions)}개"
-                        except Exception as e:
-                            logger.error(f"Failed to draw predictions: {e}", exc_info=True)
-                            # 에러 발생 시 원본 이미지 표시
-                            try:
-                                if loaded_image:
-                                    result_image = np.array(loaded_image)
-                                else:
-                                    image = Image.open(image_path)
-                                    result_image = np.array(image)
-                            except Exception as img_err:
-                                logger.error(f"Failed to load image for fallback: {img_err}")
-                                pass
-
-                    elif isinstance(predictions, str):
-                        # Base64 인코딩된 이미지 문자열인 경우
-                        try:
-                            image_bytes = base64.b64decode(predictions)
-                            image = Image.open(io.BytesIO(image_bytes))
-                            result_image = np.array(image)
-                            logger.info("Successfully decoded base64 image")
-                        except Exception as e:
-                            logger.error(f"Failed to decode base64 image: {e}")
-
-                    elif isinstance(predictions, dict):
-                        # JSON 객체인 경우 (바운딩 박스, 점수 등)
-                        logger.info(f"Predictions is a dict: {predictions.keys()}")
-                        # 이미지 데이터가 dict 안에 있을 수 있음
-                        if "image" in predictions and isinstance(predictions["image"], str):
-                            try:
-                                image_bytes = base64.b64decode(predictions["image"])
-                                image = Image.open(io.BytesIO(image_bytes))
-                                result_image = np.array(image)
-                                logger.info("Successfully decoded image from predictions dict")
-                            except Exception as e:
-                                logger.error(f"Failed to decode image from dict: {e}")
-
-                status_msg += "\n- 모델 타입: Object Detection (KServe)"
-
-            return status_msg, result_image, result_text, result
-
         except Exception as e:
-            logger.error(f"Inference failed: {e}")
-            return f"❌ 추론 실패: {str(e)}", None, None, None
+            logger.error(f"Workflow test failed: {e}")
+            return f"❌ 테스트 실패: {str(e)}", None, None, None
 
     # 이벤트 핸들러 연결
     refresh_workflows_btn.click(

@@ -53,6 +53,20 @@ def container_train(
 
     모델과 데이터셋을 사용하여 Kubeflow Pipeline 기반의 학습 파이프라인을 생성하고 실행합니다.
     요청은 전체 Body(JSON)로 통일되며, 학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+
+    ## Response (200, dict)
+    - **experiment_id** (int | null): 생성된 실험 ID. 파이프라인 생성/실행 실패 등으로 실험을 만들지 못한 경우 `null`일 수 있음.
+
+    ## Status (DB `experiment`와의 관계, 참고)
+    - 성공 시 새 실험 행은 **status = `CREATED`** 로 생성된 뒤,
+      MLflow·메트릭 폴링에 따라 `RUNNING` → 학습 정상 완료 시 `COMPLETED`(MLflow `FINISHED`에 대응), 실패 시 `FAILED` 등으로 갱신됨.
+    - 리모델링 설계(문서)에서는 완료 상태를 `FINISHED`로 표기하기도 하며, API/DB는 위와 같이 `COMPLETED`를 사용하는 경우가 일반적임.
+
+    ## Errors
+    - **400**: GPU 0 이하, 유효하지 않은 인자
+    - **401**: 미인증
+    - **404**: 모델/데이터셋 없음
+    - **500** 또는 `experiment_id: null`: 내부 오류(파이프라인 제출 실패 등)
     """
     model_id = body.model_id
     dataset_id = body.dataset_id
@@ -269,9 +283,19 @@ async def get_training_status(
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    @deprecated — GET /api/v1/experiments/{experiment_id} 사용 권장.
+    @deprecated — `GET /api/v1/experiments/{experiment_id}`(실험 상세) 사용 권장.
 
-    기존 Path Parameter 방식의 학습 상태 조회. 하위 호환을 위해 유지합니다.
+    MLflow run 기반으로 에폭·손실·AP 히스토리 등 **메트릭**을 돌려줍니다. `experiment` DB의
+    `status` / `train_msg`와는 별도 경로(조회 전용)입니다.
+
+    ## Response (`TrainingStatusResponse`) — `status` 필드
+    - **RUNNING**: MLflow run이 아직 끝나지 않은 경우(또는 메트릭이 진행 중으로 해석될 때)
+    - **FINISHED**: MLflow `run.info.status` 가
+      `FINISHED` 인 경우(조회 API 표기; DB `experiment.status` 는 동기화 시 `COMPLETED`로 저장될 수 있음)
+    - **FAILED**: MLflow run이 실패로 종료된 경우
+
+    ## Errors
+    - **404**: 실험 없음, 또는 MLflow run을 찾을 수 없음
     """
     try:
         monitor = PipelineTrainingMonitor(
@@ -322,6 +346,23 @@ def register_model(
 
     Query Parameter → Body(JSON) 변경. 응답이 객체로 확장되었으며,
     KFP run_id를 DB에 저장하고 백그라운드에서 등록 상태 폴링이 시작됩니다.
+
+    ## Response (`ModelRegistrationResponse`, 200)
+    - **accepted** (bool): 제출이 수락되었는지
+    - **experiment_id** (int): 대상 실험 ID(요청과 동일; 실패 응답에도 동일 ID가 올 수 있음)
+    - **message** (str): 안내 문구
+
+    ## `experiment.registration_status` (제출 이후, `GET /experiments/{id}` 로 확인)
+    - 제출 직전·미요청: **`NOT_REQUESTED`**
+    - 본 API로 KFP run이 잡힌 뒤: **`PIPELINE_SUBMITTED`**
+    - 백그라운드 폴링에 따라: **`SUCCESS`**(등록 완료, `registered_model_id` 채움) / **`FAILED`**(실패 또는 타임아웃)
+    - 동일한 등록·메시지는 응답 **model_register_msg** 등에 반영
+
+    ## Errors
+    - **400**: 실험 상태로 등록 불가, 바디 검증 실패
+    - **401**: 미인증
+    - **404**: 실험 없음
+    - **500**: 제출/파이프라인 오류(구현에 따라 `accepted: false` 등)
     """
     model_name = body.model_name
     description = body.description

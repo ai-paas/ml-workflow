@@ -9,7 +9,6 @@ from .knowledge_base import (
     Language,
     SearchMethod,
 )
-from .kserve_deployment import KServeDeployment
 from .model import (
     InferenceImageRegistry,
     Model,
@@ -20,6 +19,7 @@ from .model import (
     TrainImageRegistry,
 )
 from .model_base_deployment import ModelBaseDeployment
+from .model_workflow_deployment import ModelWorkflowDeployment
 from .prompt import Prompt, PromptVariable
 from .service import (
     ComponentConnection,

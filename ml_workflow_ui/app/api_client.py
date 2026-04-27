@@ -224,10 +224,9 @@ class APIClient:
         """워크플로우 상세 조회"""
         return self._get(f"/api/v1/workflows/{workflow_id}")
 
-    def execute_workflow(self, workflow_id: str, parameters: Optional[Dict] = None) -> Dict:
-        """워크플로우 실행"""
-        data = {"parameters": parameters or {}}
-        return self._post(f"/api/v1/workflows/{workflow_id}/execute", data=data)
+    def execute_workflow(self, workflow_id: str) -> Dict:
+        """워크플로우 실행 (요청 바디 없음 — 리소스는 백엔드가 결정)"""
+        return self._post(f"/api/v1/workflows/{workflow_id}/execute", data=None)
 
     def get_workflow_status(self, workflow_id: str) -> Dict:
         """워크플로우 실행 상태 조회"""
@@ -280,70 +279,21 @@ class APIClient:
         params = {"run_id": run_id}
         return self._post(f"/api/v1/workflows/{workflow_id}/finalize-deletion", params=params)
 
-    # ============= Inference =============
-    def inference(
-        self,
-        workflow_id: str,
-        component_id: str,
-        image_path: Optional[str] = None,
-        text: Optional[str] = None,
-    ) -> Dict:
-        """배포된 모델에 추론 요청
-
-        Args:
-            workflow_id: 워크플로우 ID (path parameter)
-            component_id: 컴포넌트 ID (path parameter)
-            image_path: 이미지 파일 경로 (KServe 모델인 경우 필수)
-            text: 텍스트 입력 (Ollama 모델인 경우 필수)
-
-        Returns:
-            {
-                "workflow_id": str,
-                "component_id": str,
-                "model_info": dict,
-                "result": {
-                    "model_type": "KServe" | "Ollama",
-                    "predictions": List[dict] | None,  # KServe 모델인 경우
-                    "image_info": dict | None,  # KServe 모델인 경우
-                    "response": str | None,  # Ollama 모델인 경우
-                    "full_response": dict | None  # Ollama 모델인 경우
-                },
-                "raw_response": dict | None  # 예상치 못한 형식인 경우
-            }
-        """
-        url = f"{self.base_url}/api/v1/workflows/{workflow_id}/models/{component_id}/inference"
+    # ============= Workflow test (전체 그래프) =============
+    def test_rag_workflow(self, workflow_id: str, text: str, timeout_sec: int = 600) -> Dict:
+        """RAG/LLM 워크플로 테스트 — POST .../test/rag (Form: text)."""
+        url = f"{self.base_url}/api/v1/workflows/{workflow_id}/test/rag"
         headers = {"Authorization": f"Bearer {self.token}"}
+        response = requests.post(url, headers=headers, data={"text": text}, timeout=timeout_sec)
+        response.raise_for_status()
+        return response.json()
 
-        # multipart/form-data 요청
-        files = {}
-        data = {}
-
-        if image_path:
-            # 파일을 열어둔 상태로 requests.post() 호출
-            with open(image_path, "rb") as f:
-                files["image"] = ("image.jpg", f, "image/jpeg")
-
-                if text:
-                    data["text"] = text
-
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    files=files if files else None,
-                    data=data if data else None,
-                )
-                response.raise_for_status()
-                return response.json()
-        else:
-            # 이미지가 없는 경우 (Ollama 모델)
-            if text:
-                data["text"] = text
-
-            response = requests.post(
-                url,
-                headers=headers,
-                files=files if files else None,
-                data=data if data else None,
-            )
-            response.raise_for_status()
-            return response.json()
+    def test_ml_workflow(self, workflow_id: str, image_path: str, timeout_sec: int = 600) -> Dict:
+        """ML(ODM) 워크플로 테스트 — POST .../test/ml (multipart: image)."""
+        url = f"{self.base_url}/api/v1/workflows/{workflow_id}/test/ml"
+        headers = {"Authorization": f"Bearer {self.token}"}
+        with open(image_path, "rb") as f:
+            files = {"image": ("image.jpg", f, "image/jpeg")}
+            response = requests.post(url, headers=headers, files=files, timeout=timeout_sec)
+        response.raise_for_status()
+        return response.json()

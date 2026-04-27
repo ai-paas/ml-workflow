@@ -254,8 +254,7 @@ class ModelBaseDeploymentService:
             gpu_enabled: bool,
             namespace: str,
             rest_api_url: str,
-            restapi_username: str,
-            restapi_password: str,
+            internal_api_key: str,
         ) -> str:
             import json  # noqa: F811
             import logging
@@ -330,9 +329,16 @@ class ModelBaseDeploymentService:
                     },
                 )
 
+                ollama_env = [
+                    client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
+                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                ]
+
                 if gpu_enabled:
                     ollama_resources.requests["nvidia.com/gpu"] = "1"
                     ollama_resources.limits["nvidia.com/gpu"] = "1"
+                else:
+                    ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
                 # 2. Deployment 생성
                 deployment = client.V1Deployment(
@@ -371,10 +377,7 @@ class ModelBaseDeploymentService:
                                             client.V1ContainerPort(container_port=11434, name="http", protocol="TCP")
                                         ],
                                         resources=ollama_resources,
-                                        env=[
-                                            client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
-                                            client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
-                                        ],
+                                        env=ollama_env,
                                         volume_mounts=[
                                             client.V1VolumeMount(
                                                 name="model-data",
@@ -480,23 +483,6 @@ class ModelBaseDeploymentService:
                     if not rest_api_url:
                         logger.warning("REST_API_URL not provided, skipping DB update")
                     else:
-                        # 토큰 발급
-                        auth_token = None
-                        if restapi_username and restapi_password:
-                            try:
-                                token_response = requests.post(
-                                    f"{rest_api_url}/api/v1/authentications/token",
-                                    data={"username": restapi_username, "password": restapi_password},
-                                    timeout=10,
-                                )
-                                if token_response.status_code == 200:
-                                    auth_token = token_response.json().get("access_token")
-                                    logger.info("Successfully obtained authentication token")
-                                else:
-                                    logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                            except Exception as token_error:
-                                logger.warning(f"Failed to obtain auth token: {token_error}")
-
                         update_url = f"{rest_api_url}/api/v1/models/base-deployments/{model_id}/status"
 
                         update_payload = {
@@ -507,9 +493,10 @@ class ModelBaseDeploymentService:
                             "error_message": None if deployment_ready else "Deployment not ready after timeout",
                         }
 
-                        headers = {"Content-Type": "application/json"}
-                        if auth_token:
-                            headers["Authorization"] = f"Bearer {auth_token}"
+                        headers = {
+                            "Content-Type": "application/json",
+                            "X-Internal-API-Key": internal_api_key,
+                        }
 
                         logger.info("Updating deployment status via API: %s", update_url)
                         response = requests.put(update_url, json=update_payload, headers=headers, timeout=10)
@@ -544,20 +531,6 @@ class ModelBaseDeploymentService:
                     import requests
 
                     if rest_api_url:
-                        # 토큰 발급
-                        auth_token = None
-                        if restapi_username and restapi_password:
-                            try:
-                                token_response = requests.post(
-                                    f"{rest_api_url}/api/v1/authentications/token",
-                                    data={"username": restapi_username, "password": restapi_password},
-                                    timeout=10,
-                                )
-                                if token_response.status_code == 200:
-                                    auth_token = token_response.json().get("access_token")
-                            except Exception as token_error:
-                                logger.warning(f"Failed to obtain auth token for failure update: {token_error}")
-
                         update_url = f"{rest_api_url}/api/v1/models/base-deployments/{model_id}/status"
 
                         update_payload = {
@@ -568,9 +541,10 @@ class ModelBaseDeploymentService:
                             "error_message": str(e),
                         }
 
-                        headers = {"Content-Type": "application/json"}
-                        if auth_token:
-                            headers["Authorization"] = f"Bearer {auth_token}"
+                        headers = {
+                            "Content-Type": "application/json",
+                            "X-Internal-API-Key": internal_api_key,
+                        }
 
                         requests.put(update_url, json=update_payload, headers=headers, timeout=10)
                 except Exception as db_error:
@@ -593,8 +567,7 @@ class ModelBaseDeploymentService:
             gpu_enabled=gpu_enabled,
             namespace=settings.KUBEFLOW_NAMESPACE,
             rest_api_url=settings.REST_API_URL,
-            restapi_username="surromind",  # 고정 사용자명
-            restapi_password=settings.DEMO_PASSWORD,
+            internal_api_key=settings.INTERNAL_API_KEY,
         )
 
     @staticmethod

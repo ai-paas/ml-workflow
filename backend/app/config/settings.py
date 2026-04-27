@@ -97,13 +97,68 @@ class Settings(BaseSettings):
     REST_API_URL: str = Field(..., description="REST API 기본 URL")
     DEMO_PASSWORD: str = Field(..., description="데모용 비밀번호")
     LOGIN_SECRET_KEY: str = Field(..., description="로그인 세션 암호화 키")
+    INTERNAL_API_KEY: str = Field(
+        default="",
+        description="내부 전용 API 인증에 사용할 키 (KFP 컴포넌트 콜백용). 서버 시작 시 SHA-256 해시로 검증.",
+    )
 
-    # KServe 설정
-    KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")
+    # KServe / 워크플로 서빙 공통
+    DEFAULT_TRY_GPU: bool = Field(
+        default=True,
+        description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU). "
+        "Ollama·KServe(HF 등) 워크플로 서빙 플래너가 동일하게 참고(§7.4).",
+    )
+    SERVING_DEFAULT_GPU_VRAM_BYTES: int = Field(
+        default=16 * 1024 * 1024 * 1024,
+        description="노드 라벨·오버라이드 없을 때 GPU 1장당 VRAM 바이트 기본값(§7.5). 인벤토리 기반 k 산정에도 사용.",
+    )
+    SERVING_NODE_NAMES: str = Field(
+        default="",
+        description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체(§7.3).",
+    )
+    SERVING_INCLUDE_CONTROL_PLANE_NODES: bool = Field(
+        default=False,
+        description="True일 때만 인벤토리에 control-plane/master 역할 노드 포함. "
+        "기본 False — 서빙 자원 집계·노드 선택에서 제외(단일 노드 클러스터 테스트 시에만 True 권장).",
+    )
+    SERVING_NODE_VRAM_OVERRIDES_JSON: str = Field(
+        default="{}",
+        description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8} (§7.10)',
+    )
+    SERVING_PIN_SELECTED_NODE: bool = Field(
+        default=True,
+        description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임(§7.7).",
+    )
     KSERVE_GATEWAY_URL: str = Field(
-        default="http://10.10.30.154:80",
-        description="KServe Istio Gateway URL \
-(외부 접근용)",
+        default="",
+        description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공(§2.6).",
+    )
+    REMOTE_SERVING_API_URL: str = Field(
+        default="",
+        description="§6: 원격 LLM 단일 추론 베이스 URL. REMOTE 배포 시 remote_api_url에 저장·추론 시 사용(스펙·인증은 §6.5 미정).",
+    )
+    REMOTE_SERVING_MODEL_MAP: str = Field(
+        default="{}",
+        description='§6: 플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
+    )
+
+    # §12 Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)
+    CINDER_ZONE_MATCH_ENABLED: bool = Field(
+        default=False,
+        description="§12: Ollama 워크플로 PVC는 노드 topology zone 과 레지스트리 SC availability 를 맞춤. false면 기존 §3.3만.",
+    )
+    CINDER_ZONE_TO_STORAGE_CLASS_JSON: str = Field(
+        default="{}",
+        description='§12: node_zone(키)→StorageClass 이름. \
+            동일 availability SC가 복수일 때 강제. 예: {"gpu":"csi-cinder-sc-delete-gpu"}',
+    )
+    CINDER_NODE_TOPOLOGY_KEY: str = Field(
+        default="topology.cinder.csi.openstack.org/zone",
+        description="§12: OpenStack/Cinder CSI 노드 topology 라벨 키.",
+    )
+    CINDER_CSI_PROVISIONER: str = Field(
+        default="cinder.csi.openstack.org",
+        description="§12: storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
     )
 
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(

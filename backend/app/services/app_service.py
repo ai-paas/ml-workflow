@@ -7,10 +7,10 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from config.settings import get_settings
-from db.models.kserve_deployment import DeploymentStatus
+from db.models.model_workflow_deployment import DeploymentStatus
 from db.models.service import Service, ServiceMonitoring, Workflow, WorkflowStatus
 from repos.app_service import service_monitoring_repository, service_repository
-from repos.kserve_deployment import kserve_deployment_repository
+from repos.model_workflow_deployment import model_workflow_deployment_repository
 from repos.workflow import workflow_repository
 from schemas.app_service import (
     DeploymentResourceUsage,
@@ -227,11 +227,11 @@ class AppServiceService:
             # 서비스에 속한 모든 워크플로우 조회
             for workflow in service.workflows:
                 # 워크플로우의 배포된 모델 조회
-                kserve_deployments = kserve_deployment_repository.get_by_workflow(
+                model_deployments = model_workflow_deployment_repository.get_by_workflow(
                     db, workflow.id, DeploymentStatus.DEPLOYED
                 )
 
-                for kserve_deployment in kserve_deployments:
+                for wf_deployment in model_deployments:
                     pods: List[PodResourceUsage] = []
                     deployment_cpu_usage = 0.0
                     deployment_memory_usage = 0
@@ -239,7 +239,7 @@ class AppServiceService:
 
                     # KServe InferenceService의 경우 pod 이름 패턴: {service_name}-predictor-{revision}-{random}
                     # 일반 Service의 경우: {service_name}-{random}
-                    service_name = kserve_deployment.service_name
+                    service_name = wf_deployment.service_name
 
                     try:
                         # InferenceService인지 확인
@@ -447,11 +447,11 @@ class AppServiceService:
                     if pods:
                         deployments.append(
                             DeploymentResourceUsage(
-                                deployment_id=kserve_deployment.id,
+                                deployment_id=wf_deployment.id,
                                 service_name=service_name,
                                 workflow_id=workflow.id,
-                                component_id=kserve_deployment.component_id,
-                                model_name=kserve_deployment.model_name,
+                                component_id=wf_deployment.component_id,
+                                model_name=wf_deployment.model_name,
                                 pods=pods,
                             )
                         )
