@@ -142,6 +142,25 @@ class Settings(BaseSettings):
         description='§6: 플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
     )
 
+    # §12 Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)
+    CINDER_ZONE_MATCH_ENABLED: bool = Field(
+        default=False,
+        description="§12: Ollama 워크플로 PVC는 노드 topology zone 과 레지스트리 SC availability 를 맞춤. false면 기존 §3.3만.",
+    )
+    CINDER_ZONE_TO_STORAGE_CLASS_JSON: str = Field(
+        default="{}",
+        description='§12: node_zone(키)→StorageClass 이름. \
+            동일 availability SC가 복수일 때 강제. 예: {"gpu":"csi-cinder-sc-delete-gpu"}',
+    )
+    CINDER_NODE_TOPOLOGY_KEY: str = Field(
+        default="topology.cinder.csi.openstack.org/zone",
+        description="§12: OpenStack/Cinder CSI 노드 topology 라벨 키.",
+    )
+    CINDER_CSI_PROVISIONER: str = Field(
+        default="cinder.csi.openstack.org",
+        description="§12: storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
+    )
+
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
         default="harbor",
         description="Kubeflow Pipeline에서 사용할 imagePullSecret 이름 \

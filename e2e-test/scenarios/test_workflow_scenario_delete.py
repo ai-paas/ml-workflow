@@ -1,7 +1,8 @@
 """
 E2E 시나리오: 워크플로우 시나리오 삭제 테스트
 
-.state.json 의 scenario_N_deployments (또는 레거시 단일 키)에서 배포 기록을 읽는다.
+상태 파일(.state.json 또는 ENV별 .state.{ENV}.json)의 scenario_N_deployments (또는 레거시 단일 키)에서 배포 기록을 읽는다.
+deploy 때와 동일한 ENV 로 실행해야 해당 환경의 기록을 읽는다.
 같은 시나리오로 여러 번 배포한 경우 건별로 삭제 여부를 묻고, y 일 때만 API 삭제를 수행한다.
 
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
@@ -23,7 +24,7 @@ import time
 
 import pytest
 import requests
-from config import DELETE_TIMEOUT_SEC, POLL_INTERVAL_SEC, SCENARIO_NUM
+from config import DELETE_TIMEOUT_SEC, POLL_INTERVAL_SEC, SCENARIO_NUM, STATE_FILE
 from workflow_scenarios import get_scenario, load_deployment_entries, remove_deployment_entry_by_workflow_id
 
 SCENARIO = get_scenario(SCENARIO_NUM)
@@ -125,7 +126,7 @@ def _delete_one_deployment(api_url: str, auth_headers: dict, dep: dict) -> None:
         _delete_prompts(api_url, auth_headers, prompt_ids)
 
     remove_deployment_entry_by_workflow_id(SCENARIO_NUM, wf_id)
-    print(f"  ✔ .state.json 에서 기록 제거: workflow_id={wf_id}")
+    print(f"  ✔ {STATE_FILE.name} 에서 기록 제거: workflow_id={wf_id}")
 
 
 @pytest.mark.workflow_scenario_delete
@@ -134,13 +135,15 @@ def test_interactive_delete_scenario_deployments(api_url: str, auth_headers: dic
     print(f"\n{'=' * 60}")
     print(f"  시나리오 #{SCENARIO_NUM}: {SCENARIO['name']}")
     print(f"  구성: {SCENARIO['graph']}")
+    print(f"  상태 파일: {STATE_FILE.name}")
     print(f"{'=' * 60}")
 
     entries = load_deployment_entries(SCENARIO_NUM)
     if not entries:
         pytest.fail(
-            f"시나리오 #{SCENARIO_NUM} 에 저장된 배포 기록이 없습니다.\n"
-            f"먼저 make e2e-wf-scenario-deploy SCENARIO={SCENARIO_NUM} 을 실행하세요."
+            f"시나리오 #{SCENARIO_NUM} 에 저장된 배포 기록이 없습니다. ({STATE_FILE.name})\n"
+            f"먼저 deploy 를 실행하세요. 예: make e2e-wf-scenario-deploy SCENARIO={SCENARIO_NUM}"
+            + (" ENV=… (deploy 때와 동일)" if STATE_FILE.name != ".state.json" else "")
         )
 
     total = len(entries)

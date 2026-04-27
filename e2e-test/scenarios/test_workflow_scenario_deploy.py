@@ -3,7 +3,8 @@ E2E 시나리오: 워크플로우 시나리오 배포 테스트
 
 §5.2 시나리오 1~7 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
 삭제는 포함하지 않는다. 별도 삭제: make e2e-wf-scenario-delete SCENARIO=N (저장된 배포 건별 확인)
-같은 SCENARIO 로 재실행 시 이전 배포를 덮어쓰지 않고 .state.json 의 scenario_N_deployments 목록에 추가된다.
+같은 SCENARIO 로 재실행 시 이전 배포를 덮어쓰지 않고 상태 파일의 scenario_N_deployments 목록에 추가된다.
+(ENV= 지정 시 e2e-test/.state.{ENV}.json, 미지정 시 .state.json)
 
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
 
@@ -18,6 +19,7 @@ E2E 시나리오: 워크플로우 시나리오 배포 테스트
   8. 추론 테스트
 """
 
+import os
 import time
 import uuid
 
@@ -32,6 +34,7 @@ from config import (
     KB_TOP_K,
     POLL_INTERVAL_SEC,
     SCENARIO_NUM,
+    STATE_FILE,
     TARGET_EMBEDDING_MODEL_NAME,
     TARGET_MODEL_NAME,
 )
@@ -82,6 +85,7 @@ class TestWorkflowScenarioDeploy:
         print(f"  구성: {SCENARIO['graph']}")
         print(f"  KB: {kb_info}")
         print(f"  프롬프트: {len(SCENARIO['prompts'])}개")
+        print(f"  상태 파일: {STATE_FILE.name}")
         print(f"{'=' * 60}")
 
         model = self._find_model_by_name(api_url, auth_headers, TARGET_MODEL_NAME)
@@ -305,4 +309,8 @@ class TestWorkflowScenarioDeploy:
 
         print("\n✔ 추론 성공")
         print(f"  final_result: {data['final_result'][:100]}{'…' if len(data['final_result']) > 100 else ''}")
-        print(f"\n  ℹ 삭제하려면: make e2e-wf-scenario-delete SCENARIO={SCENARIO_NUM}")
+        _env = (os.environ.get("ENV") or "").strip()
+        if _env:
+            print(f"\n  ℹ 삭제하려면: make e2e-wf-scenario-delete SCENARIO={SCENARIO_NUM} ENV={_env}")
+        else:
+            print(f"\n  ℹ 삭제하려면: make e2e-wf-scenario-delete SCENARIO={SCENARIO_NUM}")

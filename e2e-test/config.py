@@ -7,10 +7,16 @@
    해당 파일이 없으면 경고만 하고, 셸에 이미 설정된 환경 변수만 사용.
 
 예: make e2e-wf-scenario-deploy SCENARIO=1 ENV=dev → .env 후 .env.dev 적용.
+
+배포/삭제 시나리오 상태 파일(.state):
+  - ENV 미지정: e2e-test/.state.json (기존과 동일)
+  - ENV 지정: e2e-test/.state.{ENV}.json (환경별 분리)
+  delete / lifecycle 중 배포 기록을 쓰는 단계는 deploy 때와 동일한 ENV 로 실행해야 한다.
 """
 
 import json
 import os
+import re
 import warnings
 from pathlib import Path
 
@@ -19,6 +25,23 @@ from dotenv import load_dotenv
 _E2E_ROOT = Path(__file__).parent
 _SHARED_ENV = _E2E_ROOT / ".env"
 _ENV_SUFFIX = (os.environ.get("ENV") or "").strip()
+# 파일명에 쓸 ENV 슬러그 (경로 이탈·특수문자 방지)
+_STATE_ENV_SLUG = ""
+if _ENV_SUFFIX:
+    if "/" in _ENV_SUFFIX or "\\" in _ENV_SUFFIX:
+        warnings.warn(
+            "E2E: ENV에 경로 구분자가 있어 상태 파일 분리를 건너뜁니다. (.state.json 사용)",
+            stacklevel=1,
+        )
+    else:
+        cand = re.sub(r"[^a-zA-Z0-9._-]+", "_", _ENV_SUFFIX).strip("._")
+        if cand and ".." not in cand:
+            _STATE_ENV_SLUG = cand
+        else:
+            warnings.warn(
+                f"E2E: ENV={_ENV_SUFFIX!r} 은 상태 파일명에 부적합하여 .state.json 만 사용합니다.",
+                stacklevel=1,
+            )
 
 if _SHARED_ENV.is_file():
     load_dotenv(_SHARED_ENV, override=False)
@@ -70,7 +93,7 @@ KB_FILES: list[Path] = [
 ]
 
 # ── 시나리오 간 상태 공유 ──────────────────────────────────────────────────
-STATE_FILE: Path = Path(__file__).parent / ".state.json"
+STATE_FILE: Path = _E2E_ROOT / f".state.{_STATE_ENV_SLUG}.json" if _STATE_ENV_SLUG else _E2E_ROOT / ".state.json"
 
 
 def save_state(key: str, value: str) -> None:

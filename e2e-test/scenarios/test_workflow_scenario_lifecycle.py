@@ -3,6 +3,7 @@ E2E 시나리오: 워크플로우 시나리오 전체 생명주기 테스트
 
 §5.2 시나리오 1~7 중 하나를 선택하여 생성 → 배포 → 추론 → 삭제 전체를 검증한다.
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
+배포 기록(.state*.json)은 쓰지 않는다. ENV= 는 .env 로딩·API URL 등에만 사용한다.
 
 흐름:
   1.  GET  /models                          — LLM 모델 검색

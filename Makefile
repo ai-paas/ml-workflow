@@ -209,9 +209,9 @@ e2e-workflow-validation:
 # 1: 단순 LLM  2: 단순 RAG  3~9: 복합 시나리오 (체인/병렬/쿼리정제 등)
 #   make e2e-wf-scenario-info                    # 전체 시나리오 목록
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
-#   make e2e-wf-scenario-deploy SCENARIO=3 ENV=dev     # 3번 배포 (.env.dev 적용)
-#   make e2e-wf-scenario-delete SCENARIO=3              # 3번 시나리오 저장 건별 삭제 확인(y)
-#   make e2e-wf-scenario-lifecycle SCENARIO=3           # 3번 시나리오 전체 생명주기
+#   make e2e-wf-scenario-deploy SCENARIO=3 ENV=dev     # 3번 배포 (.env.dev + e2e-test/.state.dev.json)
+#   make e2e-wf-scenario-delete SCENARIO=3 ENV=dev     # deploy 와 동일 ENV → 같은 상태 파일에서 삭제
+#   make e2e-wf-scenario-lifecycle SCENARIO=3 ENV=dev   # 생명주기(한 번에 생성~삭제, 상태 파일 미사용)
 
 e2e-wf-scenario-info:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-info SCENARIO=1" && exit 1)

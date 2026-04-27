@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.settings import get_settings
 from core.serving.workflow_serving_volume_lock import (
@@ -59,6 +60,140 @@ def _load_core_v1():
     return client.CoreV1Api()
 
 
+def _load_storage_v1():
+    from kubernetes import client
+    from kubernetes import config as k8s_config
+
+    try:
+        k8s_config.load_incluster_config()
+    except Exception:
+        k8s_config.load_kube_config()
+    return client.StorageV1Api()
+
+
+def _cinder_zone_sc_map(settings: Any) -> Dict[str, str]:
+    raw = (settings.CINDER_ZONE_TO_STORAGE_CLASS_JSON or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        logger.warning("CINDER_ZONE_TO_STORAGE_CLASS_JSON 파싱 실패, 빈 맵 사용")
+        return {}
+
+
+def _get_node_topology_zone(core_v1: "CoreV1Api", node_name: str, label_key: str) -> Optional[str]:
+    try:
+        node = core_v1.read_node(name=node_name)
+    except Exception as e:
+        logger.warning("노드 조회 실패 (zone 생략): %s %s", node_name, e)
+        return None
+    labels = (node.metadata.labels or {}) if node and node.metadata else {}
+    z = labels.get(label_key)
+    return str(z).strip() if z is not None and str(z).strip() else None
+
+
+def _get_storage_class_availability(storage_v1: Any, sc_name: str) -> Optional[str]:
+    try:
+        sc = storage_v1.read_storage_class(name=sc_name)
+    except Exception as e:
+        logger.warning("StorageClass 조회 실패: %s %s", sc_name, e)
+        return None
+    params = sc.parameters or {}
+    if not isinstance(params, dict):
+        return None
+    av = params.get("availability")
+    return str(av).strip() if av is not None and str(av).strip() else None
+
+
+def _list_cinder_sc_availability_pairs(provisioner: str) -> List[Tuple[str, str]]:
+    """(storageClassName, parameters.availability) — provisioner 일치하는 SC만."""
+    storage_v1 = _load_storage_v1()
+    out: List[Tuple[str, str]] = []
+    try:
+        lst = storage_v1.list_storage_class()
+    except Exception as e:
+        logger.warning("StorageClass 목록 조회 실패: %s", e)
+        return []
+    for sc in lst.items or []:
+        if (sc.provisioner or "") != provisioner:
+            continue
+        name = sc.metadata.name if sc.metadata else None
+        if not name:
+            continue
+        params = sc.parameters or {}
+        if not isinstance(params, dict):
+            continue
+        av = params.get("availability")
+        if av is None or not str(av).strip():
+            continue
+        out.append((name, str(av).strip()))
+    return out
+
+
+def _select_storage_class_name_for_cinder_zone(node_zone: str) -> str:
+    """§12.3.4: node_zone 과 parameters.availability 가 일치하는 Cinder SC 이름. 없거나 모호하면 ValueError."""
+    from config.settings import get_settings
+
+    s = get_settings()
+    zone_map = _cinder_zone_sc_map(s)
+    if node_zone in zone_map:
+        want = zone_map[node_zone]
+        storage_v1 = _load_storage_v1()
+        try:
+            sc = storage_v1.read_storage_class(name=want)
+        except Exception as e:
+            raise ValueError(
+                f"Cinder zone 정합성: CINDER_ZONE_TO_STORAGE_CLASS_JSON 의 SC '{want}' 를 조회할 수 없습니다: {e}"
+            ) from e
+        if (sc.provisioner or "") != s.CINDER_CSI_PROVISIONER:
+            raise ValueError(
+                f"Cinder zone 정합성: SC '{want}' 의 provisioner 가 기대와 다릅니다 ({s.CINDER_CSI_PROVISIONER})."
+            )
+        params = sc.parameters or {}
+        av = params.get("availability") if isinstance(params, dict) else None
+        if not av or str(av).strip() != node_zone:
+            raise ValueError(
+                f"Cinder zone 정합성: SC '{want}' 의 availability({av!r}) 가 node_zone({node_zone!r}) 과 일치하지 않습니다."
+            )
+        return want
+
+    pairs = _list_cinder_sc_availability_pairs(s.CINDER_CSI_PROVISIONER)
+    cands = [name for name, av in pairs if av == node_zone]
+    if len(cands) == 0:
+        raise ValueError(
+            f"Cinder zone 정합성: node_zone='{node_zone}' 에 해당하는 StorageClass가 없습니다 "
+            f"(provisioner={s.CINDER_CSI_PROVISIONER}, parameters.availability 일치). "
+            f"클러스터에 해당 availability 의 SC를 추가하거나 CINDER_ZONE_TO_STORAGE_CLASS_JSON 을 설정하세요."
+        )
+    if len(cands) == 1:
+        return cands[0]
+    raise ValueError(
+        f"Cinder zone 정합성: availability='{node_zone}' 인 StorageClass가 복수입니다: {cands}. "
+        f"CINDER_ZONE_TO_STORAGE_CLASS_JSON 에 해당 zone 키로 하나만 지정하세요."
+    )
+
+
+def _registry_pvc_storage_class_and_zone(
+    core_v1: "CoreV1Api", namespace: str, registry_pvc: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """(storageClassName, SC parameters.availability) — PVC spec SC 가 없으면 (None, None)."""
+    try:
+        pvc = core_v1.read_namespaced_persistent_volume_claim(name=registry_pvc, namespace=namespace)
+    except Exception as e:
+        logger.warning("레지스트리 PVC 조회 실패: %s %s", registry_pvc, e)
+        return None, None
+    scn = None
+    if pvc.spec and pvc.spec.storage_class_name:
+        scn = pvc.spec.storage_class_name.strip() or None
+    if not scn:
+        return None, None
+    storage_v1 = _load_storage_v1()
+    av = _get_storage_class_availability(storage_v1, scn)
+    return scn, av
+
+
 def _wait_pvc_bound(
     core_v1: "CoreV1Api",
     namespace: str,
@@ -100,6 +235,7 @@ def _create_pvc_clone_from_source(
     new_pvc_name: str,
     model_id: int,
     serving_node_name: str,
+    storage_class_name_override: Optional[str] = None,
 ) -> None:
     from kubernetes import client
 
@@ -107,6 +243,8 @@ def _create_pvc_clone_from_source(
     spec = src.spec
     if spec is None:
         raise RuntimeError(f"PVC {source_pvc_name} has empty spec")
+
+    sc_name = storage_class_name_override if storage_class_name_override else spec.storage_class_name
 
     ds = client.V1TypedLocalObjectReference(
         api_group="",
@@ -116,7 +254,7 @@ def _create_pvc_clone_from_source(
     new_spec = client.V1PersistentVolumeClaimSpec(
         access_modes=list(spec.access_modes or ["ReadWriteOnce"]),
         resources=spec.resources,
-        storage_class_name=spec.storage_class_name,
+        storage_class_name=sc_name,
         volume_mode=spec.volume_mode,
         data_source=ds,
     )
@@ -196,26 +334,40 @@ def _live_deployments_for_model(db: Any, model_id: int) -> Any:
     )
 
 
-def resolve_ollama_pvc_for_execute(
+def _clone_and_track(
+    model_id: int,
+    serving_node_name: str,
+    registry_pvc: str,
+    rollback_clone_pvcs: List[str],
+    storage_class_name_override: Optional[str] = None,
+) -> str:
+    new_name = _clone_pvc_name(model_id, serving_node_name)
+    ns = get_settings().KUBEFLOW_NAMESPACE
+    core = _load_core_v1()
+    _create_pvc_clone_from_source(
+        core,
+        ns,
+        registry_pvc,
+        new_name,
+        model_id,
+        serving_node_name,
+        storage_class_name_override=storage_class_name_override,
+    )
+    rollback_clone_pvcs.append(new_name)
+    return new_name
+
+
+def _resolve_ollama_pvc_execute_legacy(
     db: "Session",
     *,
     model_id: int,
-    registry_pvc: Optional[str],
+    registry_pvc: str,
     serving_node_name: str,
     rollback_clone_pvcs: List[str],
     vol_lock: Optional[WorkflowServingVolumeLock] = None,
 ) -> str:
-    """§3.3: 이번 Ollama 배포에 쓸 PVC 이름. 복제 시 vol_lock으로 직렬화."""
+    """§3.3: Cinder zone 매칭 비활성 시 동작."""
     lock = vol_lock or get_workflow_serving_volume_lock()
-
-    if not registry_pvc:
-        return ""
-
-    if not serving_node_name:
-        logger.warning(
-            "serving_node_name 비어 있음 — §3.3 노드 분기 생략, 레지스트리 원본 PVC 사용 (model_id=%s)", model_id
-        )
-        return registry_pvc
 
     live_rows = _live_deployments_for_model(db, model_id).all()
 
@@ -246,14 +398,136 @@ def resolve_ollama_pvc_for_execute(
         if not _any_live_uses_original_on_other_node(live_rows2, registry_pvc, serving_node_name):
             return registry_pvc
 
-        new_name = _clone_pvc_name(model_id, serving_node_name)
-        ns = get_settings().KUBEFLOW_NAMESPACE
-        core = _load_core_v1()
-        _create_pvc_clone_from_source(core, ns, registry_pvc, new_name, model_id, serving_node_name)
-        rollback_clone_pvcs.append(new_name)
-        return new_name
+        return _clone_and_track(
+            model_id, serving_node_name, registry_pvc, rollback_clone_pvcs, storage_class_name_override=None
+        )
     finally:
         lock.release(lk)
+
+
+def resolve_ollama_pvc_for_execute(
+    db: "Session",
+    *,
+    model_id: int,
+    registry_pvc: Optional[str],
+    serving_node_name: str,
+    rollback_clone_pvcs: List[str],
+    vol_lock: Optional[WorkflowServingVolumeLock] = None,
+) -> str:
+    """§3.3 / §12: 이번 Ollama 배포에 쓸 PVC 이름. 복제 시 vol_lock으로 직렬화."""
+    lock = vol_lock or get_workflow_serving_volume_lock()
+    s = get_settings()
+
+    if not registry_pvc:
+        return ""
+
+    if not serving_node_name:
+        logger.warning(
+            "serving_node_name 비어 있음 — §3.3 노드 분기 생략, 레지스트리 원본 PVC 사용 (model_id=%s)", model_id
+        )
+        return registry_pvc
+
+    if not s.CINDER_ZONE_MATCH_ENABLED:
+        return _resolve_ollama_pvc_execute_legacy(
+            db,
+            model_id=model_id,
+            registry_pvc=registry_pvc,
+            serving_node_name=serving_node_name,
+            rollback_clone_pvcs=rollback_clone_pvcs,
+            vol_lock=lock,
+        )
+
+    core = _load_core_v1()
+    ns = s.KUBEFLOW_NAMESPACE
+    node_zone = _get_node_topology_zone(core, serving_node_name, s.CINDER_NODE_TOPOLOGY_KEY)
+    _, reg_av = _registry_pvc_storage_class_and_zone(core, ns, registry_pvc)
+    cinder_data_ok = bool(node_zone and reg_av is not None)
+
+    live_rows = _live_deployments_for_model(db, model_id).all()
+
+    if cinder_data_ok and node_zone is not None and reg_av is not None:
+        if node_zone == reg_av:
+            if not _any_live_uses_original_on_other_node(live_rows, registry_pvc, serving_node_name):
+                return registry_pvc
+            lk = serving_volume_lock_key(model_id, serving_node_name)
+            if not lock.try_acquire_nonblocking(lk):
+                raise PvcReplicationConflict(
+                    "동일 model·serving_node에 대해 복제 PVC 생성 또는 삭제가 진행 중입니다. 잠시 후 다시 시도해 주세요."
+                )
+            try:
+                db.expire_all()
+                live_rows2 = _live_deployments_for_model(db, model_id).all()
+                if not _any_live_uses_original_on_other_node(live_rows2, registry_pvc, serving_node_name):
+                    return registry_pvc
+                reuse2 = _find_reuse_pvc_same_model_node(live_rows2, serving_node_name)
+                if reuse2:
+                    return reuse2
+                return _clone_and_track(
+                    model_id, serving_node_name, registry_pvc, rollback_clone_pvcs, storage_class_name_override=None
+                )
+            finally:
+                lock.release(lk)
+
+        reuse = _find_reuse_pvc_same_model_node(live_rows, serving_node_name)
+        if reuse:
+            return reuse
+
+        lk2 = serving_volume_lock_key(model_id, serving_node_name)
+        if not lock.try_acquire_nonblocking(lk2):
+            raise PvcReplicationConflict(
+                "동일 model·serving_node에 대해 복제 PVC 생성 또는 삭제가 진행 중입니다. 잠시 후 다시 시도해 주세요."
+            )
+        try:
+            db.expire_all()
+            live_rows2 = _live_deployments_for_model(db, model_id).all()
+            reuse2 = _find_reuse_pvc_same_model_node(live_rows2, serving_node_name)
+            if reuse2:
+                return reuse2
+            target_sc = _select_storage_class_name_for_cinder_zone(node_zone)
+            return _clone_and_track(
+                model_id,
+                serving_node_name,
+                registry_pvc,
+                rollback_clone_pvcs,
+                storage_class_name_override=target_sc,
+            )
+        finally:
+            lock.release(lk2)
+
+    if not cinder_data_ok:
+        logger.info(
+            "Cinder zone: 노드 label 또는 레지스트리 SC availability 미확인 — §3.3 legacy 경로 (model_id=%s)",
+            model_id,
+        )
+    return _resolve_ollama_pvc_execute_legacy(
+        db,
+        model_id=model_id,
+        registry_pvc=registry_pvc,
+        serving_node_name=serving_node_name,
+        rollback_clone_pvcs=rollback_clone_pvcs,
+        vol_lock=lock,
+    )
+
+
+def _cinder_sc_override_for_clone(
+    serving_node_name: str,
+    registry_pvc: str,
+) -> Optional[str]:
+    """§12: 존 불일치 시에만 target StorageClass, 일치·비활성·미조회 시 None. 매칭 SC 없으면 ValueError."""
+    s = get_settings()
+    if not s.CINDER_ZONE_MATCH_ENABLED:
+        return None
+    try:
+        core = _load_core_v1()
+        ns = s.KUBEFLOW_NAMESPACE
+        nz = _get_node_topology_zone(core, serving_node_name, s.CINDER_NODE_TOPOLOGY_KEY)
+        _, rav = _registry_pvc_storage_class_and_zone(core, ns, registry_pvc)
+    except Exception as e:
+        logger.warning("Cinder zone 조회 실패(클론 SC는 소스 기준 상속): %s", e)
+        return None
+    if not nz or rav is None or nz == rav:
+        return None
+    return _select_storage_class_name_for_cinder_zone(nz)
 
 
 def _clone_registry_pvc_for_node(
@@ -265,6 +539,8 @@ def _clone_registry_pvc_for_node(
     vol_lock: WorkflowServingVolumeLock,
 ) -> str:
     """레지스트리 원본 PVC를 소스로 해당 노드 전용 클론 PVC 생성(§3.3.1 락)."""
+    sc_override = _cinder_sc_override_for_clone(serving_node_name, registry_pvc)
+
     lk = serving_volume_lock_key(model_id, serving_node_name)
     if not vol_lock.try_acquire_nonblocking(lk):
         raise PvcReplicationConflict(
@@ -274,7 +550,15 @@ def _clone_registry_pvc_for_node(
         new_name = _clone_pvc_name(model_id, serving_node_name)
         ns = get_settings().KUBEFLOW_NAMESPACE
         core = _load_core_v1()
-        _create_pvc_clone_from_source(core, ns, registry_pvc, new_name, model_id, serving_node_name)
+        _create_pvc_clone_from_source(
+            core,
+            ns,
+            registry_pvc,
+            new_name,
+            model_id,
+            serving_node_name,
+            storage_class_name_override=sc_override,
+        )
         rollback_clone_pvcs.append(new_name)
         return new_name
     finally:
