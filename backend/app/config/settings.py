@@ -161,6 +161,15 @@ class Settings(BaseSettings):
         description="§12: storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
     )
 
+    OPTIMIZATION_SERVER_URL: str = Field(
+        default="https://aipaas-lite-model-dev.surromind.ai",
+        description="최적화/경량화 서버 Base URL",
+    )
+    OPTIMIZATION_SERVER_TIMEOUT: int = Field(
+        default=30,
+        description="최적화/경량화 서버 HTTP 타임아웃(초)",
+    )
+
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
         default="harbor",
         description="Kubeflow Pipeline에서 사용할 imagePullSecret 이름 \

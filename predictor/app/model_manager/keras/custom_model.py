@@ -278,7 +278,7 @@ class KerasModelManager(BaseModelManager):
             raise e
         finally:
             tf.keras.backend.clear_session()
-            self._clear_model()
+            # self._clear_model()
 
     def _clear_model(self):
         """

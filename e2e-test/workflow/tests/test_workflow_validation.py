@@ -19,7 +19,7 @@ import uuid
 
 import pytest
 import requests
-from config import TARGET_MODEL_NAME
+from config import WORKFLOW_TARGET_LLM_MODEL
 
 
 @pytest.mark.workflow_validation
@@ -84,7 +84,7 @@ class TestWorkflowValidation:
 
     def test_00_find_model(self, api_url: str, auth_headers: dict):
         """테스트에 사용할 모델을 조회한다."""
-        model = self._find_model_by_name(api_url, auth_headers, TARGET_MODEL_NAME)
+        model = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_LLM_MODEL)
         self.__class__.model = model
         print(f"\n✔ 모델 발견: id={model['id']}, name={model['name']}")
 

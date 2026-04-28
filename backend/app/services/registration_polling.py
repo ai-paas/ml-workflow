@@ -47,7 +47,7 @@ def _finalize_registration(
         experiment.model_register_msg = message
 
         if registration_status == "SUCCESS":
-            registered_model = ModelService.get_latest_child_model(db, experiment.reference_model_id)
+            registered_model = ModelService.get_latest_child_model_for_registration(db, experiment.reference_model_id)
             if registered_model:
                 experiment.registered_model_id = registered_model.id
 
