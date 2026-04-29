@@ -160,6 +160,25 @@ class Settings(BaseSettings):
         default="cinder.csi.openstack.org",
         description="§12: storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
     )
+    # §12 임시: IDC에 Cinder backend AZ(예: gpu) 미구성 시 zone 매칭 SC 대신 NFS Client SC로 클론
+    CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED: bool = Field(
+        default=False,
+        description="§12 임시: 노드 zone≠원본 SC availability 로 클론할 때 §12.3.4 Cinder 매칭 대신 "
+        "CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS 를 쓴다. GPU AZ 활성화 후 false 권장.",
+    )
+    CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS: str = Field(
+        default="nfs-client",
+        description="§12 임시: CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED 일 때 클론 PVC storageClassName.",
+    )
+    # §12: NFS fallback 클론은 CSI volume cloning 미지원이라 빈 PVC 가 만들어짐 → 별도 Job 이 원본을 복사.
+    PVC_DATA_COPY_IMAGE: str = Field(
+        default="busybox:1.36",
+        description="§12: NFS fallback 클론 PVC 데이터 복사 Job 컨테이너 이미지 (cp -a 만 사용).",
+    )
+    PVC_DATA_COPY_TIMEOUT_SEC: int = Field(
+        default=1800,
+        description="§12: 데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
+    )
 
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
         default="harbor",
