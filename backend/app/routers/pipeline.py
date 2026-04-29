@@ -370,7 +370,8 @@ def register_model(
 
     @dsl.pipeline
     def register_model_pipeline(
-        parent_model_id: int,
+        reference_model_id: int,
+        lineage_root_parent_model_id: int,
         train_model_name: str,
         description: str,
         experiment_id: int,
@@ -389,7 +390,8 @@ def register_model(
         mlflow_run_id: str = "",
     ):
         register_model_component(
-            parent_model_id=parent_model_id,
+            reference_model_id=reference_model_id,
+            lineage_root_parent_model_id=lineage_root_parent_model_id,
             train_model_name=train_model_name,
             description=description,
             experiment_id=experiment_id,
@@ -423,7 +425,11 @@ def register_model(
         if experiment_db_obj is None:
             raise HTTPException(status_code=404, detail=f"실험 ID '{experiment_id}'을 찾을 수 없습니다.")
 
-        parent_model_id = experiment_db_obj.reference_model_id
+        reference_model_id = experiment_db_obj.reference_model_id
+        try:
+            lineage_root_parent_model_id = ModelService.resolve_lineage_root_model_id(db, reference_model_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
         provider_name = ModelProviderEnum.CUSTOM.value
         type_name = ModelTypeEnum.ODM.value
@@ -435,7 +441,8 @@ def register_model(
             enable_caching=False,
             experiment_id=kubeflow_experiment.experiment_id,
             arguments={
-                "parent_model_id": parent_model_id,
+                "reference_model_id": reference_model_id,
+                "lineage_root_parent_model_id": lineage_root_parent_model_id,
                 "train_model_name": model_name,
                 "description": description,
                 "experiment_id": experiment_id,

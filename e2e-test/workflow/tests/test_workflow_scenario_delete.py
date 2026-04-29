@@ -25,7 +25,7 @@ import time
 import pytest
 import requests
 from config import DELETE_TIMEOUT_SEC, POLL_INTERVAL_SEC, SCENARIO_NUM, STATE_FILE
-from workflow_scenarios import get_scenario, load_deployment_entries, remove_deployment_entry_by_workflow_id
+from workflow.definitions import get_scenario, load_deployment_entries, remove_deployment_entry_by_workflow_id
 
 SCENARIO = get_scenario(SCENARIO_NUM)
 

@@ -1,9 +1,11 @@
 import os
+import traceback
 from functools import lru_cache
 from io import BytesIO
 from typing import IO
 
 import numpy as np
+import onnx
 import onnxruntime as ort
 import torch
 from app.logging_inference import logger
@@ -39,6 +41,28 @@ categories = {
 }
 
 
+def find_onnx_path(base_dir: str) -> str:
+    """
+    주어진 디렉토리에서 모델 파일을 찾습니다.
+    :param base_dir: 모델이 저장된 디렉토리 경로.
+    :return: 모델 파일의 전체 경로.
+    """
+    try:
+        # 코드 base directory : root
+        files = os.listdir(base_dir)
+
+        for file in files:
+            if file.endswith(".onnx"):
+                model_path = os.path.join(base_dir, file)
+                logger.info(f"모델 파일 발견: {model_path}")
+                return model_path
+
+        raise FileNotFoundError("모델 파일을 찾을 수 없습니다.")
+    except Exception as e:
+        logger.error(f"모델 경로 찾기 오류: {e}")
+        raise e
+
+
 class OnnxModelManager(BaseModelManager):
     def __init__(self):
         """
@@ -50,6 +74,7 @@ class OnnxModelManager(BaseModelManager):
         # set dummy shape -> load model -> export onnx -> preprocess -> predict
         super().__init__()
         self.onnx_base = "/tmp/onnx"  # 컨테이너 내 경로, 외부 경로 사용 시 컨테이너 내 경로로 변경
+        self.conf_threshold = 0.7  # 신뢰도 임계값
 
         # 카테고리별 처리 로직 매핑
         self.post_processors = {
@@ -134,6 +159,16 @@ class OnnxModelManager(BaseModelManager):
         )
         return onnx_path
 
+    def _load_onnx_model(self, local_path: str):
+        """
+        onnx 파일로부터 모델 호출 및 onnx path 설정
+        """
+        self.onnx_path = find_onnx_path(local_path)
+        onnx.checker.check_model(self.onnx_path)
+        logger.info("onnx 파일 모델 호출 성공")
+        onnx_model = onnx.load(self.onnx_path)
+        return onnx_model
+
     def load_model(self, model_name: str, run_id: str):
         """
         AutoModel 등을 활용한 load_model 로직 구현
@@ -142,24 +177,28 @@ class OnnxModelManager(BaseModelManager):
         self.run_id = run_id
 
         local_path = self._load_artifacts(run_id, model_name)
-        config = self.load_config(local_path)
-        self.category = self.get_category(config)
-        self.model = self._load_model(self.category, local_path)
-
+        self.config = self.load_config(local_path)
+        self.category = self.get_category(self.config)
         self.pre_processor = AutoImageProcessor.from_pretrained(local_path)
 
-        # onnx 모델 내보내기
-        # dummy_shape 설정 필요
-        # 추론 시 모델 경로 활용
         try:
-            self.onnx_path = self.export_onnx(
-                self.model,  # 모델
-                self.onnx_base,  # 저장 경로
-                model_name,  # 모델 이름
-                categories[self.category]["input_shape"],  # 카테고리별 input_shape
-            )
-
-            return self.model  # cannot return onnx model
+            try:
+                self.model = self._load_onnx_model(local_path)
+                return self.model
+            except Exception:
+                # onnx 모델 내보내기
+                # dummy_shape 설정 필요
+                # 추론 시 모델 경로 활용
+                logger.info("onnx 파일 모델 호출 실패, onnx 모델 내보내기 시작")
+                self.model = self._load_model(self.category, local_path)
+                self.pre_processor = AutoImageProcessor.from_pretrained(local_path)
+                self.onnx_path = self.export_onnx(
+                    self.model,  # 모델
+                    self.onnx_base,  # 저장 경로
+                    model_name,  # 모델 이름
+                    categories[self.category]["input_shape"],  # 카테고리별 input_shape
+                )
+                return self.model
         except Exception as e:
             logger.error(f"onnx 모델 내보내기 중 오류 발생: {e}")
             raise ValueError(f"onnx 모델 내보내기 실패: {str(e)}")
@@ -188,15 +227,17 @@ class OnnxModelManager(BaseModelManager):
             # 이미지 프로세서에 전달
             input_shape = categories[self.category]["input_shape"]
             height, width = input_shape[-2:]  # (batch, channel, height, width)에서 height, width 추출
-            inputs = None
-            size = {"height": height, "width": width}
-            if "shortest_edge" in self.pre_processor.size:
-                size = {"shortest_edge": min(height, width), "longest_edge": max(height, width)}
+
+            target_size = (width, height)  # PIL Image.resize는 (width, height) 순서
+            resampling_method = Image.Resampling.BILINEAR
+            resized_image = image.resize(target_size, resampling_method)
+            logger.info(f"PIL 직접 리사이즈 후 크기: {resized_image.size}")
+
             inputs = self.pre_processor(
-                images=image,
+                images=resized_image,
                 return_tensors="pt",
-                do_resize=True,
-                size=size,
+                do_resize=False,
+                size={"height": height, "width": width},
             )
             return inputs["pixel_values"].numpy()
         except Exception as e:
@@ -258,6 +299,22 @@ class OnnxModelManager(BaseModelManager):
         logger.info(f"Converted box coordinates: {converted[0]}")  # 변환 후 좌표
         return converted
 
+    def _get_label(self, class_ids):
+        """
+        클래스 ID에 대한 라벨 추출
+        :param class_ids: 클래스 ID
+        :return: 라벨
+        """
+        return (
+            self.model.config.id2label.get(int(class_ids), f"unknown_{int(class_ids)}")
+            if hasattr(self.model, "config") and hasattr(self.model.config, "id2label")
+            else (
+                self.config.id2label.get(int(class_ids), f"unknown_{int(class_ids)}")
+                if hasattr(self.config, "id2label")
+                else None
+            )
+        )
+
     def _process_object_detection(self, inputs, outputs):
         """
         객체 검출 결과 처리
@@ -265,8 +322,6 @@ class OnnxModelManager(BaseModelManager):
         :param outputs: 모델 출력
         :return: 예측 결과
         """
-        conf_threshold = 0.7  # 신뢰도 임계값
-
         # ONNX 출력 형태 로깅
         logger.info(f"ONNX outputs shape: {[o.shape for o in outputs]}")
         logger.info(f"Input shape: {inputs.shape}")
@@ -299,7 +354,7 @@ class OnnxModelManager(BaseModelManager):
             logger.info(f"Class probs shape: {class_probs.shape}, sample: {class_probs[:5]}")
 
             # 신뢰도 임계값 적용
-            mask = scores > conf_threshold
+            mask = scores > self.conf_threshold
             scores = scores[mask]
             boxes = boxes[mask]
             class_probs = class_probs[mask]
@@ -326,7 +381,7 @@ class OnnxModelManager(BaseModelManager):
             class_ids = np.argmax(probs, axis=-1)
 
             # 신뢰도 임계값 적용
-            mask = scores > conf_threshold
+            mask = scores > self.conf_threshold
             scores = scores[mask]
             boxes = boxes[mask]
             class_ids = class_ids[mask]
@@ -347,7 +402,7 @@ class OnnxModelManager(BaseModelManager):
         results = [
             {
                 "score": float(score),
-                "label": self.model.config.id2label.get(int(label), f"unknown_{int(label)}"),
+                "label": self._get_label(label) if label else f"unknown_{int(label)}",
                 "box": [float(x) for x in box],
             }
             for score, label, box in zip(scores, class_ids, boxes)
@@ -464,6 +519,7 @@ class OnnxModelManager(BaseModelManager):
             input_tensor = self.preprocess_data(data)
 
             # 모델 추론 장치 선택
+            logger.info(f"선택 가능한 모델 추론 장치: {ort.get_available_providers()}")
             providers = (
                 ["CUDAExecutionProvider"]
                 if "CUDAExecutionProvider" in ort.get_available_providers() and device_str == "gpu"
@@ -484,12 +540,12 @@ class OnnxModelManager(BaseModelManager):
             return self.post_processors[self.category](input_tensor, outputs)
         except Exception as e:
             logger.error(f"추론 중 오류 발생: {e}")
+            logger.error(traceback.format_exc())
             raise e
         finally:
             if ort_session:
                 ort_session.set_providers([])
                 ort_session = None
-            self._clear_model()
 
     def _clear_model(self):
         """

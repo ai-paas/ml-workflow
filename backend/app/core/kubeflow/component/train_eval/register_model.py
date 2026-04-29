@@ -14,7 +14,8 @@ def register_model_component(
     mlflow_s3_endpoint_url: str,
     aws_access_key_id: str,
     aws_secret_access_key: str,
-    parent_model_id: int,
+    reference_model_id: int,
+    lineage_root_parent_model_id: int,
     train_model_name: str,
     description: str,
     restapi_url: str,
@@ -230,8 +231,6 @@ def register_model_component(
 
         # mlflow_run_id: 파이프라인 파라미터로 직접 전달받거나, 없으면 REST API fallback
         run_id = mlflow_run_id if mlflow_run_id else None
-        reference_model_id = parent_model_id
-
         if not run_id:
             experiment_info = api_client.get_experiment_info(experiment_id)
             if experiment_info:
@@ -311,7 +310,7 @@ def register_model_component(
                     "provider_id": metadata["provider_id"],
                     "type_id": metadata["type_id"],
                     "format_id": reference_format_id,  # reference_model의 format_id 사용
-                    "parent_model_id": parent_model_id,
+                    "parent_model_id": lineage_root_parent_model_id,
                     "model_registry_schema": json.dumps(
                         {
                             "artifact_path": f"{run.info.artifact_uri}/{reference_model_name}",

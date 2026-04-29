@@ -23,6 +23,8 @@ MODEL_FORMAT_DATA = [
     {"name": ModelFormatEnum.TENSORFLOW.value, "description": "TensorFlow"},
     {"name": ModelFormatEnum.YOLOX.value, "description": "YOLOX Object Detection"},
     {"name": ModelFormatEnum.GGUF.value, "description": "GGUF format for Ollama"},
+    {"name": ModelFormatEnum.TENSORRT.value, "description": "NVIDIA TensorRT optimized model"},
+    {"name": ModelFormatEnum.OPENVINO.value, "description": "Intel OpenVINO IR optimized model"},
 ]
 
 MODEL_PROVIDER_DATA = [

@@ -1,12 +1,12 @@
 """
 E2E 시나리오: 워크플로우 시나리오 전체 생명주기 테스트
 
-§5.2 시나리오 1~7 중 하나를 선택하여 생성 → 배포 → 추론 → 삭제 전체를 검증한다.
+§5.2 시나리오 1~10 중 하나를 선택하여 생성 → 배포 → 추론 → 삭제 전체를 검증한다.
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
 배포 기록(.state*.json)은 쓰지 않는다. ENV= 는 .env 로딩·API URL 등에만 사용한다.
 
 흐름:
-  1.  GET  /models                          — LLM 모델 검색
+  1.  GET  /models                          — 타깃 모델 검색 (LLM 또는 ODM)
   2.  GET  /models                          — 임베딩 모델 검색 (KB 필요 시)
   3~4. KB 메타데이터 조회 → KB 생성 (1~2개) — (KB 필요 시)
   5.  POST /prompts                          — 시나리오별 LLM 프롬프트 생성
@@ -14,7 +14,7 @@ E2E 시나리오: 워크플로우 시나리오 전체 생명주기 테스트
   7.  POST /workflows/{id}/execute           — 워크플로우 실행 (KServe 배포)
   8.  GET  /workflows/{id}/status            — 배포 완료 폴링
   9.  GET  /workflows/{id}/status            — ACTIVE 상태 확인
-  10. POST /workflows/{id}/test/rag          — 추론 테스트
+  10. POST /workflows/{id}/test/rag 또는 …/test/ml — 추론 테스트
   11. DELETE /workflows/{id}                 — 워크플로우 삭제 시작
   12. POST /workflows/{id}/finalize-deletion — 삭제 완료 폴링
   13. GET  /workflows/{id}                   — 워크플로우 404 확인
@@ -40,10 +40,11 @@ from config import (
     POLL_INTERVAL_SEC,
     SCENARIO_NUM,
     TARGET_EMBEDDING_MODEL_NAME,
-    TARGET_MODEL_NAME,
+    WORKFLOW_ODM_TEST_IMAGE,
+    workflow_primary_target_model_name,
 )
-from workflow_deploy_wait import expected_model_component_count, workflow_deploy_poll_should_fail
-from workflow_scenarios import build_workflow_definition, get_scenario
+from workflow.definitions import build_workflow_definition, get_scenario
+from workflow.deploy_wait import expected_model_component_count, workflow_deploy_poll_should_fail
 
 SCENARIO = get_scenario(SCENARIO_NUM)
 INFERENCE_TIMEOUT_SEC = 120
@@ -81,7 +82,7 @@ class TestWorkflowScenarioLifecycle:
     # ── Phase 1: 사전 준비 (모델 & KB & 프롬프트) ────────────
 
     def test_01_find_llm_model(self, api_url: str, auth_headers: dict):
-        """LLM 모델이 존재해야 한다."""
+        """시나리오 타깃 모델(LLM 또는 ODM)이 존재해야 한다."""
         kb_count = SCENARIO["kb_count"]
         kb_info = f"{kb_count}개 ({', '.join(SCENARIO['kb_labels'])})" if kb_count > 0 else "아니오"
         print(f"\n{'=' * 60}")
@@ -91,10 +92,12 @@ class TestWorkflowScenarioLifecycle:
         print(f"  프롬프트: {len(SCENARIO['prompts'])}개")
         print(f"{'=' * 60}")
 
-        model = self._find_model_by_name(api_url, auth_headers, TARGET_MODEL_NAME)
+        target = workflow_primary_target_model_name()
+        model = self._find_model_by_name(api_url, auth_headers, target)
         assert model["id"]
         self.__class__.model = model
-        print(f"\n✔ LLM 모델 발견: id={model['id']}, name={model['name']}")
+        kind = "ODM" if SCENARIO_NUM == 10 else "LLM"
+        print(f"\n✔ {kind} 모델 발견: id={model['id']}, name={model['name']}")
 
     def test_02_find_embedding_model(self, api_url: str, auth_headers: dict):
         """임베딩 모델이 존재해야 한다 (KB 필요 시)."""
@@ -203,7 +206,7 @@ class TestWorkflowScenarioLifecycle:
     def test_06_create_workflow(self, api_url: str, auth_headers: dict):
         """시나리오에 맞는 워크플로우를 생성한다."""
         model = self.__class__.model
-        assert model, "LLM 모델이 없습니다."
+        assert model, "타깃 모델이 없습니다."
 
         definition = build_workflow_definition(
             SCENARIO_NUM, model["id"], self.__class__.kb_ids, KB_TOP_K, self.__class__.prompt_ids
@@ -294,22 +297,37 @@ class TestWorkflowScenarioLifecycle:
         wf_id = self.__class__.workflow_id
         assert wf_id
 
-        resp = requests.post(
-            f"{api_url}/workflows/{wf_id}/test/rag",
-            data={"text": SCENARIO["inference_text"]},
-            headers=auth_headers,
-            timeout=INFERENCE_TIMEOUT_SEC,
-        )
+        if SCENARIO.get("inference_kind") == "ml":
+            img = WORKFLOW_ODM_TEST_IMAGE
+            assert img.is_file(), f"ODM 테스트 이미지가 없습니다: {img}"
+            with open(img, "rb") as f:
+                resp = requests.post(
+                    f"{api_url}/workflows/{wf_id}/test/ml",
+                    files={"image": (img.name, f, "image/png")},
+                    headers=auth_headers,
+                    timeout=INFERENCE_TIMEOUT_SEC,
+                )
+        else:
+            resp = requests.post(
+                f"{api_url}/workflows/{wf_id}/test/rag",
+                data={"text": SCENARIO["inference_text"]},
+                headers=auth_headers,
+                timeout=INFERENCE_TIMEOUT_SEC,
+            )
         assert resp.status_code == 200, f"추론 실패: {resp.status_code} {resp.text}"
 
         data = resp.json()
         assert data["workflow_id"] == wf_id
         assert isinstance(data["results"], list) and len(data["results"]) > 0
-        assert data["final_result"] is not None and len(data["final_result"]) > 0
+        fr = data.get("final_result") or ""
+        assert len(fr) > 0
 
         print(f"\n✔ 추론 성공: workflow_id={wf_id}")
         print(f"  execution_order: {data.get('execution_order', [])}")
-        print(f"  final_result: {data['final_result'][:120]}{'…' if len(data['final_result']) > 120 else ''}")
+        if SCENARIO.get("inference_kind") == "ml":
+            print(f"  final_result: (base64 이미지 문자열, 길이 {len(fr)})")
+        else:
+            print(f"  final_result: {fr[:120]}{'…' if len(fr) > 120 else ''}")
 
     # ── Phase 4: 삭제 ───────────────────────────────────────
 

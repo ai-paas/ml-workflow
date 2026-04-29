@@ -1,9 +1,9 @@
 """워크플로우 시나리오 정의 모듈
 
-§5.2 개선 후 정상 동작하는 9개 시나리오의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
+§5.2 개선 후 정상 동작하는 시나리오(1~9: LLM/RAG, 10: ODM 단순)의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
 
 CLI 실행 (SCENARIO 필수):
-  python workflow_scenarios.py 3         # 3번 시나리오 상세
+  python workflow/definitions.py 3      # 3번 시나리오 상세
 """
 
 from __future__ import annotations
@@ -37,6 +37,16 @@ def _kb_component(ref_id: str, name: str, kb_id: int, top_k: int = 3) -> dict:
         "type": "KNOWLEDGE_BASE",
         "knowledge_base_id": kb_id,
         "config": {"top_k": top_k},
+    }
+
+
+def _odm_model_component(ref_id: str, name: str, model_id: int) -> dict:
+    """ODM 전용 MODEL — temperature/max_tokens 등 LLM 설정 없음(백엔드는 model_id로 LLM vs ODM 구분)."""
+    return {
+        "ref_id": ref_id,
+        "name": name,
+        "type": "MODEL",
+        "model_id": model_id,
     }
 
 
@@ -295,6 +305,15 @@ SCENARIOS: dict[int, dict] = {
             },
         },
     },
+    10: {
+        "name": "ODM 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "ml",
+        "prompts": {},
+    },
 }
 
 
@@ -313,6 +332,22 @@ def _build_scenario_1(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
         "connections": [
             {"source_ref_id": start, "target_ref_id": llm},
             {"source_ref_id": llm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_10(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → ODM(MODEL) → 종료 — 시나리오 1과 위상만 같고 LLM 전용 설정·이름을 쓰지 않는다."""
+    start, odm, end = _ref("start"), _ref("odm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(odm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": odm},
+            {"source_ref_id": odm, "target_ref_id": end},
         ],
     }
 
@@ -538,6 +573,7 @@ _BUILDERS = {
     7: _build_scenario_7,
     8: _build_scenario_8,
     9: _build_scenario_9,
+    10: _build_scenario_10,
 }
 
 
@@ -547,7 +583,8 @@ _BUILDERS = {
 def get_scenario(num: int) -> dict:
     """시나리오 메타데이터를 반환한다."""
     if num not in SCENARIOS:
-        raise ValueError(f"시나리오 #{num} 은 존재하지 않습니다. (유효: 1~{len(SCENARIOS)})")
+        mx = max(SCENARIOS.keys())
+        raise ValueError(f"시나리오 #{num} 은 존재하지 않습니다. (유효: 1~{mx})")
     return SCENARIOS[num]
 
 
@@ -666,7 +703,8 @@ def _print_scenario(num: int, s: dict) -> None:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("ERROR: SCENARIO 번호를 지정하세요.")
-        print(f"사용법: python workflow_scenarios.py <1~{len(SCENARIOS)}>")
+        mx = max(SCENARIOS.keys())
+        print(f"사용법: python workflow/definitions.py <1~{mx}>")
         print()
         print("시나리오 목록:")
         for n, s in SCENARIOS.items():
@@ -675,7 +713,8 @@ if __name__ == "__main__":
 
     num = int(sys.argv[1])
     if num not in SCENARIOS:
-        print(f"ERROR: 시나리오 #{num} 은 존재하지 않습니다. (유효: 1~{len(SCENARIOS)})")
+        mx = max(SCENARIOS.keys())
+        print(f"ERROR: 시나리오 #{num} 은 존재하지 않습니다. (유효: 1~{mx})")
         sys.exit(1)
 
     print(f"\n=== 시나리오 #{num} 상세 ===\n")

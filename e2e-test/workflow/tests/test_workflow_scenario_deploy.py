@@ -1,7 +1,7 @@
 """
 E2E 시나리오: 워크플로우 시나리오 배포 테스트
 
-§5.2 시나리오 1~7 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
+§5.2 시나리오 1~10 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
 삭제는 포함하지 않는다. 별도 삭제: make e2e-wf-scenario-delete SCENARIO=N (저장된 배포 건별 확인)
 같은 SCENARIO 로 재실행 시 이전 배포를 덮어쓰지 않고 상태 파일의 scenario_N_deployments 목록에 추가된다.
 (ENV= 지정 시 e2e-test/.state.{ENV}.json, 미지정 시 .state.json)
@@ -9,7 +9,7 @@ E2E 시나리오: 워크플로우 시나리오 배포 테스트
 시나리오 선택: E2E_SCENARIO 환경변수 (필수, Makefile에서 SCENARIO 인자로 주입)
 
 흐름:
-  1. LLM 모델 검색
+  1. 타깃 모델 검색 (LLM 또는 ODM)
   2. (KB 필요 시) 임베딩 모델 검색 → KB 메타데이터 조회 → KB 생성 (1~2개)
   3. 시나리오별 LLM 프롬프트 생성
   4. 워크플로우 생성 (prompt_id 포함)
@@ -36,10 +36,16 @@ from config import (
     SCENARIO_NUM,
     STATE_FILE,
     TARGET_EMBEDDING_MODEL_NAME,
-    TARGET_MODEL_NAME,
+    WORKFLOW_ODM_TEST_IMAGE,
+    workflow_primary_target_model_name,
 )
-from workflow_deploy_wait import expected_model_component_count, workflow_deploy_poll_should_fail
-from workflow_scenarios import append_deployment_entry, build_workflow_definition, get_scenario, load_deployment_entries
+from workflow.definitions import (
+    append_deployment_entry,
+    build_workflow_definition,
+    get_scenario,
+    load_deployment_entries,
+)
+from workflow.deploy_wait import expected_model_component_count, workflow_deploy_poll_should_fail
 
 SCENARIO = get_scenario(SCENARIO_NUM)
 INFERENCE_TIMEOUT_SEC = 120
@@ -77,7 +83,7 @@ class TestWorkflowScenarioDeploy:
     # ── tests ────────────────────────────────────────────────
 
     def test_01_find_llm_model(self, api_url: str, auth_headers: dict):
-        """LLM 모델이 존재해야 한다."""
+        """시나리오 타깃 모델(LLM 또는 ODM)이 존재해야 한다."""
         kb_count = SCENARIO["kb_count"]
         kb_info = f"{kb_count}개 ({', '.join(SCENARIO['kb_labels'])})" if kb_count > 0 else "아니오"
         print(f"\n{'=' * 60}")
@@ -88,10 +94,12 @@ class TestWorkflowScenarioDeploy:
         print(f"  상태 파일: {STATE_FILE.name}")
         print(f"{'=' * 60}")
 
-        model = self._find_model_by_name(api_url, auth_headers, TARGET_MODEL_NAME)
+        target = workflow_primary_target_model_name()
+        model = self._find_model_by_name(api_url, auth_headers, target)
         assert model["id"]
         self.__class__.model = model
-        print(f"\n✔ LLM 모델 발견: id={model['id']}, name={model['name']}")
+        kind = "ODM" if SCENARIO_NUM == 10 else "LLM"
+        print(f"\n✔ {kind} 모델 발견: id={model['id']}, name={model['name']}")
 
     def test_02_find_embedding_model(self, api_url: str, auth_headers: dict):
         """임베딩 모델이 존재해야 한다 (KB 필요 시)."""
@@ -294,21 +302,36 @@ class TestWorkflowScenarioDeploy:
         wf_id = self.__class__.workflow_id
         assert wf_id
 
-        resp = requests.post(
-            f"{api_url}/workflows/{wf_id}/test/rag",
-            data={"text": SCENARIO["inference_text"]},
-            headers=auth_headers,
-            timeout=INFERENCE_TIMEOUT_SEC,
-        )
+        if SCENARIO.get("inference_kind") == "ml":
+            img = WORKFLOW_ODM_TEST_IMAGE
+            assert img.is_file(), f"ODM 테스트 이미지가 없습니다: {img}"
+            with open(img, "rb") as f:
+                resp = requests.post(
+                    f"{api_url}/workflows/{wf_id}/test/ml",
+                    files={"image": (img.name, f, "image/png")},
+                    headers=auth_headers,
+                    timeout=INFERENCE_TIMEOUT_SEC,
+                )
+        else:
+            resp = requests.post(
+                f"{api_url}/workflows/{wf_id}/test/rag",
+                data={"text": SCENARIO["inference_text"]},
+                headers=auth_headers,
+                timeout=INFERENCE_TIMEOUT_SEC,
+            )
         assert resp.status_code == 200, f"추론 실패: {resp.status_code} {resp.text}"
 
         data = resp.json()
         assert data["workflow_id"] == wf_id
         assert len(data["results"]) > 0
-        assert data["final_result"] and len(data["final_result"]) > 0
+        fr = data.get("final_result") or ""
+        assert len(fr) > 0
 
         print("\n✔ 추론 성공")
-        print(f"  final_result: {data['final_result'][:100]}{'…' if len(data['final_result']) > 100 else ''}")
+        if SCENARIO.get("inference_kind") == "ml":
+            print(f"  final_result: (base64 이미지 문자열, 길이 {len(fr)})")
+        else:
+            print(f"  final_result: {fr[:100]}{'…' if len(fr) > 100 else ''}")
         _env = (os.environ.get("ENV") or "").strip()
         if _env:
             print(f"\n  ℹ 삭제하려면: make e2e-wf-scenario-delete SCENARIO={SCENARIO_NUM} ENV={_env}")

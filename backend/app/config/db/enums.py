@@ -13,6 +13,8 @@ class ModelFormatEnum(str, Enum):
     TENSORFLOW = "tensorflow"
     YOLOX = "yolox"
     GGUF = "gguf"
+    TENSORRT = "tensorrt"
+    OPENVINO = "openvino"
 
     def __str__(self) -> str:
         return self.value

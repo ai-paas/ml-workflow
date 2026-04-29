@@ -12,6 +12,13 @@
   - ENV 미지정: e2e-test/.state.json (기존과 동일)
   - ENV 지정: e2e-test/.state.{ENV}.json (환경별 분리)
   delete / lifecycle 중 배포 기록을 쓰는 단계는 deploy 때와 동일한 ENV 로 실행해야 한다.
+
+E2E_SCENARIO: 시나리오 배포/삭제/생명주기(make e2e-wf-scenario-*) 에서 필수.
+  그 외(워크플로 validate, model_improvement 패키지 등)는 미설정 시 기본 1로 두어 import 만 통과한다.
+
+최적화 E2E 시나리오(make e2e-model-improvement-scenario): 워크플로 LLM 타깃과 같이
+  E2E_OPTIMIZATION_SOURCE_MODEL_NAME 으로 소스 모델을 지정(/models 의 name 정확 일치).
+  E2E_OPTIMIZATION_TASK_TYPE (기본 pruning), E2E_OPTIMIZATION_POLL_TIMEOUT_SEC, E2E_OPTIMIZATION_POLL_INTERVAL_SEC
 """
 
 import json
@@ -63,16 +70,43 @@ API_PREFIX: str = "/api/v1"
 USERNAME: str = os.environ.get("E2E_USERNAME", "admin")
 PASSWORD: str = os.environ.get("E2E_PASSWORD", "admin")
 
-TARGET_MODEL_NAME: str = os.environ.get("E2E_TARGET_MODEL_NAME", "gpt-oss-20b")
+# 워크플로 시나리오: LLM(1~9)용 / ODM(10)용 타깃 모델 display name (/models 의 name)
+WORKFLOW_TARGET_LLM_MODEL: str = (
+    (os.environ.get("E2E_WORKFLOW_TARGET_LLM_MODEL") or os.environ.get("E2E_TARGET_MODEL_NAME") or "gpt-oss-20b")
+).strip()
+WORKFLOW_TARGET_ODM_MODEL: str = (os.environ.get("E2E_WORKFLOW_TARGET_ODM_MODEL") or "facebook/detr-resnet-50").strip()
+
 TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NAME", "bge-m3")
 
-_scenario_raw = os.environ.get("E2E_SCENARIO")
-if not _scenario_raw:
-    raise RuntimeError(
-        "E2E_SCENARIO 환경변수가 설정되지 않았습니다. "
-        "make e2e-wf-scenario-deploy SCENARIO=N 형태로 실행하세요. (N: 1~9)"
-    )
-SCENARIO_NUM: int = int(_scenario_raw)
+# 시나리오 #10(ODM) ML 추론 시 업로드할 이미지 (PNG/JPEG 등)
+WORKFLOW_ODM_TEST_IMAGE: Path = Path(
+    os.environ.get("E2E_WORKFLOW_ODM_TEST_IMAGE") or str(_E2E_ROOT / "workflow" / "fixtures" / "odm_sample.jpg")
+).expanduser()
+
+# ── 최적화/경량화 E2E (model-improvements 시나리오) ─────────────────────────
+# 소스 모델: E2E_WORKFLOW_TARGET_LLM_MODEL 과 동일하게 등록된 name 으로만 지정
+OPTIMIZATION_SOURCE_MODEL_NAME: str = (os.environ.get("E2E_OPTIMIZATION_SOURCE_MODEL_NAME") or "").strip()
+
+OPTIMIZATION_TASK_TYPE: str = (os.environ.get("E2E_OPTIMIZATION_TASK_TYPE") or "pruning").strip()
+
+OPTIMIZATION_POLL_TIMEOUT_SEC: int = int(os.environ.get("E2E_OPTIMIZATION_POLL_TIMEOUT_SEC", "3600"))
+OPTIMIZATION_POLL_INTERVAL_SEC: int = int(os.environ.get("E2E_OPTIMIZATION_POLL_INTERVAL_SEC", "15"))
+
+# 워크플로 시나리오 배포/삭제/생명주기: make … SCENARIO=N 로 필수 지정.
+# 검증·최적화 등 다른 E2E는 미설정 시 1로 두어 import 만 통과시킨다(해당 테스트는 SCENARIO 미사용).
+_scenario_raw = (os.environ.get("E2E_SCENARIO") or "").strip()
+if _scenario_raw:
+    SCENARIO_NUM: int = int(_scenario_raw)
+else:
+    SCENARIO_NUM = 1
+
+
+def workflow_primary_target_model_name() -> str:
+    """워크플로 시나리오 배포/생명주기: #10 은 ODM, 그 외는 LLM."""
+    if SCENARIO_NUM == 10:
+        return WORKFLOW_TARGET_ODM_MODEL
+    return WORKFLOW_TARGET_LLM_MODEL
+
 
 # PVC 복제(Longhorn 등)·배포 지연을 감안해 기본 20분 (환경변수 E2E_DEPLOY_TIMEOUT_SEC로 조정)
 DEPLOY_TIMEOUT_SEC: int = int(os.environ.get("E2E_DEPLOY_TIMEOUT_SEC", "1200"))
@@ -120,3 +154,13 @@ def clear_state(key: str) -> None:
     data = json.loads(STATE_FILE.read_text())
     data.pop(key, None)
     STATE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def find_optimization_source_model(models: list[dict]) -> dict | None:
+    """E2E_OPTIMIZATION_SOURCE_MODEL_NAME 과 name 이 일치하는 모델 1건."""
+    if not OPTIMIZATION_SOURCE_MODEL_NAME:
+        return None
+    for m in models:
+        if m.get("name") == OPTIMIZATION_SOURCE_MODEL_NAME:
+            return m
+    return None
