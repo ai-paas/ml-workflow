@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
+from config.optimization_sources import is_optimization_eligible
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
@@ -92,19 +93,6 @@ def is_yolox_local_model(model_name: str) -> bool:
     return "yolox" in model_name.lower()
 
 
-OPT_ELIGIBLE_REPO_IDS: set[str] = {
-    "facebook/detr-resnet-50",
-    "facebook/detr-resnet-101",
-}
-
-
-def is_optimization_eligible(repo_id: str | None) -> bool:
-    """repo_id를 기준으로 최적화/경량화 가능 여부를 판별한다."""
-    if not repo_id:
-        return False
-    return repo_id in OPT_ELIGIBLE_REPO_IDS
-
-
 def determine_model_visibility(
     parent_model_id: int | None,
     opt_enable_yn: bool,
@@ -131,6 +119,39 @@ class ModelService:
         if not children:
             return None
         return max(children, key=lambda m: m.id)
+
+    @staticmethod
+    def resolve_lineage_root_model_id(db: Session, model_id: int) -> int:
+        """
+        parent_model_id 체인을 따라 올라가 부모가 없는 모델(원본 사전학습·카탈로그 루트) id를 반환한다.
+        재학습으로 생성되는 모델의 parent_model_id는 직전 학습본이 아니라 항상 이 루트를 가리키도록 한다.
+        """
+        current_id: int | None = model_id
+        seen: set[int] = set()
+        while current_id is not None:
+            if current_id in seen:
+                raise ValueError(f"model parent_model_id 순환이 감지되었습니다: id={current_id}")
+            seen.add(current_id)
+            m = model_repository.get(db, current_id)
+            if m is None:
+                raise ValueError(f"model id={current_id} 을(를) 찾을 수 없습니다.")
+            if m.parent_model_id is None:
+                return current_id
+            current_id = m.parent_model_id
+        raise ValueError(f"model id={model_id} 에 대한 lineage root를 결정할 수 없습니다.")
+
+    @staticmethod
+    def get_latest_child_model_for_registration(db: Session, reference_model_id: int) -> Optional[Model]:
+        """
+        학습 등록 직후: 새 행은 lineage root를 parent로 두므로,
+        root의 자식 중 실험의 reference_model_id보다 id가 큰 것 중 최댓값을 등록 결과로 본다.
+        """
+        root_id = ModelService.resolve_lineage_root_model_id(db, reference_model_id)
+        children = model_repository.get_by_parent_model_id(db, root_id)
+        candidates = [m for m in children if m.id > reference_model_id]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda m: m.id)
 
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[ModelReadSchema]:
         return model_repository.get_multi(db, skip=skip, limit=limit)
@@ -432,7 +453,14 @@ class ModelService:
 
         format_obj = model_format_repository.get(db, format_id)
         learning_enable_yn = format_obj is not None and format_obj.name == ModelFormatEnum.YOLOX.value
-        opt_enable_yn = is_optimization_eligible(repo_id)
+        if not repo_id and learning_enable_yn:
+            key = (name or "").strip()
+            pred = PREDEFINED_MODEL_CONFIGS.get(key)
+            if not pred:
+                pred = PREDEFINED_MODEL_CONFIGS.get(key.replace("-", "_").lower())
+            if pred and pred.get("repo_id"):
+                repo_id = pred["repo_id"]
+        opt_enable_yn = is_optimization_eligible(repo_id, model_name=name)
 
         model = ModelBaseSchema(
             name=name,

@@ -153,32 +153,39 @@ def resolve_normalized_serving_meta(
     """
     직접/부모 파생으로 정규화된 서빙 메타(5키)를 반환.
 
+    - 자체 repo_id + PREDEFINED 완전 일치 → direct
+    - 그 외(자체 repo 불완전·미매핑, 또는 repo_id 없음=학습/등록 파생 모델로 간주) → parent_model_id로
+      부모의 repo_id를 lookup하여 §7.9.1 파생
+    - repo_id도 없고 parent_model_id도 없으면 오류
+
     Returns:
         (normalized_dict, source, parent_repo_id or None)
     """
-    if not model.repo_id:
-        raise ValueError(f"model_id={model.id}: repo_id가 없어 서빙 메타를 조회할 수 없습니다.")
-
-    child_cfg = predefined_configs.get(model.repo_id)
-    if child_cfg and _has_complete_serving_keys(child_cfg):
-        meta = {
-            "serving_vram_need_bytes": _parse_positive_int(
-                child_cfg["serving_vram_need_bytes"], "serving_vram_need_bytes"
-            ),
-            "serving_memory_request_gpu": str(child_cfg["serving_memory_request_gpu"]).strip(),
-            "serving_gpu_pod_cpu_request_millicores": _parse_positive_int(
-                child_cfg["serving_gpu_pod_cpu_request_millicores"], "serving_gpu_pod_cpu_request_millicores"
-            ),
-            "serving_memory_request_cpu": str(child_cfg["serving_memory_request_cpu"]).strip(),
-            "serving_cpu_request_millicores": _parse_positive_int(
-                child_cfg["serving_cpu_request_millicores"], "serving_cpu_request_millicores"
-            ),
-        }
-        for mk in ("serving_memory_request_gpu", "serving_memory_request_cpu"):
-            k8s_memory_quantity_to_bytes(meta[mk])
-        return meta, "direct", None
+    if model.repo_id:
+        child_cfg = predefined_configs.get(model.repo_id)
+        if child_cfg and _has_complete_serving_keys(child_cfg):
+            meta = {
+                "serving_vram_need_bytes": _parse_positive_int(
+                    child_cfg["serving_vram_need_bytes"], "serving_vram_need_bytes"
+                ),
+                "serving_memory_request_gpu": str(child_cfg["serving_memory_request_gpu"]).strip(),
+                "serving_gpu_pod_cpu_request_millicores": _parse_positive_int(
+                    child_cfg["serving_gpu_pod_cpu_request_millicores"], "serving_gpu_pod_cpu_request_millicores"
+                ),
+                "serving_memory_request_cpu": str(child_cfg["serving_memory_request_cpu"]).strip(),
+                "serving_cpu_request_millicores": _parse_positive_int(
+                    child_cfg["serving_cpu_request_millicores"], "serving_cpu_request_millicores"
+                ),
+            }
+            for mk in ("serving_memory_request_gpu", "serving_memory_request_cpu"):
+                k8s_memory_quantity_to_bytes(meta[mk])
+            return meta, "direct", None
 
     if model.parent_model_id is None:
+        if not model.repo_id:
+            raise ValueError(
+                f"model_id={model.id}: repo_id가 없고 parent_model_id도 없어 서빙 메타를 산정할 수 없습니다."
+            )
         raise ValueError(
             f"model_id={model.id}, repo_id={model.repo_id!r}: PREDEFINED_MODEL_CONFIGS에 "
             f"필수 5키가 없고 parent_model_id도 없습니다. (§7.9)"

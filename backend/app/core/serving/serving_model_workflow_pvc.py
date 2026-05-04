@@ -71,6 +71,17 @@ def _load_storage_v1():
     return client.StorageV1Api()
 
 
+def _load_batch_v1():
+    from kubernetes import client
+    from kubernetes import config as k8s_config
+
+    try:
+        k8s_config.load_incluster_config()
+    except Exception:
+        k8s_config.load_kube_config()
+    return client.BatchV1Api()
+
+
 def _cinder_zone_sc_map(settings: Any) -> Dict[str, str]:
     raw = (settings.CINDER_ZONE_TO_STORAGE_CLASS_JSON or "").strip()
     if not raw:
@@ -175,6 +186,43 @@ def _select_storage_class_name_for_cinder_zone(node_zone: str) -> str:
     )
 
 
+def _is_nfs_fallback_sc(sc_name: Optional[str]) -> bool:
+    """§12: 주어진 StorageClass 가 NFS fallback 으로 설정된 SC 인지 판별."""
+    if not sc_name:
+        return False
+    s = get_settings()
+    if not s.CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED:
+        return False
+    fb = (s.CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS or "").strip()
+    return bool(fb and fb == sc_name.strip())
+
+
+def _resolve_clone_storage_class_when_cinder_zone_mismatch(node_zone: str) -> str:
+    """§12: node_zone≠원본 availability 일 때 클론용 SC. 임시 NFS fallback 또는 Cinder zone 매칭."""
+    from config.settings import get_settings
+
+    s = get_settings()
+    if s.CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED:
+        scn = (s.CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS or "").strip()
+        if not scn:
+            raise ValueError(
+                "Cinder zone 불일치 NFS fallback 이 활성화되어 있으나 "
+                "CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS 가 비어 있습니다."
+            )
+        storage_v1 = _load_storage_v1()
+        try:
+            storage_v1.read_storage_class(name=scn)
+        except Exception as e:
+            raise ValueError(f"Cinder zone 불일치: fallback StorageClass '{scn}' 을(를) 조회할 수 없습니다: {e}") from e
+        logger.info(
+            "Cinder zone 불일치 클론: Cinder zone 매칭 SC 대신 임시 fallback SC '%s' 사용 (node_zone=%s)",
+            scn,
+            node_zone,
+        )
+        return scn
+    return _select_storage_class_name_for_cinder_zone(node_zone)
+
+
 def _registry_pvc_storage_class_and_zone(
     core_v1: "CoreV1Api", namespace: str, registry_pvc: str
 ) -> Tuple[Optional[str], Optional[str]]:
@@ -228,6 +276,180 @@ def _wait_pvc_bound(
     )
 
 
+def _find_node_attached_to_pvc(core_v1: "CoreV1Api", namespace: str, pvc_name: str) -> Optional[str]:
+    """§12: PVC 를 사용 중인 Pod 의 nodeName. 없으면 None (어느 노드든 스케줄 가능)."""
+    try:
+        pods = core_v1.list_namespaced_pod(namespace=namespace).items or []
+    except Exception as e:
+        logger.warning("Pod 목록 조회 실패 (PVC attach 노드 탐지 생략): %s %s", pvc_name, e)
+        return None
+    for pod in pods:
+        if not pod.spec or not pod.spec.volumes:
+            continue
+        for v in pod.spec.volumes:
+            pvc_ref = getattr(v, "persistent_volume_claim", None)
+            if pvc_ref and getattr(pvc_ref, "claim_name", None) == pvc_name:
+                node = pod.spec.node_name
+                if node:
+                    return node
+    return None
+
+
+def _copy_pvc_job_name(dst_pvc: str) -> str:
+    suf = uuid.uuid4().hex[:8]
+    base = f"pvc-copy-{dst_pvc}-{suf}"
+    if len(base) > 63:
+        base = base[:63].rstrip("-")
+    return base
+
+
+def _copy_pvc_data_via_job(
+    core_v1: "CoreV1Api",
+    namespace: str,
+    *,
+    src_pvc: str,
+    dst_pvc: str,
+    target_node: Optional[str],
+) -> None:
+    """§12: src_pvc → dst_pvc 데이터를 복사하는 일회성 Job. 동기 대기 후 실패 시 raise.
+
+    - src 는 RO 마운트 (Longhorn 같은 노드 다중 Pod RO 공유 가능)
+    - dst 는 RW 마운트 (NFS PVC, 어디서든 RW 마운트 가능)
+    - target_node 가 있으면 nodeSelector 로 강제 (원본이 attach 된 노드)
+    - Job 완료 대기. 실패/타임아웃 시 RuntimeError.
+    """
+    from kubernetes import client as k8s_client
+
+    s = get_settings()
+    image = (s.PVC_DATA_COPY_IMAGE or "busybox:1.36").strip() or "busybox:1.36"
+    timeout_sec = int(s.PVC_DATA_COPY_TIMEOUT_SEC or 1800)
+
+    job_name = _copy_pvc_job_name(dst_pvc)
+
+    pod_spec_kwargs: Dict[str, Any] = {
+        "restart_policy": "Never",
+        "containers": [
+            k8s_client.V1Container(
+                name="copier",
+                image=image,
+                command=["/bin/sh", "-c"],
+                args=[
+                    # cp -r: 재귀 복사. busybox cp -p 는 ownership 도 시도하므로 NFS root_squash 거부 회피 위해 -p 제외.
+                    "set -e && cp -r /src/. /dst/ && sync && echo 'pvc-copy: done'",
+                ],
+                resources=k8s_client.V1ResourceRequirements(
+                    requests={"memory": "256Mi", "cpu": "200m"},
+                    limits={"memory": "1Gi", "cpu": "1000m"},
+                ),
+                volume_mounts=[
+                    k8s_client.V1VolumeMount(name="src", mount_path="/src", read_only=True),
+                    k8s_client.V1VolumeMount(name="dst", mount_path="/dst"),
+                ],
+            )
+        ],
+        "volumes": [
+            k8s_client.V1Volume(
+                name="src",
+                persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=src_pvc, read_only=True
+                ),
+            ),
+            k8s_client.V1Volume(
+                name="dst",
+                persistent_volume_claim=k8s_client.V1PersistentVolumeClaimVolumeSource(claim_name=dst_pvc),
+            ),
+        ],
+    }
+    if target_node:
+        pod_spec_kwargs["node_selector"] = {"kubernetes.io/hostname": target_node}
+
+    job = k8s_client.V1Job(
+        metadata=k8s_client.V1ObjectMeta(
+            name=job_name,
+            namespace=namespace,
+            labels={
+                "app": "ollama-workflow",
+                "ml-workflow/pvc-copy": "true",
+                "ml-workflow/dst-pvc": dst_pvc[:60],
+            },
+        ),
+        spec=k8s_client.V1JobSpec(
+            backoff_limit=2,
+            ttl_seconds_after_finished=600,
+            active_deadline_seconds=timeout_sec,
+            template=k8s_client.V1PodTemplateSpec(
+                metadata=k8s_client.V1ObjectMeta(
+                    labels={
+                        "app": "ollama-workflow",
+                        "ml-workflow/pvc-copy": "true",
+                    },
+                ),
+                spec=k8s_client.V1PodSpec(**pod_spec_kwargs),
+            ),
+        ),
+    )
+
+    batch_v1 = _load_batch_v1()
+    try:
+        batch_v1.create_namespaced_job(namespace=namespace, body=job)
+        logger.info(
+            "Created PVC copy Job %s (src=%s → dst=%s, node=%s)",
+            job_name,
+            src_pvc,
+            dst_pvc,
+            target_node or "<any>",
+        )
+    except Exception as e:
+        if "already exists" in str(e).lower():
+            logger.info("PVC copy Job %s already exists", job_name)
+        else:
+            raise
+
+    _wait_copy_job_finished(batch_v1, namespace, job_name, timeout_sec=timeout_sec)
+
+
+def _wait_copy_job_finished(
+    batch_v1: Any,
+    namespace: str,
+    job_name: str,
+    *,
+    timeout_sec: int,
+    poll_interval_sec: int = 5,
+) -> None:
+    """Job 의 succeeded/failed 종료를 동기 대기. 실패 시 RuntimeError."""
+    from kubernetes import client as k8s_client
+
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            j = batch_v1.read_namespaced_job(name=job_name, namespace=namespace)
+        except k8s_client.exceptions.ApiException as e:
+            if e.status != 404:
+                raise
+            time.sleep(poll_interval_sec)
+            continue
+
+        status = j.status
+        succeeded = (status.succeeded or 0) if status else 0
+        failed = (status.failed or 0) if status else 0
+        backoff_limit = j.spec.backoff_limit if j.spec and j.spec.backoff_limit is not None else 0
+
+        if succeeded >= 1:
+            logger.info("PVC copy Job %s succeeded", job_name)
+            return
+        if failed > backoff_limit:
+            raise RuntimeError(
+                f"PVC copy Job {job_name} failed (failed={failed}, backoff_limit={backoff_limit}). "
+                "kubectl logs -l job-name 로 원인 확인."
+            )
+        time.sleep(poll_interval_sec)
+
+    raise RuntimeError(
+        f"PVC copy Job {job_name} 가 {timeout_sec}s 내에 완료되지 않았습니다. "
+        "모델 크기·네트워크·노드 자원·NFS 처리량을 확인하세요."
+    )
+
+
 def _create_pvc_clone_from_source(
     core_v1: "CoreV1Api",
     namespace: str,
@@ -246,10 +468,16 @@ def _create_pvc_clone_from_source(
 
     sc_name = storage_class_name_override if storage_class_name_override else spec.storage_class_name
 
-    ds = client.V1TypedLocalObjectReference(
-        api_group="",
-        kind="PersistentVolumeClaim",
-        name=source_pvc_name,
+    # §12: NFS fallback SC 는 CSI volume cloning 미지원 → data_source 를 비우고 빈 PVC 생성 후 별도 Job 으로 복사.
+    is_nfs_fallback = _is_nfs_fallback_sc(sc_name)
+    ds = (
+        None
+        if is_nfs_fallback
+        else client.V1TypedLocalObjectReference(
+            api_group="",
+            kind="PersistentVolumeClaim",
+            name=source_pvc_name,
+        )
     )
     new_spec = client.V1PersistentVolumeClaimSpec(
         access_modes=list(spec.access_modes or ["ReadWriteOnce"]),
@@ -272,13 +500,34 @@ def _create_pvc_clone_from_source(
     body = client.V1PersistentVolumeClaim(metadata=meta, spec=new_spec)
     try:
         core_v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=body)
-        logger.info("Created workflow Ollama PVC clone %s from %s", new_pvc_name, source_pvc_name)
+        logger.info(
+            "Created workflow Ollama PVC clone %s from %s (nfs_fallback=%s)",
+            new_pvc_name,
+            source_pvc_name,
+            is_nfs_fallback,
+        )
     except Exception as e:
         if "already exists" in str(e).lower():
             logger.info("PVC clone %s already exists", new_pvc_name)
         else:
             raise
     _wait_pvc_bound(core_v1, namespace, new_pvc_name)
+
+    if is_nfs_fallback:
+        try:
+            target_node = _find_node_attached_to_pvc(core_v1, namespace, source_pvc_name)
+            _copy_pvc_data_via_job(
+                core_v1,
+                namespace,
+                src_pvc=source_pvc_name,
+                dst_pvc=new_pvc_name,
+                target_node=target_node,
+            )
+        except Exception:
+            # 데이터 복사 실패 시 빈 PVC 가 남지 않도록 정리 (호출자 rollback 추가 전에 raise).
+            logger.warning("PVC copy 실패 → 빈 클론 PVC %s 정리 후 예외 전파", new_pvc_name)
+            _delete_pvc_if_exists(core_v1, namespace, new_pvc_name)
+            raise
 
 
 def _delete_pvc_if_exists(core_v1: "CoreV1Api", namespace: str, pvc_name: str) -> None:
@@ -483,7 +732,7 @@ def resolve_ollama_pvc_for_execute(
             reuse2 = _find_reuse_pvc_same_model_node(live_rows2, serving_node_name)
             if reuse2:
                 return reuse2
-            target_sc = _select_storage_class_name_for_cinder_zone(node_zone)
+            target_sc = _resolve_clone_storage_class_when_cinder_zone_mismatch(node_zone)
             return _clone_and_track(
                 model_id,
                 serving_node_name,
@@ -527,7 +776,7 @@ def _cinder_sc_override_for_clone(
         return None
     if not nz or rav is None or nz == rav:
         return None
-    return _select_storage_class_name_for_cinder_zone(nz)
+    return _resolve_clone_storage_class_when_cinder_zone_mismatch(nz)
 
 
 def _clone_registry_pvc_for_node(

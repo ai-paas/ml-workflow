@@ -1,6 +1,6 @@
 # DB · Alembic · 시드 · Harbor · E2E
 .DEFAULT_GOAL := help
-.PHONY: help alembic-upgrade-head alembic-downgrade alembic-autogen-file db-seed db-seed-ensure db-seed-upsert db-seed-reset \
+.PHONY: help alembic-upgrade-head alembic-downgrade alembic-autogen-file db-seed db-seed-ensure db-seed-upsert db-seed-sync db-seed-reset \
         harbor-login \
         harbor-build-backend harbor-push-backend harbor-build-push-backend \
         harbor-build-predictor harbor-push-predictor harbor-build-push-predictor \
@@ -10,7 +10,8 @@
         harbor-build-push-all-nc \
         flake8 flake8-fix isort black lint lint-fix \
         e2e-workflow-validation \
-        e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle
+        e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
+        e2e-model-improvement e2e-model-improvement-scenario
 
 APP_DIR := backend/app
 # backend/app 기준 uv 프로젝트 루트(backend/). --project 로 pyproject·venv만 지정 (--directory 는 cwd 가 backend/ 로 바뀌어 alembic.ini·scripts 경로가 깨짐)
@@ -28,9 +29,9 @@ help:
 	@echo "  make alembic-upgrade-head [ENV=staging]"
 	@echo "  make alembic-downgrade v=0028 [ENV=staging]   # 해당 revision 으로 DB 스키마 다운그레이드"
 	@echo "  make alembic-autogen-file msg=\"...\" [ENV=staging]   # DB 연결·reflection 필요"
-	@echo "  make db-seed [MODE=ensure|upsert] [ENV=staging]"
+	@echo "  make db-seed [MODE=ensure|upsert|sync] [ENV=staging]"
 	@echo "  make db-seed MODE=reset CONFIRM=1 [ENV=staging]"
-	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-reset"
+	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-sync, db-seed-reset"
 	@echo ""
 	@echo "Harbor · Docker (ENV 필수: dev | innogrid)"
 	@echo "  make harbor-login ENV=dev"
@@ -79,6 +80,9 @@ db-seed-ensure:
 
 db-seed-upsert:
 	@$(MAKE) db-seed MODE=upsert
+
+db-seed-sync:
+	@$(MAKE) db-seed MODE=sync
 
 db-seed-reset:
 	@$(MAKE) db-seed MODE=reset CONFIRM=1
@@ -202,11 +206,11 @@ E2E_DIR := e2e-test
 
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
-	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_validation.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_validation.py -v -s
 
-# ─── E2E: 워크플로우 시나리오 (9개) ─────────────────────────────────────────────
-# SCENARIO=1~9 로 시나리오를 선택한다.
-# 1: 단순 LLM  2: 단순 RAG  3~9: 복합 시나리오 (체인/병렬/쿼리정제 등)
+# ─── E2E: 워크플로우 시나리오 (10개) ─────────────────────────────────────────────
+# SCENARIO=1~10 로 시나리오를 선택한다.
+# 1: 단순 LLM  2: 단순 RAG  3~9: 복합 시나리오 (체인/병렬/쿼리정제 등)  10: ODM 단순 (START→MODEL→END)
 #   make e2e-wf-scenario-info                    # 전체 시나리오 목록
 #   make e2e-wf-scenario-info SCENARIO=3         # 3번 시나리오 상세
 #   make e2e-wf-scenario-deploy SCENARIO=3 ENV=dev     # 3번 배포 (.env.dev + e2e-test/.state.dev.json)
@@ -215,19 +219,28 @@ e2e-workflow-validation:
 
 e2e-wf-scenario-info:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-info SCENARIO=1" && exit 1)
-	@$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e python $(E2E_DIR)/workflow_scenarios.py $(SCENARIO)
+	@$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e python $(E2E_DIR)/workflow/definitions.py $(SCENARIO)
 
 e2e-wf-scenario-deploy:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-deploy SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 배포 테스트"
-	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_deploy.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_scenario_deploy.py -v -s
 
 e2e-wf-scenario-delete:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-delete SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 삭제 테스트"
-	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_delete.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_scenario_delete.py -v -s
 
 e2e-wf-scenario-lifecycle:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
-	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/scenarios/test_workflow_scenario_lifecycle.py -v -s
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_scenario_lifecycle.py -v -s
+
+e2e-model-improvement:
+	@echo "▶ E2E: 최적화/경량화 (model-improvements) API — 빠른 검증"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_improvement/test_model_improvement.py -v -s -m model_improvement
+
+e2e-model-improvement-scenario:
+	@echo "▶ E2E: 최적화/경량화 시나리오 — 작업 생성 후 SUCCEEDED까지 폴링"
+	@echo "    소스: E2E_OPTIMIZATION_SOURCE_MODEL_NAME (E2E_WORKFLOW_TARGET_LLM_MODEL 과 동일 패턴), 선택 E2E_OPTIMIZATION_TASK_TYPE"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_improvement/test_model_improvement.py -v -s -m model_improvement_scenario

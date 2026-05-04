@@ -19,6 +19,7 @@ from .model import (
     TrainImageRegistry,
 )
 from .model_base_deployment import ModelBaseDeployment
+from .model_improvement_task import ModelImprovementTask
 from .model_workflow_deployment import ModelWorkflowDeployment
 from .prompt import Prompt, PromptVariable
 from .service import (

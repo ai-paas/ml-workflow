@@ -10,12 +10,12 @@ class CreateImprovementResponse(BaseModel):
     task_id: str
     status: str
     source_model_id: int
-    created_at: str
+    created_at: str  # ISO-8601 (UTC, Z 접미)
 
 
 class ImprovementStatusResponse(BaseModel):
     task_id: str
-    status: str
+    status: str  # PENDING | RUNNING | SUCCEEDED | FAILED
     source_model_id: int
     created_at: str
     updated_at: str

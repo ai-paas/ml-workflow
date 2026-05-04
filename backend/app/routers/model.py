@@ -5,6 +5,7 @@ from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
 from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
+from config.optimization_sources import is_optimization_eligible
 from config.settings import get_settings
 from db.models.model import ModelTaskType
 from db.models.model_base_deployment import BaseDeploymentStatus
@@ -30,7 +31,6 @@ from services.model import (
     ModelService,
     ModelTypeService,
     OllamaModelService,
-    is_optimization_eligible,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
