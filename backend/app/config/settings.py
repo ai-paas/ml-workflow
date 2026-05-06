@@ -181,8 +181,8 @@ class Settings(BaseSettings):
     )
 
     OPTIMIZATION_SERVER_URL: str = Field(
-        default="https://aipaas-lite-model-dev.surromind.ai",
-        description="최적화/경량화 서버 Base URL",
+        ...,
+        description="최적화/경량화 서버 Base URL (필수). 환경변수에 설정되어 있지 않으면 서버 시작 단계에서 ValidationError 로 실패.",
     )
     OPTIMIZATION_SERVER_TIMEOUT: int = Field(
         default=30,
