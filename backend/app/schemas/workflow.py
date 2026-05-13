@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, computed_field, model_serializer, model_v
 from schemas.base import TimeStampSchemaMixin
 from schemas.model import ModelBriefReadSchema
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
-from schemas.user import UserSchema
+from schemas.user import UserBriefSchema
 
 if TYPE_CHECKING:
     from db.models.service import ComponentConnection
@@ -49,6 +49,8 @@ class ComponentCreateRequest(BaseModel):
     knowledge_base_id: Optional[int] = Field(None, description="Knowledge Base 컴포넌트인 경우 Knowledge Base ID")
     prompt_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 프롬프트 ID")
     config: Optional[Dict[str, Any]] = Field(None, description="컴포넌트별 세부 설정")
+    x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
+    y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
 
     @model_validator(mode="after")
     def validate_config(self):
@@ -103,6 +105,8 @@ class ComponentReadSchema(TimeStampSchemaMixin):
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
     config: Optional[Dict[str, Any]] = None
+    x: Optional[int] = None
+    y: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -214,7 +218,7 @@ class WorkflowBaseSchema(TimeStampSchemaMixin):
 class WorkflowReadSchema(WorkflowBaseSchema):
     """워크플로우 상세 조회 응답"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     kubeflow_run_id: Optional[str] = None
     components: List[ComponentReadSchema] = Field(default_factory=list)
     component_connections: List[ConnectionReadSchema] = Field(default_factory=list)
@@ -287,7 +291,7 @@ class WorkflowTemplateCreateRequest(BaseModel):
 class WorkflowTemplateBriefSchema(WorkflowBaseSchema):
     """워크플로우 템플릿 목록 조회용 간략 정보"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     usage_count: int = Field(0, description="템플릿 사용 횟수")
 
     class Config:

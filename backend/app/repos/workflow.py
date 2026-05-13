@@ -158,6 +158,8 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
             model_id=component_data.model_id,
             knowledge_base_id=component_data.knowledge_base_id,
             prompt_id=getattr(component_data, "prompt_id", None),
+            x=component_data.x,
+            y=component_data.y,
         )
         db.add(component)
         db.flush()

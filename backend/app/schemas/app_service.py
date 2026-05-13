@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 from schemas.base import TimeStampSchemaMixin
-from schemas.user import UserSchema
+from schemas.user import UserBriefSchema
 from schemas.workflow import WorkflowBaseSchema
 
 
@@ -80,7 +80,7 @@ class ServiceBaseSchema(TimeStampSchemaMixin):
 class ServiceBriefSchema(ServiceBaseSchema):
     """서비스 간략 정보 (리스트용)"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     workflow_count: int = Field(0, description="연결된 워크플로우 수")
 
     class Config:
@@ -90,7 +90,7 @@ class ServiceBriefSchema(ServiceBaseSchema):
 class ServiceDetailSchema(ServiceBaseSchema):
     """서비스 상세 정보"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     workflows: List[WorkflowBaseSchema] = Field(default_factory=list, description="연결된 워크플로우 목록")
     monitoring_data: Optional[ServiceMonitoringData] = Field(None, description="모니터링 데이터")
 

@@ -234,6 +234,18 @@ class TestWorkflowScenarioDeploy:
         n_saved = len(load_deployment_entries(SCENARIO_NUM))
         print(f"\n✔ 워크플로우 생성 완료: id={data['id']} (시나리오 #{SCENARIO_NUM} 저장 건수: {n_saved})")
 
+        # 생성한 컴포넌트의 x, y 좌표가 조회 응답에 그대로 반환되는지 검증한다 (음수 좌표 포함).
+        wf_read = requests.get(f"{api_url}/workflows/{data['id']}", headers=auth_headers)
+        assert wf_read.status_code == 200, f"워크플로우 조회 실패: {wf_read.status_code} {wf_read.text}"
+        sent_by_name = {c["name"]: (c["x"], c["y"]) for c in definition["components"]}
+        for comp in wf_read.json()["components"]:
+            assert comp["name"] in sent_by_name, f"예상치 못한 컴포넌트: {comp['name']}"
+            assert (comp["x"], comp["y"]) == sent_by_name[comp["name"]], (
+                f"컴포넌트 '{comp['name']}' 의 좌표 불일치: "
+                f"보낸 값={sent_by_name[comp['name']]}, 응답={(comp['x'], comp['y'])}"
+            )
+        print(f"  ✔ 컴포넌트 {len(definition['components'])}개 x, y 좌표 일치 확인")
+
     def test_07_execute_workflow(self, api_url: str, auth_headers: dict):
         """워크플로우를 실행(배포)한다."""
         wf_id = self.__class__.workflow_id

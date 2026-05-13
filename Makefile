@@ -11,6 +11,7 @@
         flake8 flake8-fix isort black lint lint-fix \
         e2e-workflow-validation \
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
+        e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario
 
 APP_DIR := backend/app
@@ -235,6 +236,14 @@ e2e-wf-scenario-lifecycle:
 	@[ -n "$(SCENARIO)" ] || (echo "ERROR: SCENARIO를 지정하세요. 예: make e2e-wf-scenario-lifecycle SCENARIO=1" && exit 1)
 	@echo "▶ E2E: 워크플로우 시나리오 #$(SCENARIO) 전체 생명주기 테스트"
 	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(SCENARIO) uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_scenario_lifecycle.py -v -s
+
+# ─── E2E: 워크플로우 템플릿 → 복제 → 실행 → 추론 → 정리 ──────────────────────────
+# 가장 단순한 정의(시나리오 #1)로 템플릿 생성 → 복제 → 배포 → 추론 → 삭제 전체를 검증한다.
+#   make e2e-wf-template-clone            # 기본
+#   make e2e-wf-template-clone ENV=dev    # .env.dev 적용
+e2e-wf-template-clone:
+	@echo "▶ E2E: 워크플로우 템플릿 생성 → 복제 → 실행 → 추론 → 정리 테스트"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_template_clone.py -v -s
 
 e2e-model-improvement:
 	@echo "▶ E2E: 최적화/경량화 (model-improvements) API — 빠른 검증"

@@ -51,11 +51,10 @@ def create_service(
     - **creator_id** (int): 서비스 생성자 ID
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 최종 수정 시각
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -135,11 +134,10 @@ def list_services(
         - creator_id (int): 생성자 ID
         - created_at (datetime): 생성 시각
         - updated_at (datetime): 최종 수정 시각
-        - creator (UserSchema): 생성자 상세 정보
+        - creator (UserBriefSchema): 생성자 상세 정보
             - id (int): 사용자 ID
             - username (str): 사용자명
             - name (str): 사용자 이름
-            - password (str): 비밀번호 (해시된 값)
             - created_at (datetime): 계정 생성 시각
             - updated_at (datetime): 계정 정보 수정 시각
             - created_by (str, optional): 계정 생성자
@@ -220,11 +218,10 @@ def get_service_detail(
     - **creator_id** (int): 생성자 ID
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 최종 수정 시각
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -322,11 +319,10 @@ def update_service(
     - **creator_id** (int): 생성자 ID (변경 불가)
     - **created_at** (datetime): 생성 시각 (변경 불가)
     - **updated_at** (datetime): 수정 시각 (현재 시각으로 자동 갱신)
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
