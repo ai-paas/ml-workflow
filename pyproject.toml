@@ -28,6 +28,7 @@ markers = [
     "workflow_scenario_deploy: 워크플로 시나리오 배포",
     "workflow_scenario_delete: 워크플로 시나리오 삭제",
     "workflow_scenario_lifecycle: 워크플로 시나리오 생명주기",
+    "workflow_template_clone: 워크플로 템플릿 생성 → 복제 → 실행 → 추론 → 정리",
     "model_improvement: 최적화/경량화 API",
     "model_improvement_scenario: 최적화/경량화 E2E(작업 생성~성공 폴링)",
 ]

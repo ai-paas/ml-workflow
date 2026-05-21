@@ -123,6 +123,10 @@ class WorkflowComponent(BaseModel, TimestampMixin):
     # 모델 컴포넌트인 경우 프롬프트 ID
     prompt_id: Mapped[Optional[int]] = mapped_column(ForeignKey("prompt.id"), nullable=True)
 
+    # 프론트 캔버스 좌표 (음수 허용)
+    x: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    y: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Relationships
     workflow: Mapped["Workflow"] = relationship("Workflow", back_populates="components")
     model: Mapped[Optional["Model"]] = relationship("Model")

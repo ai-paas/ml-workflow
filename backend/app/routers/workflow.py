@@ -169,6 +169,8 @@ def create_workflow(
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
             - config (dict, optional): 컴포넌트별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_ref_id (str): 소스 컴포넌트 ref_id
             - target_ref_id (str): 타겟 컴포넌트 ref_id
@@ -391,6 +393,8 @@ def create_workflow_template(
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
             - config (dict, optional): 타입별 세부 설정 (MODEL/KB 등, START/END는 미사용)
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - connections (List[ConnectionCreateRequest]): 연결 정의 (요청 시 ref_id 기준)
             - source_ref_id (str): 소스 컴포넌트의 ref_id
             - target_ref_id (str): 타겟 컴포넌트의 ref_id
@@ -403,11 +407,10 @@ def create_workflow_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -500,11 +503,10 @@ def list_workflow_templates(
         - status (str): 템플릿 상태 (DRAFT)
         - service_id (str): 기본 서비스 ID
         - creator_id (int): 템플릿 생성자 ID
-        - creator (UserSchema): 생성자 정보
+        - creator (UserBriefSchema): 생성자 정보
             - id (int): 사용자 ID
             - username (str): 사용자명
             - name (str): 사용자 이름
-            - password (str): 비밀번호 (해시된 값)
             - created_at (datetime): 계정 생성 시각
             - updated_at (datetime): 계정 정보 수정 시각
             - created_by (str, optional): 계정 생성자
@@ -594,11 +596,10 @@ def get_workflow_template(
         - 템플릿으로부터 워크플로우 생성 시 기본으로 연결될 서비스 ID
         - null 가능 (서비스 연결 없이 생성 가능)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -652,6 +653,8 @@ def get_workflow_template(
                 - updated_at (datetime): 수정 시각
             - created_at (datetime): 모델 생성 시각
             - updated_at (datetime): 모델 수정 시각
+        - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+        - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - created_at (datetime): 컴포넌트 생성 시각
         - updated_at (datetime): 컴포넌트 수정 시각
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
@@ -735,11 +738,10 @@ def clone_from_template(
     - **service_id** (str): 연결된 서비스 ID
     - **service_name** (str): 연결된 서비스 이름
     - **creator_id** (int): 생성자 ID (현재 사용자)
-    - **creator** (UserSchema): 생성자 정보 (현재 사용자)
+    - **creator** (UserBriefSchema): 생성자 정보 (현재 사용자)
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -825,6 +827,8 @@ def update_workflow_template(
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
             - config (dict, optional): 타입별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_ref_id (str): 소스 컴포넌트 ref_id
             - target_ref_id (str): 타겟 컴포넌트 ref_id
@@ -837,7 +841,7 @@ def update_workflow_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID (항상 null)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
     - **is_template** (bool): 템플릿 여부 (항상 true)
     - **template_id** (str): 원본 템플릿 ID (항상 null)
     - **components** (List[ComponentReadSchema]): 컴포넌트 상세 정보
@@ -972,11 +976,10 @@ def get_workflow(
         - service_id가 null이면 null
     - **creator_id** (int): 생성자 ID
         - 워크플로우를 생성한 사용자의 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -1041,6 +1044,8 @@ def get_workflow(
                 - updated_at (datetime): 수정 시각
             - created_at (datetime): 모델 생성 시각
             - updated_at (datetime): 모델 수정 시각
+        - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+        - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - created_at (datetime): 컴포넌트 생성 시각
         - updated_at (datetime): 컴포넌트 수정 시각
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
@@ -1134,6 +1139,8 @@ def update_workflow(
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
                 - MODEL 타입인 경우 선택, 다른 타입은 null
             - config (dict, optional): 타입별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - connections (List[ConnectionCreateRequest]): 연결 목록
             - source_ref_id (str): 소스 컴포넌트 ref_id
             - target_ref_id (str): 타겟 컴포넌트 ref_id
@@ -1147,7 +1154,7 @@ def update_workflow(
     - **service_id** (str): 연결된 서비스 ID
     - **service_name** (str): 연결된 서비스 이름
     - **creator_id** (int): 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
     - **is_template** (bool): 템플릿 여부 (false)
     - **template_id** (str): 원본 템플릿 ID
     - **template_name** (str): 원본 템플릿 이름

@@ -285,12 +285,12 @@ class WorkflowService:
             raise ValueError(f"Template {template_id} not found")
 
         # 새 워크플로우 생성 (workflow_definition 없이)
+        # template_id 는 WorkflowCreateRequest 에 없는 필드라 WorkflowCreateInternal 로 직접 전달한다.
         workflow_data = WorkflowCreateRequest(
             name=workflow_name,
             description=f"Created from template: {template.name}",
             category=template.category,
             service_id=service_id,
-            template_id=template_id,
             workflow_definition=None,  # workflow_definition은 사용하지 않음
         )
 
@@ -302,7 +302,11 @@ class WorkflowService:
         # is_template은 False로 설정 (템플릿으로부터 생성된 워크플로우)
         # 상태는 DRAFT로 시작 (실행 후 파이프라인 완료 시 ACTIVE로 변경됨)
         workflow_internal = WorkflowCreateInternal(
-            **workflow_data_dict, is_template=False, status=WorkflowStatus.DRAFT, creator_id=creator_id
+            **workflow_data_dict,
+            is_template=False,
+            template_id=template_id,
+            status=WorkflowStatus.DRAFT,
+            creator_id=creator_id,
         )
 
         # base의 create 메서드 사용 (DB 작업 포함)
@@ -322,6 +326,8 @@ class WorkflowService:
                 model_id=template_component.model_id,
                 knowledge_base_id=template_component.knowledge_base_id,
                 prompt_id=template_component.prompt_id,
+                x=template_component.x,
+                y=template_component.y,
             )
             db.add(new_component)
             db.flush()

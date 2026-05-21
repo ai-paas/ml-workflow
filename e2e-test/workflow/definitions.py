@@ -603,7 +603,12 @@ def build_workflow_definition(
         raise ValueError(
             f"시나리오 #{num} ({scenario['name']}) 은 KB {kb_count}개가 필요합니다. " f"(제공된 kb_ids: {len(ids)}개)"
         )
-    return _BUILDERS[num](model_id, ids, top_k, prompt_ids or {})
+    definition = _BUILDERS[num](model_id, ids, top_k, prompt_ids or {})
+    # x, y 캔버스 좌표 자동 부여 — 짝수 인덱스는 양수 y, 홀수는 음수 y 로 음수 허용도 함께 검증한다.
+    for i, comp in enumerate(definition["components"]):
+        comp["x"] = i * 200
+        comp["y"] = 50 if i % 2 == 0 else -50
+    return definition
 
 
 def state_key_wf(num: int) -> str:
