@@ -17,9 +17,10 @@ E2E: 서비스 모니터링 metric 기록 검증 (단순 LLM 자기완결형)
   7.  GET  /workflows/{id}/status            — ACTIVE 확인
   8.  POST /workflows/{id}/test/rag          — 추론 (서비스 연결되어 metric 기록)
   9.  GET  /services/{id}                    — monitoring_data.total_metrics["1h"] 검증
-  10~12. DELETE /workflows/{id} → finalize → 404
-  13~14. DELETE /services/{id} → 404
-  15. DELETE /prompts/{id}                   — 프롬프트 정리 (있는 경우)
+  10. (확인) 삭제 진행 여부 입력             — 거절 시 이후 정리 스킵, 리소스 유지(수동 점검용)
+  11~13. DELETE /workflows/{id} → finalize → 404
+  14~15. DELETE /services/{id} → 404
+  16. DELETE /prompts/{id}                   — 프롬프트 정리 (있는 경우)
 
 전제: 대상 서버가 1h/1d/1w 기간별 모니터링(정규화 마이그레이션 포함)으로 배포되어 있어야 한다.
 시나리오: E2E_SCENARIO(기본 1). KB가 필요한 시나리오는 본 테스트 범위 밖이라 스킵한다.
@@ -30,6 +31,7 @@ import uuid
 
 import pytest
 import requests
+from cleanup_prompt import confirm_cleanup
 from config import (
     DELETE_TIMEOUT_SEC,
     DEPLOY_TIMEOUT_SEC,
@@ -52,6 +54,12 @@ class TestServiceMetricLifecycle:
     service_id: str | None = None
     workflow_id: str | None = None
     prompt_ids: dict = {}
+    proceed_cleanup: bool | None = None
+
+    def _skip_if_no_cleanup(self):
+        """삭제 확인 단계에서 사용자가 거절하면 이후 정리 단계를 모두 스킵한다."""
+        if not self.__class__.proceed_cleanup:
+            pytest.skip("사용자가 삭제를 건너뜀 — 리소스 유지(수동 확인용)")
 
     @staticmethod
     def _find_model_by_name(api_url: str, headers: dict, model_name: str) -> dict:
@@ -230,17 +238,39 @@ class TestServiceMetricLifecycle:
         assert wf_metrics[wf_id]["metrics"]["1h"]["message_count"] >= 1
         print(f"✔ 서비스 metric 기록 확인: 1h.message_count={h1['message_count']}, active_users={h1['active_users']}")
 
-    # ── Phase 4: 정리 ───────────────────────────────────────
+    # ── Phase 4: 정리 (삭제 전 확인) ─────────────────────────
 
-    def test_10_delete_workflow(self, api_url: str, auth_headers: dict):
-        """워크플로우 삭제 시작 (모니터링 행 정리 포함되어 FK 충돌 없이 삭제되어야 한다)."""
+    def test_10_confirm_cleanup(self, api_url: str, auth_headers: dict):
+        """삭제 전에 사용자에게 확인. 거절하면 이후 정리 단계를 스킵하고 리소스를 남긴다.
+
+        남겨두면 DB 상태 확인·추가 추론으로 상태를 직접 더 점검할 수 있다.
+        비대화형(파이프/CI)이면 자동으로 정리를 진행한다.
+        """
+        service_id = self.__class__.service_id
+        wf_id = self.__class__.workflow_id
+        self.__class__.proceed_cleanup = confirm_cleanup(
+            [
+                f"service_id = {service_id}",
+                f"workflow_id = {wf_id}",
+                f"상태 확인 예: GET {api_url}/services/{service_id}",
+                f"추가 추론 예: POST {api_url}/workflows/{wf_id}/test/rag",
+            ]
+        )
+        if not self.__class__.proceed_cleanup:
+            print(f"   워크플로우 삭제: DELETE {api_url}/workflows/{wf_id} → finalize-deletion")
+            print(f"   서비스 삭제: DELETE {api_url}/services/{service_id}")
+
+    def test_11_delete_workflow(self, api_url: str, auth_headers: dict):
+        """워크플로우 삭제 시작 (모니터링 행은 FK CASCADE 로 함께 삭제됨)."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         resp = requests.delete(f"{api_url}/workflows/{wf_id}", headers=auth_headers)
         assert resp.status_code == 202, f"삭제 시작 실패: {resp.status_code} {resp.text}"
         print(f"\n✔ 워크플로우 삭제 시작: cleanup_run_id={resp.json().get('cleanup_run_id')}")
 
-    def test_11_finalize_deletion(self, api_url: str, auth_headers: dict):
+    def test_12_finalize_deletion(self, api_url: str, auth_headers: dict):
         """K8s 리소스 정리 + DB 삭제 완료를 폴링한다."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         deadline = time.time() + DELETE_TIMEOUT_SEC
         while time.time() < deadline:
@@ -259,29 +289,33 @@ class TestServiceMetricLifecycle:
             time.sleep(POLL_INTERVAL_SEC)
         pytest.fail(f"삭제 타임아웃 ({DELETE_TIMEOUT_SEC}s)")
 
-    def test_12_verify_workflow_deleted(self, api_url: str, auth_headers: dict):
+    def test_13_verify_workflow_deleted(self, api_url: str, auth_headers: dict):
         """워크플로우 404 확인."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         resp = requests.get(f"{api_url}/workflows/{wf_id}", headers=auth_headers)
         assert resp.status_code == 404, f"워크플로우가 아직 존재: {resp.status_code}"
         print("\n✔ 워크플로우 404 확인")
 
-    def test_13_delete_service(self, api_url: str, auth_headers: dict):
-        """서비스 삭제 (모니터링 행 정리 포함되어 FK 충돌 없이 삭제되어야 한다)."""
+    def test_14_delete_service(self, api_url: str, auth_headers: dict):
+        """서비스 삭제 (모니터링 행은 FK CASCADE 로 함께 삭제, 다른 워크플로우는 SET NULL 로 보존)."""
+        self._skip_if_no_cleanup()
         service_id = self.__class__.service_id
         resp = requests.delete(f"{api_url}/services/{service_id}", headers=auth_headers)
         assert resp.status_code == 204, f"서비스 삭제 실패: {resp.status_code} {resp.text}"
         print(f"\n✔ 서비스 삭제 완료: {service_id}")
 
-    def test_14_verify_service_deleted(self, api_url: str, auth_headers: dict):
+    def test_15_verify_service_deleted(self, api_url: str, auth_headers: dict):
         """서비스 404 확인."""
+        self._skip_if_no_cleanup()
         service_id = self.__class__.service_id
         resp = requests.get(f"{api_url}/services/{service_id}", headers=auth_headers)
         assert resp.status_code == 404, f"서비스가 아직 존재: {resp.status_code}"
         print("\n✔ 서비스 404 확인")
 
-    def test_15_delete_prompts(self, api_url: str, auth_headers: dict):
+    def test_16_delete_prompts(self, api_url: str, auth_headers: dict):
         """프롬프트 정리 (있는 경우)."""
+        self._skip_if_no_cleanup()
         prompt_ids = self.__class__.prompt_ids
         if not prompt_ids:
             pytest.skip("프롬프트가 없어 스킵합니다.")

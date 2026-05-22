@@ -2798,7 +2798,7 @@ async def _execute_llm_inference(
                         db=db,
                         service_id=service_id,
                         workflow_id=workflow_id,
-                        user_id=current_user.id,
+                        user_id=current_user.username,
                         response_time_ms=response_time_ms,
                         is_success=True,
                     )
@@ -2875,6 +2875,9 @@ async def _execute_llm_inference(
             ),
         )
 
+        # Ollama 응답의 토큰 사용량 = 입력(prompt_eval_count) + 출력(eval_count)
+        token_usage = int(result_data.get("prompt_eval_count") or 0) + int(result_data.get("eval_count") or 0)
+
         # 모니터링 데이터 기록
         if service_id:
             try:
@@ -2882,9 +2885,10 @@ async def _execute_llm_inference(
                     db=db,
                     service_id=service_id,
                     workflow_id=workflow_id,
-                    user_id=current_user.id,
+                    user_id=current_user.username,
                     response_time_ms=response_time_ms,
                     is_success=True,
+                    token_usage=token_usage,
                 )
                 db.commit()
             except Exception as e:
@@ -3045,7 +3049,7 @@ async def _execute_odm_inference(
                                 db=db,
                                 service_id=service_id,
                                 workflow_id=workflow_id,
-                                user_id=current_user.id,
+                                user_id=current_user.username,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
                             )
@@ -3074,7 +3078,7 @@ async def _execute_odm_inference(
                                 db=db,
                                 service_id=service_id,
                                 workflow_id=workflow_id,
-                                user_id=current_user.id,
+                                user_id=current_user.username,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
                             )

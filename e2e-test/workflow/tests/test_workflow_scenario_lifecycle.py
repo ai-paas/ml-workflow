@@ -15,12 +15,13 @@ E2E 시나리오: 워크플로우 시나리오 전체 생명주기 테스트
   8.  GET  /workflows/{id}/status            — 배포 완료 폴링
   9.  GET  /workflows/{id}/status            — ACTIVE 상태 확인
   10. POST /workflows/{id}/test/rag 또는 …/test/ml — 추론 테스트
-  11. DELETE /workflows/{id}                 — 워크플로우 삭제 시작
-  12. POST /workflows/{id}/finalize-deletion — 삭제 완료 폴링
-  13. GET  /workflows/{id}                   — 워크플로우 404 확인
-  14. DELETE /knowledge-bases/{id}            — KB 삭제 (1~2개, 있는 경우)
-  15. GET  /knowledge-bases/{id}              — KB 404 확인 (있는 경우)
-  16. DELETE /prompts/{id}                    — 프롬프트 삭제
+  11. (확인) 삭제 진행 여부 입력             — 거절 시 이후 정리 스킵, 리소스 유지(수동 점검용)
+  12. DELETE /workflows/{id}                 — 워크플로우 삭제 시작
+  13. POST /workflows/{id}/finalize-deletion — 삭제 완료 폴링
+  14. GET  /workflows/{id}                   — 워크플로우 404 확인
+  15. DELETE /knowledge-bases/{id}            — KB 삭제 (1~2개, 있는 경우)
+  16. GET  /knowledge-bases/{id}              — KB 404 확인 (있는 경우)
+  17. DELETE /prompts/{id}                    — 프롬프트 삭제
 """
 
 import json
@@ -29,6 +30,7 @@ import uuid
 
 import pytest
 import requests
+from cleanup_prompt import confirm_cleanup
 from config import (
     DELETE_TIMEOUT_SEC,
     DEPLOY_TIMEOUT_SEC,
@@ -62,6 +64,12 @@ class TestWorkflowScenarioLifecycle:
     chunk_type_id: int | None = None
     language_id: int | None = None
     search_method_id: int | None = None
+    proceed_cleanup: bool | None = None
+
+    def _skip_if_no_cleanup(self):
+        """삭제 확인 단계에서 사용자가 거절하면 이후 정리 단계를 모두 스킵한다."""
+        if not self.__class__.proceed_cleanup:
+            pytest.skip("사용자가 삭제를 건너뜀 — 리소스 유지(수동 확인용)")
 
     # ── helpers ──────────────────────────────────────────────
 
@@ -341,10 +349,28 @@ class TestWorkflowScenarioLifecycle:
         else:
             print(f"  final_result: {fr[:120]}{'…' if len(fr) > 120 else ''}")
 
-    # ── Phase 4: 삭제 ───────────────────────────────────────
+    # ── Phase 4: 삭제 (삭제 전 확인) ─────────────────────────
 
-    def test_11_delete_workflow(self, api_url: str, auth_headers: dict):
+    def test_11_confirm_cleanup(self, api_url: str, auth_headers: dict):
+        """삭제 전에 사용자에게 확인. 거절하면 이후 정리 단계를 스킵하고 리소스를 남긴다.
+
+        남겨두면 배포·추론 상태를 직접 더 점검할 수 있다. 비대화형(파이프/CI)이면 자동 진행.
+        """
+        wf_id = self.__class__.workflow_id
+        kb_ids = self.__class__.kb_ids
+        prompt_ids = self.__class__.prompt_ids
+        self.__class__.proceed_cleanup = confirm_cleanup(
+            [
+                f"workflow_id = {wf_id}",
+                f"kb_ids = {kb_ids or '(없음)'}",
+                f"prompt_ids = {list(prompt_ids.values()) or '(없음)'}",
+                f"추론 예: POST {api_url}/workflows/{wf_id}/test/rag",
+            ]
+        )
+
+    def test_12_delete_workflow(self, api_url: str, auth_headers: dict):
         """워크플로우 삭제를 시작한다."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         assert wf_id
 
@@ -354,8 +380,9 @@ class TestWorkflowScenarioLifecycle:
         data = resp.json()
         print(f"\n✔ 워크플로우 삭제 시작: cleanup_run_id={data.get('cleanup_run_id')}")
 
-    def test_12_finalize_deletion(self, api_url: str, auth_headers: dict):
+    def test_13_finalize_deletion(self, api_url: str, auth_headers: dict):
         """K8s 리소스 정리를 폴링한다."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         assert wf_id
 
@@ -387,8 +414,9 @@ class TestWorkflowScenarioLifecycle:
 
         pytest.fail(f"삭제 타임아웃 ({DELETE_TIMEOUT_SEC}s 초과)")
 
-    def test_13_verify_workflow_deleted(self, api_url: str, auth_headers: dict):
+    def test_14_verify_workflow_deleted(self, api_url: str, auth_headers: dict):
         """워크플로우가 완전히 삭제되었는지 확인한다."""
+        self._skip_if_no_cleanup()
         wf_id = self.__class__.workflow_id
         assert wf_id
 
@@ -396,8 +424,9 @@ class TestWorkflowScenarioLifecycle:
         assert resp.status_code == 404, f"워크플로우가 아직 존재합니다: {resp.status_code}"
         print(f"\n✔ 워크플로우 404 확인: {wf_id}")
 
-    def test_14_delete_knowledge_bases(self, api_url: str, auth_headers: dict):
+    def test_15_delete_knowledge_bases(self, api_url: str, auth_headers: dict):
         """Knowledge Base를 삭제한다 (1~2개, 있는 경우)."""
+        self._skip_if_no_cleanup()
         kb_ids = self.__class__.kb_ids
         if not kb_ids:
             pytest.skip("KB가 없는 시나리오이므로 스킵합니다.")
@@ -412,8 +441,9 @@ class TestWorkflowScenarioLifecycle:
 
         print(f"\n✔ KB {len(kb_ids)}개 삭제 완료")
 
-    def test_15_verify_kbs_deleted(self, api_url: str, auth_headers: dict):
+    def test_16_verify_kbs_deleted(self, api_url: str, auth_headers: dict):
         """KB가 완전히 삭제되었는지 확인한다 (있는 경우)."""
+        self._skip_if_no_cleanup()
         kb_ids = self.__class__.kb_ids
         if not kb_ids:
             pytest.skip("KB가 없는 시나리오이므로 스킵합니다.")
@@ -423,8 +453,9 @@ class TestWorkflowScenarioLifecycle:
             assert resp.status_code == 404, f"KB{idx + 1}이 아직 존재합니다 (id={kb_id}): {resp.status_code}"
             print(f"  ✔ KB{idx + 1} 404 확인: kb_id={kb_id}")
 
-    def test_16_delete_prompts(self, api_url: str, auth_headers: dict):
+    def test_17_delete_prompts(self, api_url: str, auth_headers: dict):
         """시나리오에서 생성한 프롬프트를 삭제한다."""
+        self._skip_if_no_cleanup()
         prompt_ids = self.__class__.prompt_ids
         if not prompt_ids:
             pytest.skip("프롬프트가 없어 스킵합니다.")

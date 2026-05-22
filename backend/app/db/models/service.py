@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum as PyEnum
 from typing import TYPE_CHECKING, List, Optional
 
-from sqlalchemy import JSON, TIMESTAMP, BigInteger, Boolean, Enum, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, TIMESTAMP, Boolean, Enum, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import BaseModel, TimestampMixin
@@ -186,14 +186,13 @@ class ServiceMonitoring(BaseModel, TimestampMixin):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    # 서비스/워크플로우 삭제 시 모니터링 행은 CASCADE 로 함께 삭제, 사용자 삭제 시 user_id 만 SET NULL
+    # 서비스/워크플로우 삭제 시 모니터링 행은 CASCADE 로 함께 삭제된다.
     service_id: Mapped[str] = mapped_column(String(36), ForeignKey("services.id", ondelete="CASCADE"), nullable=False)
     workflow_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=True
     )
-    user_id: Mapped[Optional[int]] = mapped_column(
-        BigInteger, ForeignKey("user.id", ondelete="SET NULL"), nullable=True
-    )  # 요청 사용자
+    # 요청 사용자 username (FK 아님 — 사용자 PK가 int 라 문자열 username 을 그대로 저장)
+    user_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # 추론 요청 1건 = 행 1개 (per-event 로그). 집계 메트릭은 조회 시점에 유도한다.
     timestamp: Mapped[datetime] = mapped_column(TIMESTAMP, default=datetime.utcnow, nullable=False)

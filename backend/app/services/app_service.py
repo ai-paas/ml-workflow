@@ -450,10 +450,11 @@ class AppServiceService:
 
 def _period_from_row(row, prefix: str) -> PeriodMetrics:
     """집계 행에서 한 기간(prefix=h1/d1/w1)의 메트릭을 유도."""
-    message_count = getattr(row, f"{prefix}_message_count") or 0
-    success_count = getattr(row, f"{prefix}_success_count") or 0
-    active_users = getattr(row, f"{prefix}_active_users") or 0
-    token_usage = getattr(row, f"{prefix}_token_usage") or 0
+    # MySQL SUM()은 정수 컬럼이라도 Decimal 을 반환하므로 int 로 캐스팅(Decimal*float 연산 오류 방지)
+    message_count = int(getattr(row, f"{prefix}_message_count") or 0)
+    success_count = int(getattr(row, f"{prefix}_success_count") or 0)
+    active_users = int(getattr(row, f"{prefix}_active_users") or 0)
+    token_usage = int(getattr(row, f"{prefix}_token_usage") or 0)
     response_time = getattr(row, f"{prefix}_response_time_ms")
 
     return PeriodMetrics(
@@ -604,7 +605,7 @@ class ServiceMonitoringService:
         db: Session,
         service_id: str,
         workflow_id: str,
-        user_id: int,
+        user_id: str,
         response_time_ms: float,
         is_success: bool,
         token_usage: int = 0,
@@ -615,7 +616,7 @@ class ServiceMonitoringService:
             db: 데이터베이스 세션
             service_id: 서비스 ID
             workflow_id: 워크플로우 ID
-            user_id: 요청 사용자 ID (고유 사용자/평균 상호작용 집계용)
+            user_id: 요청 사용자 username (고유 사용자/평균 상호작용 집계용, FK 아님)
             response_time_ms: 응답 시간 (밀리초)
             is_success: 성공 여부 (error_count/success_rate 유도)
             token_usage: 요청별 토큰 사용량 (TODO: 추론 응답의 실제 토큰 수로 채울 것)
