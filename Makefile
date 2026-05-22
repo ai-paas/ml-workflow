@@ -12,7 +12,8 @@
         e2e-workflow-validation \
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
-        e2e-model-improvement e2e-model-improvement-scenario
+        e2e-model-improvement e2e-model-improvement-scenario \
+        e2e-service-metric
 
 APP_DIR := backend/app
 # backend/app 기준 uv 프로젝트 루트(backend/). --project 로 pyproject·venv만 지정 (--directory 는 cwd 가 backend/ 로 바뀌어 alembic.ini·scripts 경로가 깨짐)
@@ -257,6 +258,15 @@ e2e-wf-scenario-lifecycle:
 e2e-wf-template-clone:
 	@echo "▶ E2E: 워크플로우 템플릿 생성 → 복제 → 실행 → 추론 → 정리 테스트"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_template_clone.py -v -s
+
+# ─── E2E: 서비스 모니터링 metric ────────────────────────────────────────────────
+# 단순 LLM 워크플로우를 서비스에 연결해 배포 → 추론 → GET /services 의 1h/1d/1w metric 검증 → 정리.
+# 서버가 기간별 모니터링 코드(정규화 마이그레이션 포함)로 떠 있어야 한다. 기본 SCENARIO=1.
+#   make e2e-service-metric ENV=dev               # 시나리오 1 (단순 LLM)
+#   make e2e-service-metric SCENARIO=1 ENV=dev
+e2e-service-metric:
+	@echo "▶ E2E: 서비스 모니터링 metric 기록 검증 (단순 LLM)"
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(if $(strip $(SCENARIO)),$(SCENARIO),1) uv run --group e2e pytest $(E2E_DIR)/service/tests/test_service_metric_lifecycle.py -v -s
 
 e2e-model-improvement:
 	@echo "▶ E2E: 최적화/경량화 (model-improvements) API — 빠른 검증"

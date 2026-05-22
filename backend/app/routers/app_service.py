@@ -205,7 +205,7 @@ def get_service_detail(
     서비스 상세정보 조회
 
     특정 서비스의 상세 정보를 조회합니다.
-    연결된 모든 워크플로우 정보와 최근 1시간의 모니터링 메트릭을 포함합니다.
+    연결된 모든 워크플로우 정보와 최근 1시간/1일/1주일의 기간별 모니터링 메트릭을 포함합니다.
 
     ## Path Parameters
     - **service_id** (str): 조회할 서비스의 고유 ID (UUID)
@@ -242,21 +242,21 @@ def get_service_detail(
         - created_at (datetime): 생성 시각
         - updated_at (datetime): 수정 시각
     - **monitoring_data** (ServiceMonitoringData): 모니터링 데이터
-        - total_metrics (MonitoringMetrics): 전체 서비스 메트릭
-            - message_count (int): 최근 1시간 총 메시지 수
-            - active_users (int): 최근 1시간 활성 사용자 수
-            - token_usage (int): 최근 1시간 토큰 사용량
-            - avg_interaction_count (float): 최근 1시간 평균 사용자 상호작용 수
-            - response_time_ms (float): 평균 응답 시간(ms)
-            - error_count (int): 최근 1시간 오류 수
-            - success_rate (float): 최근 1시간 성공률(%)
-        - workflow_metrics (List[WorkflowMonitoring]): 워크플로우별 메트릭
+        - total_metrics (MonitoringMetrics): 전체 서비스 기간별 메트릭
+            - 1h / 1d / 1w (PeriodMetrics): 최근 1시간 / 1일 / 1주일 집계
+                - message_count (int): 총 메시지 수
+                - active_users (int): 활성 사용자 수
+                - token_usage (int): 토큰 사용량
+                - avg_interaction_count (float): 평균 사용자 상호작용 수
+                - response_time_ms (float | null): 평균 응답 시간(ms). 요청 없으면 null
+                - error_count (int): 오류 수
+                - success_rate (float | null): 성공률(%). 요청 없으면 null
+        - workflow_metrics (List[WorkflowMonitoring]): 워크플로우별 기간별 메트릭
             - workflow_id (str): 워크플로우 ID
             - workflow_name (str): 워크플로우 이름
-            - metrics (MonitoringMetrics): 해당 워크플로우의 메트릭
-            - last_updated (datetime): 마지막 업데이트 시각
-        - period_start (datetime): 집계 시작 시간
-        - period_end (datetime): 집계 종료 시간
+            - metrics (MonitoringMetrics): 해당 워크플로우의 1h/1d/1w 메트릭
+            - last_updated (datetime): 집계 기준 시각
+        - aggregated_at (datetime): 집계 기준 시각(UTC)
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -375,7 +375,7 @@ def delete_service(
 
     ## Side Effects
     - 서비스와 연결된 모든 워크플로우의 service_id가 null로 설정됨
-    - 서비스 관련 모니터링 데이터는 보존됨 (향후 분석용)
+    - 서비스 관련 모니터링 데이터(service_monitoring)는 함께 삭제됨
     - 서비스 정보는 데이터베이스에서 완전히 삭제됨
 
     ## Notes

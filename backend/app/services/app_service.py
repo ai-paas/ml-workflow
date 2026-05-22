@@ -15,6 +15,7 @@ from repos.workflow import workflow_repository
 from schemas.app_service import (
     DeploymentResourceUsage,
     MonitoringMetrics,
+    PeriodMetrics,
     PodResourceUsage,
     ResourceUsage,
     ServiceCreateInternal,
@@ -117,65 +118,38 @@ class AppServiceService:
             raise
 
     @staticmethod
-    def get_service_monitoring_data(db: Session, service_id: str, hours: int = 1) -> Optional[ServiceMonitoringData]:
-        """서비스 모니터링 데이터 조회"""
+    def get_service_monitoring_data(db: Session, service_id: str) -> Optional[ServiceMonitoringData]:
+        """서비스 모니터링 데이터 조회 (1h / 1d / 1w 기간별 집계)"""
         service = service_repository.get(db, service_id)
         if not service:
             return None
 
-        # 시간 범위 설정
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(hours=hours)
+        now = datetime.utcnow()
 
-        # Repository를 통한 메트릭 집계 조회
-        total_metrics_query = service_monitoring_repository.get_metrics_aggregate(
-            db, service_id=service_id, start_time=start_time, end_time=end_time
-        )
+        # 1) 전체 서비스 메트릭 (단일 행)
+        total_row = service_monitoring_repository.get_metrics_multi_period(db, service_id=service_id, now=now)
+        total_metrics = _build_monitoring_metrics(total_row)
 
-        # 워크플로우별 메트릭 집계
+        # 2) 워크플로우별 메트릭 (GROUP BY 결과를 workflow_id로 매핑)
+        wf_rows = service_monitoring_repository.get_workflow_metrics_multi_period(db, service_id=service_id, now=now)
+        wf_row_map = {row.workflow_id: row for row in wf_rows}
+
         workflow_metrics = []
         for workflow in service.workflows:
-            wf_metrics_query = service_monitoring_repository.get_metrics_aggregate(
-                db, service_id=service_id, start_time=start_time, end_time=end_time, workflow_id=workflow.id
+            row = wf_row_map.get(workflow.id)
+            workflow_metrics.append(
+                WorkflowMonitoring(
+                    workflow_id=workflow.id,
+                    workflow_name=workflow.name,
+                    metrics=_build_monitoring_metrics(row),  # row 없으면 기본값 메트릭
+                    last_updated=now,
+                )
             )
 
-            if wf_metrics_query and wf_metrics_query.message_count:
-                workflow_metrics.append(
-                    WorkflowMonitoring(
-                        workflow_id=workflow.id,
-                        workflow_name=workflow.name,
-                        metrics=MonitoringMetrics(
-                            message_count=wf_metrics_query.message_count or 0,
-                            active_users=wf_metrics_query.active_users or 0,
-                            token_usage=wf_metrics_query.token_usage or 0,
-                            avg_interaction_count=float(wf_metrics_query.avg_interaction_count or 0),
-                            response_time_ms=(
-                                float(wf_metrics_query.response_time_ms or 0)
-                                if wf_metrics_query.response_time_ms
-                                else None
-                            ),
-                            error_count=wf_metrics_query.error_count or 0,
-                            success_rate=float(wf_metrics_query.success_rate or 100.0),
-                        ),
-                        last_updated=end_time,
-                    )
-                )
-
-        # 전체 메트릭 구성
-        total_metrics = MonitoringMetrics(
-            message_count=total_metrics_query.message_count or 0,
-            active_users=total_metrics_query.active_users or 0,
-            token_usage=total_metrics_query.token_usage or 0,
-            avg_interaction_count=float(total_metrics_query.avg_interaction_count or 0),
-            response_time_ms=(
-                float(total_metrics_query.response_time_ms or 0) if total_metrics_query.response_time_ms else None
-            ),
-            error_count=total_metrics_query.error_count or 0,
-            success_rate=float(total_metrics_query.success_rate or 100.0),
-        )
-
         return ServiceMonitoringData(
-            total_metrics=total_metrics, workflow_metrics=workflow_metrics, period_start=start_time, period_end=end_time
+            total_metrics=total_metrics,
+            workflow_metrics=workflow_metrics,
+            aggregated_at=now,
         )
 
     @staticmethod
@@ -474,6 +448,39 @@ class AppServiceService:
             raise
 
 
+def _period_from_row(row, prefix: str) -> PeriodMetrics:
+    """집계 행에서 한 기간(prefix=h1/d1/w1)의 메트릭을 유도."""
+    message_count = getattr(row, f"{prefix}_message_count") or 0
+    success_count = getattr(row, f"{prefix}_success_count") or 0
+    active_users = getattr(row, f"{prefix}_active_users") or 0
+    token_usage = getattr(row, f"{prefix}_token_usage") or 0
+    response_time = getattr(row, f"{prefix}_response_time_ms")
+
+    return PeriodMetrics(
+        message_count=message_count,
+        active_users=active_users,
+        token_usage=token_usage,
+        # 유도: 평균 상호작용 = 총 요청수 / 고유 사용자수 (사용자 없으면 0.0)
+        avg_interaction_count=(message_count / active_users) if active_users else 0.0,
+        response_time_ms=float(response_time) if response_time is not None else None,
+        # 유도: 오류 수 = 전체 − 성공
+        error_count=message_count - success_count,
+        # 유도: 성공률 = 성공 / 전체 × 100. 요청 없으면 정의 불가 → None
+        success_rate=(success_count / message_count * 100.0) if message_count else None,
+    )
+
+
+def _build_monitoring_metrics(row) -> MonitoringMetrics:
+    """집계 행 → MonitoringMetrics(1h/1d/1w). row가 None이면 기본값."""
+    if row is None:
+        return MonitoringMetrics()
+    return MonitoringMetrics(
+        period_1h=_period_from_row(row, "h1"),
+        period_1d=_period_from_row(row, "d1"),
+        period_1w=_period_from_row(row, "w1"),
+    )
+
+
 def _parse_cpu_to_nanocores(cpu_str: str) -> int:
     """CPU 문자열을 나노코어 단위로 변환
 
@@ -600,43 +607,31 @@ class ServiceMonitoringService:
         user_id: int,
         response_time_ms: float,
         is_success: bool,
-        is_object_detection: bool = True,
+        token_usage: int = 0,
     ) -> ServiceMonitoring:
-        """추론 요청 기록
+        """추론 요청 1건 기록 (이벤트 로그). 집계 메트릭은 조회 시점에 유도한다.
 
         Args:
             db: 데이터베이스 세션
             service_id: 서비스 ID
             workflow_id: 워크플로우 ID
-            user_id: 사용자 ID
+            user_id: 요청 사용자 ID (고유 사용자/평균 상호작용 집계용)
             response_time_ms: 응답 시간 (밀리초)
-            is_success: 성공 여부
-            is_object_detection: Object Detection 여부 (토큰 사용량 0으로 설정)
+            is_success: 성공 여부 (error_count/success_rate 유도)
+            token_usage: 요청별 토큰 사용량 (TODO: 추론 응답의 실제 토큰 수로 채울 것)
 
         Returns:
             생성된 ServiceMonitoring 레코드
         """
         try:
-            # 메트릭 계산
-            message_count = 1  # 요청당 1건
-            active_users = 1  # 해당 사용자 1명
-            token_usage = 0 if is_object_detection else 0  # Object Detection은 토큰 사용량 없음
-            avg_interaction_count = 1.0  # 사용자당 평균 요청 수 (개별 레코드는 1)
-            error_count = 0 if is_success else 1
-            success_rate = 100.0 if is_success else 0.0
-
-            # ServiceMonitoring 레코드 생성
             monitoring_record = ServiceMonitoring(
                 service_id=service_id,
                 workflow_id=workflow_id,
+                user_id=user_id,
                 timestamp=datetime.utcnow(),
-                message_count=message_count,
-                active_users=active_users,
                 token_usage=token_usage,
-                avg_interaction_count=avg_interaction_count,
                 response_time_ms=response_time_ms,
-                error_count=error_count,
-                success_rate=success_rate,
+                success=is_success,
             )
 
             db.add(monitoring_record)
@@ -653,3 +648,12 @@ class ServiceMonitoringService:
             logger.error(f"Failed to record inference request: {str(e)}")
             db.rollback()
             raise
+
+    @staticmethod
+    def cleanup_old_records(db: Session, retention_days: Optional[int] = None) -> int:
+        """retention: 보존 기간(N일)을 넘긴 모니터링 레코드를 삭제. 삭제 건수 반환."""
+        days = retention_days if retention_days is not None else settings.SERVICE_MONITORING_RETENTION_DAYS
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        deleted = service_monitoring_repository.delete_older_than(db, cutoff)
+        logger.info(f"service_monitoring cleanup: deleted {deleted} rows older than {cutoff.isoformat()} ({days}d)")
+        return deleted

@@ -189,6 +189,11 @@ class Settings(BaseSettings):
         description="최적화/경량화 서버 HTTP 타임아웃(초)",
     )
 
+    SERVICE_MONITORING_RETENTION_DAYS: int = Field(
+        default=30,
+        description="service_monitoring 이벤트 로그 보존 기간(일). 초과분은 cleanup_old_records 가 삭제",
+    )
+
     KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
         default="harbor",
         description="Kubeflow Pipeline에서 사용할 imagePullSecret 이름 \

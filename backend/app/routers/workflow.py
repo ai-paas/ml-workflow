@@ -2801,7 +2801,6 @@ async def _execute_llm_inference(
                         user_id=current_user.id,
                         response_time_ms=response_time_ms,
                         is_success=True,
-                        is_object_detection=False,
                     )
                     db.commit()
                 except Exception as e:
@@ -2886,7 +2885,6 @@ async def _execute_llm_inference(
                     user_id=current_user.id,
                     response_time_ms=response_time_ms,
                     is_success=True,
-                    is_object_detection=False,
                 )
                 db.commit()
             except Exception as e:
@@ -3050,7 +3048,6 @@ async def _execute_odm_inference(
                                 user_id=current_user.id,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
-                                is_object_detection=True,
                             )
                             db.commit()
                         except Exception as e:
@@ -3080,7 +3077,6 @@ async def _execute_odm_inference(
                                 user_id=current_user.id,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
-                                is_object_detection=True,
                             )
                             db.commit()
                         except Exception as e:

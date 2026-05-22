@@ -208,6 +208,7 @@ class WorkflowService:
                     logger.warning(f"Cannot delete template {workflow_id}: {derived_count} derived workflows exist")
                     raise ValueError(f"Template has {derived_count} derived workflows")
 
+            # 워크플로우의 모니터링 행은 FK ON DELETE CASCADE 로 자동 삭제된다.
             workflow_repository.delete(db, pk=workflow_id)
             db.commit()
 
