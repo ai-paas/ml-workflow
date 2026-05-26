@@ -24,6 +24,7 @@ import time
 
 import pytest
 import requests
+from cleanup_prompt import is_yes
 from config import DELETE_TIMEOUT_SEC, POLL_INTERVAL_SEC, SCENARIO_NUM, STATE_FILE
 from workflow.definitions import get_scenario, load_deployment_entries, remove_deployment_entry_by_workflow_id
 
@@ -36,16 +37,16 @@ def _prompt_delete_one(index: int, total: int, dep: dict) -> bool:
     kb_ids = dep.get("kb_ids") or []
     prompts = dep.get("prompt_ids") or {}
     print(f"\n--- [{index}/{total}] ---")
-    print(f"  workflow_id:   {wf_id}")
+    print(f"  workflow_id: {wf_id}")
     print(f"  workflow_name: {name}")
-    print(f"  kb_ids:        {kb_ids}")
-    print(f"  prompt_ids:    {len(prompts)}개")
+    print(f"  kb_ids: {kb_ids}")
+    print(f"  prompt_ids: {len(prompts)}개")
     try:
-        answer = input("이 배포를 삭제할까요? 삭제하려면 y 입력 (그 외: 건너뜀): ").strip()
+        answer = input("이 배포를 삭제할까요? 삭제하려면 y 입력 (그 외: 건너뜀): ")
     except EOFError:
         print("\n(EOF — 건너뜀)")
         return False
-    return answer.lower() == "y"
+    return is_yes(answer)
 
 
 def _delete_workflow_and_wait(api_url: str, auth_headers: dict, wf_id: str) -> None:

@@ -1,6 +1,6 @@
 # DB · Alembic · 시드 · Harbor · E2E
 .DEFAULT_GOAL := help
-.PHONY: help alembic-upgrade-head alembic-downgrade alembic-autogen-file db-seed db-seed-ensure db-seed-upsert db-seed-sync db-seed-reset \
+.PHONY: help alembic-upgrade-head alembic-downgrade alembic-autogen-file db-seed db-seed-ensure db-seed-upsert db-seed-sync db-seed-reset db-seed-dry db-seed-test \
         harbor-login \
         harbor-build-backend harbor-push-backend harbor-build-push-backend \
         harbor-build-predictor harbor-push-predictor harbor-build-push-predictor \
@@ -12,12 +12,17 @@
         e2e-workflow-validation \
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
-        e2e-model-improvement e2e-model-improvement-scenario
+        e2e-model-improvement e2e-model-improvement-scenario \
+        e2e-service-metric
 
 APP_DIR := backend/app
 # backend/app 기준 uv 프로젝트 루트(backend/). --project 로 pyproject·venv만 지정 (--directory 는 cwd 가 backend/ 로 바뀌어 alembic.ini·scripts 경로가 깨짐)
 UV_PROJECT_REL := ..
 MODE ?= ensure
+# db-seed 추가 옵션 — DRY_RUN=1 → --dry-run(변경계획만), CONFIRM=1 → --confirm(prod sync·비-local reset)
+DB_SEED_OPTS = --mode $(MODE)
+DB_SEED_OPTS += $(if $(strip $(DRY_RUN)),--dry-run)
+DB_SEED_OPTS += $(if $(strip $(CONFIRM)),--confirm)
 msg ?= autogen
 TAG ?= latest
 # ./alembic 은 마이그레이션 디렉터리라 pip 패키지 alembic 과 충돌 → purelib 를 앞에 둔다.
@@ -30,9 +35,11 @@ help:
 	@echo "  make alembic-upgrade-head [ENV=staging]"
 	@echo "  make alembic-downgrade v=0028 [ENV=staging]   # 해당 revision 으로 DB 스키마 다운그레이드"
 	@echo "  make alembic-autogen-file msg=\"...\" [ENV=staging]   # DB 연결·reflection 필요"
-	@echo "  make db-seed [MODE=ensure|upsert|sync] [ENV=staging]"
-	@echo "  make db-seed MODE=reset CONFIRM=1 [ENV=staging]"
-	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-sync, db-seed-reset"
+	@echo "  make db-seed [MODE=ensure|upsert|sync] [DRY_RUN=1] [ENV=local|dev] [CONFIRM=1]"
+	@echo "  make db-seed MODE=reset CONFIRM=1 [ENV=local]"
+	@echo "  make db-seed-dry           # sync 변경계획만 미리보기(--dry-run)"
+	@echo "  make db-seed-test          # 시드 러너 단위 테스트(unittest, ENV 기본 local)"
+	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-sync, db-seed-reset, db-seed-dry"
 	@echo ""
 	@echo "Harbor · Docker (ENV 필수: dev | innogrid)"
 	@echo "  make harbor-login ENV=dev"
@@ -74,7 +81,7 @@ db-seed:
 		echo "예: make db-seed MODE=reset CONFIRM=1"; \
 		exit 1; \
 	fi
-	cd $(APP_DIR) && $(if $(strip $(ENV)),ENV=$(ENV) )PYTHONPATH=$(APP_PYTHONPATH) uv run --project $(UV_PROJECT_REL) python -m config.db.data_initializer --mode $(MODE)
+	cd $(APP_DIR) && $(if $(strip $(ENV)),ENV=$(ENV) )PYTHONPATH=$(APP_PYTHONPATH) uv run --project $(UV_PROJECT_REL) python -m config.db.data_initializer $(DB_SEED_OPTS)
 
 db-seed-ensure:
 	@$(MAKE) db-seed MODE=ensure
@@ -87,6 +94,13 @@ db-seed-sync:
 
 db-seed-reset:
 	@$(MAKE) db-seed MODE=reset CONFIRM=1
+
+db-seed-dry:
+	@$(MAKE) db-seed MODE=sync DRY_RUN=1
+
+# 시드 러너 단위 테스트 (pytest 미설치 → stdlib unittest). settings import 위해 ENV 기본 local.
+db-seed-test:
+	cd $(APP_DIR) && ENV=$(if $(strip $(ENV)),$(ENV),local) PYTHONPATH=$(APP_PYTHONPATH) uv run --project $(UV_PROJECT_REL) python -m unittest tests.test_data_initializer -v
 
 # ─── Harbor · Docker ──────────────────────────────────────────────────────────
 harbor-login:
@@ -244,6 +258,15 @@ e2e-wf-scenario-lifecycle:
 e2e-wf-template-clone:
 	@echo "▶ E2E: 워크플로우 템플릿 생성 → 복제 → 실행 → 추론 → 정리 테스트"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/workflow/tests/test_workflow_template_clone.py -v -s
+
+# ─── E2E: 서비스 모니터링 metric ────────────────────────────────────────────────
+# 단순 LLM 워크플로우를 서비스에 연결해 배포 → 추론 → GET /services 의 1h/1d/1w metric 검증 → 정리.
+# 서버가 기간별 모니터링 코드(정규화 마이그레이션 포함)로 떠 있어야 한다. 기본 SCENARIO=1.
+#   make e2e-service-metric ENV=dev               # 시나리오 1 (단순 LLM)
+#   make e2e-service-metric SCENARIO=1 ENV=dev
+e2e-service-metric:
+	@echo "▶ E2E: 서비스 모니터링 metric 기록 검증 (단순 LLM)"
+	$(if $(strip $(ENV)),ENV=$(ENV) )E2E_SCENARIO=$(if $(strip $(SCENARIO)),$(SCENARIO),1) uv run --group e2e pytest $(E2E_DIR)/service/tests/test_service_metric_lifecycle.py -v -s
 
 e2e-model-improvement:
 	@echo "▶ E2E: 최적화/경량화 (model-improvements) API — 빠른 검증"

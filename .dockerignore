@@ -10,6 +10,10 @@
 **/dist/
 **/build/
 
+# 환경설정/시크릿 — 런타임에 k8s ConfigMap/Secret 으로 주입하므로 이미지에 포함하지 않음
+**/.env
+**/.env.*
+
 # Git
 .git/
 

@@ -49,8 +49,10 @@ class Service(BaseModel, TimestampMixin):
 
     # Relationships
     creator: Mapped["UserModel"] = relationship("UserModel", back_populates="services")
+    # 서비스 삭제 시 워크플로우는 DB FK(ON DELETE SET NULL)로 보존·연결만 해제한다.
+    # (ORM delete-orphan 캐스케이드를 쓰지 않고 passive_deletes 로 DB 제약에 위임)
     workflows: Mapped[List["Workflow"]] = relationship(
-        "Workflow", back_populates="service", cascade="all, delete-orphan"
+        "Workflow", back_populates="service", cascade="save-update, merge", passive_deletes=True
     )
 
 
@@ -66,8 +68,10 @@ class Workflow(BaseModel, TimestampMixin):
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     status: Mapped[WorkflowStatus] = mapped_column(Enum(WorkflowStatus), default=WorkflowStatus.DRAFT, nullable=False)
 
-    # 서비스 연결
-    service_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("services.id"), nullable=True)
+    # 서비스 연결 (서비스 삭제 시 SET NULL 로 워크플로우 보존)
+    service_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("services.id", ondelete="SET NULL"), nullable=True
+    )
 
     # 생성자
     creator_id: Mapped[int] = mapped_column(ForeignKey("user.id"), nullable=False)
@@ -178,23 +182,23 @@ class ServiceMonitoring(BaseModel, TimestampMixin):
     __table_args__ = (
         Index("ix_service_monitoring_id", "id"),
         Index("ix_service_monitoring_timestamp", "timestamp"),
+        Index("ix_service_monitoring_service_id_timestamp", "service_id", "timestamp"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    service_id: Mapped[str] = mapped_column(String(36), ForeignKey("services.id"), nullable=False)
-    workflow_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("workflows.id"), nullable=True)
+    # 서비스/워크플로우 삭제 시 모니터링 행은 CASCADE 로 함께 삭제된다.
+    service_id: Mapped[str] = mapped_column(String(36), ForeignKey("services.id", ondelete="CASCADE"), nullable=False)
+    workflow_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("workflows.id", ondelete="CASCADE"), nullable=True
+    )
+    # 요청 사용자 username (FK 아님 — 사용자 PK가 int 라 문자열 username 을 그대로 저장)
+    user_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
-    # 모니터링 메트릭
+    # 추론 요청 1건 = 행 1개 (per-event 로그). 집계 메트릭은 조회 시점에 유도한다.
     timestamp: Mapped[datetime] = mapped_column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-    message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=True)  # 메시지 수
-    active_users: Mapped[int] = mapped_column(Integer, default=0, nullable=True)  # 활성 사용자 수
-    token_usage: Mapped[int] = mapped_column(Integer, default=0, nullable=True)  # 토큰 사용량
-    avg_interaction_count: Mapped[float] = mapped_column(Float, default=0.0, nullable=True)  # 평균 사용자 상호작용 수
-
-    # 추가 메트릭
+    token_usage: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 요청별 토큰 사용량
     response_time_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 응답 시간 (ms)
-    error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=True)  # 오류 수
-    success_rate: Mapped[float] = mapped_column(Float, default=100.0, nullable=True)  # 성공률 (%)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # 성공 여부(success_yn)
 
     # Relationships
     service: Mapped["Service"] = relationship("Service")
