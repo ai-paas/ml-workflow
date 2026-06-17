@@ -26,6 +26,7 @@ class ModelProviderEnum(str, Enum):
     HUGGINGFACE = "huggingface"
     CUSTOM = "custom"
     OLLAMA = "ollama"
+    KAGGLE = "kaggle"
 
     def __str__(self) -> str:
         return self.value
