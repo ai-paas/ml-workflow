@@ -34,6 +34,7 @@ MODEL_PROVIDER_DATA = [
     {"name": ModelProviderEnum.HUGGINGFACE.value, "description": "huggingface"},
     {"name": ModelProviderEnum.CUSTOM.value, "description": "user uploaded"},
     {"name": ModelProviderEnum.OLLAMA.value, "description": "Ollama"},
+    {"name": ModelProviderEnum.KAGGLE.value, "description": "Kaggle"},
 ]
 
 MODEL_TYPE_DATA = [
