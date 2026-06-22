@@ -3,6 +3,24 @@
     "allow": [
       "Bash",
       "mcp__plugin_figma_figma__get_design_context"
+    ],
+    "ask": [
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(mv *)",
+      "Bash(chmod *)",
+      "Bash(chown *)",
+      "Bash(chgrp *)",
+      "Bash(docker rm *)",
+      "Bash(docker rmi *)",
+      "Bash(docker image rm *)",
+      "Bash(docker image prune *)",
+      "Bash(docker container prune *)",
+      "Bash(docker volume prune *)",
+      "Bash(docker system prune *)",
+      "Bash(docker builder prune *)",
+      "Bash(git rm *)",
+      "Bash(git clean *)"
     ]
   }
 }

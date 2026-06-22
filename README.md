@@ -73,7 +73,7 @@ pipenv shell
 3. 이후, **pre-commit hook**이 자동으로 설정되어 커밋 시 코드 스타일과 규칙을 검사하게 됩니다.
 
 #### 기타 디렉토리
-- ml_workflow_ui
-- predictor
-- train_eval
-에 대해서는 별도로 pipenv 가상환경을 구축하여 기동테스트 진행요망.
+- ml_workflow_ui : 별도로 pipenv 가상환경을 구축하여 기동테스트 진행요망.
+- predictor / train_eval : backend 와 동일하게 **uv** 로 관리합니다(`pyproject.toml` + `uv.lock`).
+  - 의존성 추가/변경 후 `cd <dir> && uv lock` 으로 lock 갱신, 컨테이너는 `uv sync --frozen` 으로 `.venv` 구성(Dockerfile 참고).
+  - YOLOX 는 vendored editable 패키지라 lock 에 넣지 않고 Dockerfile 빌더 단계에서 `uv pip install -e ./YOLOX` 로 설치합니다.
