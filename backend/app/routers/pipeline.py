@@ -5,13 +5,14 @@ from typing import Optional
 
 import mlflow
 from config.db.connect import SessionDepends
-from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import DatasetKindEnum, ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.component.train_eval.register_model import register_model_component
 from core.kubeflow.component.train_eval.train_eval import container_train_eval_component
 from core.kubeflow.kubeflow_manager import KubeflowManager
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
 from kfp import dsl
+from schemas.dataset import DatasetBaseSchema
 from schemas.experiment import (
     ExperimentBaseSchema,
     HyperparameterBaseSchema,
@@ -22,9 +23,9 @@ from schemas.experiment import (
 )
 from schemas.user import UserSchema
 from services.dataset import DatasetService
-from services.experiment import ExperimentService, HyperparameterService, HyperparameterTypeService
+from services.experiment import ExperimentService, HyperparameterService
 from services.metrics_polling import poll_training_metrics
-from services.model import ModelService
+from services.model import ESM2_T6_8M_REPO_ID, ModelService, resolve_recommended_hparams
 from services.registration_polling import poll_registration_status
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
@@ -35,8 +36,55 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+# ── 학습 하이퍼파라미터 백필 (user input → 모델별 recommended → 시스템 fallback) ──
+SYSTEM_HPARAM_DEFAULTS: dict[str, str] = {
+    "learning_rate": "0.001",
+    "batch_size": "16",
+    "epochs": "10",
+    "weight_decay": "0.0005",
+    "save_period": "1",
+    "gpus": "1",
+}
+HPARAM_KEYS = tuple(SYSTEM_HPARAM_DEFAULTS.keys())
+
+
+def backfill_hparams(body: TrainingRequest, recommended: dict[str, str]) -> dict[str, str]:
+    """user input → 모델별 recommended_hparams → SYSTEM_HPARAM_DEFAULTS 순으로 채운다."""
+    resolved: dict[str, str] = {}
+    for key in HPARAM_KEYS:
+        user_val = getattr(body, key, None)
+        if user_val is not None and user_val != "":
+            resolved[key] = user_val
+        elif key in recommended:
+            resolved[key] = recommended[key]
+        else:
+            resolved[key] = SYSTEM_HPARAM_DEFAULTS[key]
+    return resolved
+
+
+def _expected_dataset_kind(db: Session, db_model) -> str:
+    """학습 대상 모델의 lineage root 기준으로 기대 데이터셋 분류(kind)를 반환.
+
+    재학습 자식 모델은 repo_id 가 비어 있을 수 있으므로 lineage root 의 format/repo_id 로 판정한다.
+    학습 가능한 모델군이 아니면 400.
+    """
+    root_id = ModelService.resolve_lineage_root_model_id(db, db_model.id)
+    root = ModelService.get(db, root_id)
+    fmt = (root.format_info.name or "").lower() if root and root.format_info else ""
+    if fmt == ModelFormatEnum.YOLOX.value:
+        return DatasetKindEnum.OBJECT_DETECTION.value
+    if fmt == ModelFormatEnum.TRANSFORMERS.value and (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
+        return DatasetKindEnum.PROTEIN_CLASSIFICATION.value
+    raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
+
+
+def _resolve_model_kind(db: Session, db_model) -> str:
+    """train_eval 컨테이너 분기 키. object-detection → yolox, protein-classification → esm2."""
+    return "yolox" if _expected_dataset_kind(db, db_model) == DatasetKindEnum.OBJECT_DETECTION.value else "esm2"
+
+
 # ──────────────────────────────────────────────
-# POST /training — 전체 Body(JSON) 통일 + 백그라운드 메트릭 폴링
+# POST /training — multipart/form-data (dataset_id XOR dataset_file) + 백그라운드 메트릭 폴링
 # ──────────────────────────────────────────────
 
 
@@ -44,7 +92,8 @@ settings = get_settings()
 def container_train(
     *,
     db: Session = SessionDepends,
-    body: TrainingRequest,
+    body: TrainingRequest = Depends(TrainingRequest.as_form),
+    dataset_file: Optional[UploadFile] = File(None),
     background_tasks: BackgroundTasks,
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -52,7 +101,9 @@ def container_train(
     학습 파이프라인 생성 및 실행
 
     모델과 데이터셋을 사용하여 Kubeflow Pipeline 기반의 학습 파이프라인을 생성하고 실행합니다.
-    요청은 전체 Body(JSON)로 통일되며, 학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+    요청은 multipart/form-data 로 통일되며 (dataset_id XOR dataset_file),
+    학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+    YOLOX/ESM2 양쪽을 지원하며, 모델군에 맞지 않는 데이터셋 분류는 400 으로 거부합니다.
 
     ## Response (200, dict)
     - **experiment_id** (int | null): 생성된 실험 ID. 파이프라인 생성/실행 실패 등으로 실험을 만들지 못한 경우 `null`일 수 있음.
@@ -69,28 +120,16 @@ def container_train(
     - **500** 또는 `experiment_id: null`: 내부 오류(파이프라인 제출 실패 등)
     """
     model_id = body.model_id
-    dataset_id = body.dataset_id
     train_name = body.train_name
     description = body.description
-    gpus = body.gpus
-    batch_size = body.batch_size
-    epochs = body.epochs
-    save_period = body.save_period
-    weight_decay = body.weight_decay
-    lr0 = body.lr0
-    lrf = body.lrf
 
-    try:
-        gpu_count = int(gpus)
-        if gpu_count <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="GPU 개수는 필수적으로 1개 이상으로 설정해야 합니다. 현재 설정된 값: " + str(gpu_count),
-            )
-    except ValueError:
+    # 데이터셋 입력: dataset_id XOR dataset_file (정확히 하나)
+    has_dataset_id = body.dataset_id is not None
+    has_dataset_file = dataset_file is not None
+    if has_dataset_id == has_dataset_file:
         raise HTTPException(
             status_code=400,
-            detail=f"GPU 개수 값 '{gpus}'이 유효하지 않습니다. 숫자로 입력해주세요.",
+            detail="dataset_id 와 dataset_file 중 정확히 하나만 제공해야 합니다.",
         )
 
     @dsl.pipeline
@@ -123,8 +162,8 @@ def container_train(
         epochs: str,
         save_period: str,
         weight_decay: str,
-        lr0: str,
-        lrf: str,
+        learning_rate: str,
+        model_kind: str,
         namespace: str,
         train_image_url: str,
         image_pull_secret_name: str,
@@ -158,8 +197,8 @@ def container_train(
             epochs=epochs,
             save_period=save_period,
             weight_decay=weight_decay,
-            lr0=lr0,
-            lrf=lrf,
+            learning_rate=learning_rate,
+            model_kind=model_kind,
             namespace=namespace,
             train_image_url=train_image_url,
             image_pull_secret_name=image_pull_secret_name,
@@ -176,10 +215,65 @@ def container_train(
                 detail=f"모델 ID '{model_id}'는 학습이 불가능한 모델입니다. 학습 가능한 모델만 사용할 수 있습니다.",
             )
 
+        # 모델군 ↔ 데이터셋 호환성 판정 (lineage root 기준)
+        expected_kind = _expected_dataset_kind(db, db_model)
+        model_kind = _resolve_model_kind(db, db_model)
+
+        # 데이터셋 확보: dataset_file 이면 즉시 등록, dataset_id 면 조회 후 kind 검사
+        if has_dataset_file:
+            if body.dataset_kind is None:
+                raise HTTPException(status_code=400, detail="dataset_file 동반 시 dataset_kind 는 필수입니다.")
+            if body.dataset_kind.value != expected_kind:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"데이터셋 분류 '{body.dataset_kind.value}' 가 "
+                    f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
+                )
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            auto_name = f"auto-{train_name or 'dataset'}-{ts}"
+            auto_desc = f"학습 요청 시 자동 등록된 데이터셋 kind={expected_kind}"
+            dataset_obj = DatasetService.create(
+                db,
+                obj_in=DatasetBaseSchema(
+                    name=auto_name,
+                    description=auto_desc,
+                    version=1,
+                    subversion=1,
+                    kind=body.dataset_kind,
+                ),
+                file=dataset_file,
+            )
+            dataset_id = dataset_obj.id
+        else:
+            dataset_id = body.dataset_id
+            dataset_obj = DatasetService().get(db, dataset_id)
+            if dataset_obj is None:
+                raise HTTPException(status_code=404, detail=f"데이터셋 ID '{dataset_id}'를 찾을 수 없습니다.")
+            if (dataset_obj.kind or "") != expected_kind:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"데이터셋 분류 '{dataset_obj.kind}' 가 "
+                    f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
+                )
+
+        # 하이퍼파라미터 백필 (user → recommended → system)
+        recommended = resolve_recommended_hparams(db, db_model)
+        hparams = backfill_hparams(body, recommended)
+        try:
+            if int(hparams["gpus"]) <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="GPU 개수는 1 이상으로 설정해야 합니다. 현재 값: " + hparams["gpus"],
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"GPU 개수 값 '{hparams['gpus']}'이 유효하지 않습니다. 숫자로 입력해주세요.",
+            )
+
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
-        dataset_model = DatasetService().get(db, dataset_id)
-        dataset_download_ref = dataset_model.dataset_registry.uri
+        dataset_download_ref = dataset_obj.dataset_registry.uri
         dataset_storage_type = settings.DATASET_STORAGE_TYPE
         kf = KubeflowManager()
         client = kf.get_kfp_client()
@@ -199,13 +293,9 @@ def container_train(
             ),
         )
 
-        create_hyperparameter(db, experiment_db_obj.id, "epochs", epochs)
-        create_hyperparameter(db, experiment_db_obj.id, "batch_size", batch_size)
-        create_hyperparameter(db, experiment_db_obj.id, "weight_decay", weight_decay)
-        create_hyperparameter(db, experiment_db_obj.id, "lr0", lr0)
-        create_hyperparameter(db, experiment_db_obj.id, "lrf", lrf)
-        create_hyperparameter(db, experiment_db_obj.id, "gpus", gpus)
-        create_hyperparameter(db, experiment_db_obj.id, "save_period", save_period)
+        # 실제 적용된 하이퍼파라미터만 평탄 KV 로 기록 (재현·감사 가능)
+        for name, value in hparams.items():
+            create_hyperparameter(db, experiment_db_obj.id, name, value)
 
         client.create_run_from_pipeline_func(
             train_pipeline,
@@ -235,13 +325,13 @@ def container_train(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
-                "gpu_limit": gpus,
-                "batch_size": batch_size,
-                "epochs": epochs,
-                "save_period": save_period,
-                "weight_decay": weight_decay,
-                "lr0": lr0,
-                "lrf": lrf,
+                "gpu_limit": hparams["gpus"],
+                "batch_size": hparams["batch_size"],
+                "epochs": hparams["epochs"],
+                "save_period": hparams["save_period"],
+                "weight_decay": hparams["weight_decay"],
+                "learning_rate": hparams["learning_rate"],
+                "model_kind": model_kind,
                 "namespace": settings.KUBEFLOW_NAMESPACE,
                 "train_image_url": settings.TRAIN_IMAGE_URL,
                 "image_pull_secret_name": settings.KUBEFLOW_IMAGE_PULL_SECRET,
@@ -310,7 +400,7 @@ async def get_training_status(
         run_id = experiment_db_model.mlflow_run_id
         max_epoch = 0
         for hp in experiment_db_model.hyperparameters:
-            if hp.hyperparameter_type.param_name == "epochs":
+            if hp.param_name == "epochs":
                 max_epoch = int(hp.value)
                 break
 
@@ -579,12 +669,11 @@ class PipelineTrainingMonitor:
 
 
 def create_hyperparameter(db: Session, experiment_id: int, param_name: str, value: str):
-    hp_type_obj = HyperparameterTypeService().get_by_param_name(db, param_name)
     return HyperparameterService().create(
         db,
         obj_in=HyperparameterBaseSchema(
             experiment_id=experiment_id,
-            hyperparameter_type_id=hp_type_obj.id,
+            param_name=param_name,
             value=value,
         ),
     )

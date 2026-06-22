@@ -2,7 +2,7 @@ from config.settings import get_settings
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
 from mlflow import MlflowClient
-from repos.experiment import experiment_repository, hyperparameter_repository, hyperparameter_type_repository
+from repos.experiment import experiment_repository, hyperparameter_repository
 from schemas.experiment import (
     ExperimentBaseSchema,
     ExperimentInternalUpdateRequest,
@@ -10,8 +10,6 @@ from schemas.experiment import (
     ExperimentUpdateRequest,
     HyperparameterBaseSchema,
     HyperparameterReadSchema,
-    HyperparameterTypeBaseSchema,
-    HyperparameterTypeReadSchema,
 )
 from sqlalchemy.orm import Session
 from utils.model_registry import ModelRegistry
@@ -161,21 +159,3 @@ class HyperparameterService:
     @staticmethod
     def get_multi(db: Session, skip: int = 0, limit: int = 100) -> list[HyperparameterReadSchema]:
         return hyperparameter_repository.get_multi(db, skip=skip, limit=limit)
-
-
-class HyperparameterTypeService:
-    @staticmethod
-    def create(db: Session, *, obj_in: HyperparameterTypeBaseSchema):
-        return hyperparameter_type_repository.create(db, obj_in=obj_in)
-
-    @staticmethod
-    def get(db: Session, pk: int) -> HyperparameterTypeReadSchema:
-        return hyperparameter_type_repository.get(db, pk)
-
-    @staticmethod
-    def get_by_param_name(db: Session, param_name: str) -> HyperparameterTypeReadSchema:
-        return hyperparameter_type_repository.get_by_param_name(db, param_name)
-
-    @staticmethod
-    def update(db: Session, *, obj_in: ExperimentUpdateRequest):
-        return experiment_repository.update(db, obj_in=obj_in)

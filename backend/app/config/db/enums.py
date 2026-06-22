@@ -52,3 +52,17 @@ class ModelVisibility(str, Enum):
 
     def __str__(self) -> str:
         return self.value
+
+
+class DatasetKindEnum(str, Enum):
+    """데이터셋 분류(학습 태스크 분류명) Enum
+
+    - object-detection: YOLOX 계열 객체 감지 데이터셋
+    - protein-classification: ESM2 단백질 서열 분류(TCR-Epitope) 데이터셋
+    """
+
+    OBJECT_DETECTION = "object-detection"
+    PROTEIN_CLASSIFICATION = "protein-classification"
+
+    def __str__(self) -> str:
+        return self.value

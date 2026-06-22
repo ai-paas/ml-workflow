@@ -47,7 +47,7 @@ class PredefinedModelKey(str, PyEnum):
     DETR_RESNET_101 = "facebook/detr-resnet-101"
     MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
     BGE_M3 = "bge-m3"
-    # ESM2 = "facebook/esm2_t33_650M_UR50D"
+    ESM2_T6_8M = "facebook/esm2_t6_8M_UR50D"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
     QWQ_32B = "qwq:32b"
@@ -142,6 +142,7 @@ class ModelBriefReadSchema(TimeStampSchemaMixin):
     learning_enable_yn: bool
     opt_enable_yn: bool
     visibility: str = ""
+    recommended_hparams: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def compute_visibility(self) -> "ModelBriefReadSchema":
@@ -175,6 +176,7 @@ class ModelReadSchema(TimeStampSchemaMixin):
     learning_enable_yn: bool
     opt_enable_yn: bool
     visibility: str = ""
+    recommended_hparams: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def compute_visibility(self) -> "ModelReadSchema":

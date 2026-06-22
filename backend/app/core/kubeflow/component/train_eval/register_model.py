@@ -184,8 +184,16 @@ def register_model_component(
                 logger.error(f"메타데이터 삽입 중 오류 발생: {e}")
                 return None
 
-    def find_checkpoint_file(artifact_path: str) -> str:
-        """체크포인트 파일 찾기"""
+    def find_esm2_adapter_dir(artifact_path: str):
+        """LoRA 어댑터 디렉토리 찾기 (adapter_model.safetensors + adapter_config.json 보유). 없으면 None."""
+        for cfg in glob.glob(os.path.join(artifact_path, "**/adapter_config.json"), recursive=True):
+            adapter_dir = os.path.dirname(cfg)
+            if os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors")):
+                return adapter_dir
+        return None
+
+    def find_yolox_checkpoint(artifact_path: str) -> str:
+        """YOLOX 체크포인트 파일 찾기 (best_ckpt.pth → 최신 epoch_*_ckpt.pth)"""
         # best_ckpt 파일 먼저 찾기
         best_ckpt = glob.glob(os.path.join(artifact_path, "**/best_ckpt.pth"), recursive=True)
 
@@ -242,9 +250,6 @@ def register_model_component(
         local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id)
 
         try:
-            # 체크포인트 파일 찾기
-            original_model_path = find_checkpoint_file(local_artifact_path)
-
             # reference_model의 정보 조회 (name, format_id)
             reference_model_info = api_client.get_model_info(reference_model_id)
             if not reference_model_info:
@@ -285,20 +290,32 @@ def register_model_component(
                     raise Exception("기본 format_id도 조회할 수 없습니다.")
 
             reference_model_name = reference_model_name.replace("/", "-")
-            # 파일명을 reference_model_name.pth로 변경
-            model_dir = os.path.dirname(original_model_path)
-            new_model_filename = f"{reference_model_name}.pth"
-            new_model_path = os.path.join(model_dir, new_model_filename)
 
-            # 파일명 변경
-            shutil.copy2(original_model_path, new_model_path)
-            logger.info(f"체크포인트 파일명 변경: {os.path.basename(original_model_path)} -> {new_model_filename}")
+            # 학습 산출물 형태로 분기: ESM2(LoRA 어댑터 디렉토리) vs YOLOX(.pth 체크포인트)
+            adapter_dir = find_esm2_adapter_dir(local_artifact_path)
 
-            # MLflow에 모델 등록
             with mlflow.start_run(run_name=f"{uuid.uuid4()}-model") as run:
-                mlflow.log_artifact(
-                    local_path=new_model_path, artifact_path=reference_model_name, run_id=run.info.run_id
-                )
+                if adapter_dir:
+                    # ESM2: PEFT 어댑터 디렉토리 통째를 'adapter' 아티팩트로 등록
+                    mlflow.log_artifacts(local_path=adapter_dir, artifact_path="adapter", run_id=run.info.run_id)
+                    registry_artifact_path = f"{run.info.artifact_uri}/adapter"
+                    registry_uri = "adapter"
+                    logger.info("ESM2 LoRA 어댑터 디렉토리를 'adapter' 아티팩트로 등록했습니다.")
+                else:
+                    # YOLOX: 체크포인트(.pth)를 reference_model_name.pth 로 복사 후 등록
+                    original_model_path = find_yolox_checkpoint(local_artifact_path)
+                    model_dir = os.path.dirname(original_model_path)
+                    new_model_filename = f"{reference_model_name}.pth"
+                    new_model_path = os.path.join(model_dir, new_model_filename)
+                    shutil.copy2(original_model_path, new_model_path)
+                    logger.info(
+                        f"체크포인트 파일명 변경: {os.path.basename(original_model_path)} -> {new_model_filename}"
+                    )
+                    mlflow.log_artifact(
+                        local_path=new_model_path, artifact_path=reference_model_name, run_id=run.info.run_id
+                    )
+                    registry_artifact_path = f"{run.info.artifact_uri}/{reference_model_name}"
+                    registry_uri = reference_model_name
 
                 # 모델 메타데이터 조회 (provider, type만 조회)
                 metadata = api_client.get_model_metadata(provider_name, type_name)
@@ -313,8 +330,8 @@ def register_model_component(
                     "parent_model_id": lineage_root_parent_model_id,
                     "model_registry_schema": json.dumps(
                         {
-                            "artifact_path": f"{run.info.artifact_uri}/{reference_model_name}",
-                            "uri": reference_model_name,
+                            "artifact_path": registry_artifact_path,
+                            "uri": registry_uri,
                             "run_id": run.info.run_id,
                         }
                     ),

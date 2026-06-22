@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Bash",
       "mcp__plugin_figma_figma__get_design_context"
     ]
   }

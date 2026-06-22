@@ -38,7 +38,7 @@ def build_loss_history(loss_history: list, epoch_history: list) -> list[dict]:
 
 def _extract_max_epoch(experiment) -> int:
     for hp in experiment.hyperparameters:
-        if hp.hyperparameter_type.param_name == "epochs":
+        if hp.param_name == "epochs":
             return int(hp.value)
     return 0
 
@@ -81,6 +81,12 @@ def _collect_metrics(client, run) -> dict:
     ap_history = client.get_metric_history(run_id, "val/best_ap")
     average_precision = ap_history[-1].value if ap_history else None
 
+    # ESM2 평가 메트릭 슬롯. YOLOX 학습에는 해당 키가 없어 None → upsert 시 무시된다.
+    # (ESM2 의 average_precision 은 매핑하지 않아 NULL 로 남는다 — AUC-ROC/PR 은 MLflow run 에만 기록)
+    def _last(metric_key: str):
+        history = client.get_metric_history(run_id, metric_key)
+        return history[-1].value if history else None
+
     return {
         "elapsed_time": elapsed_time,
         "end_time": end_time,
@@ -88,6 +94,9 @@ def _collect_metrics(client, run) -> dict:
         "loss": latest_loss,
         "loss_history": json.dumps(loss_history),
         "average_precision": average_precision,
+        "accuracy": _last("eval_accuracy"),
+        "precision_value": _last("eval_precision"),
+        "recall": _last("eval_recall"),
     }
 
 

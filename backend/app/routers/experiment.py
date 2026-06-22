@@ -158,16 +158,11 @@ async def update_experiment(
             - updated_at (datetime): 수정 시각
         - created_at (datetime): 데이터셋 생성 시각
         - updated_at (datetime): 데이터셋 수정 시각
-    - **hyperparameters** (List[HyperparameterReadSchema]): 하이퍼파라미터 목록
+    - **hyperparameters** (List[HyperparameterReadSchema]): 하이퍼파라미터 목록 (평탄 KV 구조)
         - id (int): 하이퍼파라미터 ID
-        - value (str): 하이퍼파라미터 값
         - experiment_id (int): 소속 실험 ID
-        - hyperparameter_type_id (int): 하이퍼파라미터 타입 ID
-        - hyperparameter_type (HyperparameterTypeReadSchema): 하이퍼파라미터 타입 정보
-            - id (int): 타입 ID
-            - param_name (str): 파라미터 이름
-            - param_type (str): 파라미터 타입
-            - default_value (str): 기본값
+        - param_name (str): 파라미터 이름 (예: learning_rate, batch_size, epochs)
+        - value (str): 파라미터 값
     - **created_at** (datetime): 실험 생성 시각
     - **updated_at** (datetime): 실험 수정 시각
 

@@ -452,7 +452,10 @@ class ModelService:
                 )
 
         format_obj = model_format_repository.get(db, format_id)
-        learning_enable_yn = format_obj is not None and format_obj.name == ModelFormatEnum.YOLOX.value
+        format_name = format_obj.name if format_obj is not None else ""
+        learning_enable_yn = format_name == ModelFormatEnum.YOLOX.value or (
+            format_name == ModelFormatEnum.TRANSFORMERS.value and (repo_id or "").strip() == ESM2_T6_8M_REPO_ID
+        )
         if not repo_id and learning_enable_yn:
             key = (name or "").strip()
             pred = PREDEFINED_MODEL_CONFIGS.get(key)
@@ -460,6 +463,11 @@ class ModelService:
                 pred = PREDEFINED_MODEL_CONFIGS.get(key.replace("-", "_").lower())
             if pred and pred.get("repo_id"):
                 repo_id = pred["repo_id"]
+        # 파인튜닝 자식 모델: 부모(=학습 가능 모델)의 학습 가능성을 상속 (ESM2 재학습 지원)
+        if not learning_enable_yn and parent_model_id is not None:
+            parent = model_repository.get(db, parent_model_id)
+            if parent is not None and parent.learning_enable_yn:
+                learning_enable_yn = True
         opt_enable_yn = is_optimization_eligible(repo_id, model_name=name)
 
         model = ModelBaseSchema(
@@ -1364,6 +1372,9 @@ class OllamaModelService:
 
 _GIB = 1024**3
 
+# 학습 가능 ESM2 베이스 모델 repo_id (transformers 포맷 중 학습 대상 식별용)
+ESM2_T6_8M_REPO_ID = "facebook/esm2_t6_8M_UR50D"
+
 PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "hustvl/yolos-tiny": {
         "name": "hustvl/yolos-tiny",
@@ -1450,15 +1461,28 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_memory_request_cpu": "6Gi",
         "serving_cpu_request_millicores": 2000,
     },
-    # "facebook/esm2_t33_650M_UR50D": {
-    #     "name": "facebook/esm2_t33_650M_UR50D",
-    #     "description": "facebook/esm2_t33_650M_UR50D",
-    #     "repo_id": "facebook/esm2_t33_650M_UR50D",
-    #     "task": "feature-extraction",
-    #     "provider_name": "huggingface",
-    #     "type_name": "pLM",
-    #     "format_name": "transformers",
-    # },
+    "facebook/esm2_t6_8M_UR50D": {
+        "name": "facebook/esm2_t6_8M_UR50D",
+        "description": "ESM-2 8M (TCR-Epitope 결합 분류 파인튜닝)",
+        "repo_id": "facebook/esm2_t6_8M_UR50D",
+        "task": "feature-extraction",
+        "provider_name": "huggingface",
+        "type_name": "pLM",
+        "format_name": "transformers",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "16",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 1 * _GIB,
+        "serving_memory_request_gpu": "1Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "2Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
     "yolox_s": {
         "name": "yolox_s",
         "description": "yolox_s",
@@ -1469,6 +1493,14 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "format_name": "yolox",
         "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth",
         "weight_filename": "yolox_s.pth",
+        "recommended_hparams": {
+            "learning_rate": "0.01",
+            "batch_size": "8",
+            "epochs": "10",
+            "weight_decay": "0.0005",
+            "save_period": "1",
+            "gpus": "1",
+        },
         "serving_vram_need_bytes": 4 * _GIB,
         "serving_memory_request_gpu": "2Gi",
         "serving_gpu_pod_cpu_request_millicores": 1000,
@@ -1485,6 +1517,14 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "format_name": "yolox",
         "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth",
         "weight_filename": "yolox_m.pth",
+        "recommended_hparams": {
+            "learning_rate": "0.01",
+            "batch_size": "8",
+            "epochs": "10",
+            "weight_decay": "0.0005",
+            "save_period": "1",
+            "gpus": "1",
+        },
         "serving_vram_need_bytes": 4 * _GIB,
         "serving_memory_request_gpu": "2Gi",
         "serving_gpu_pod_cpu_request_millicores": 1000,
@@ -1552,3 +1592,28 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_cpu_request_millicores": 4000,
     },
 }
+
+
+def resolve_recommended_hparams(db: Session, db_model: Model) -> dict[str, str]:
+    """학습 대상 모델의 권장 하이퍼파라미터를 반환한다.
+
+    - 학습 불가 모델(`learning_enable_yn=False`)은 빈 dict.
+    - 학습된 자식 모델은 `parent_model_id` 체인을 따라 lineage root까지 추적해
+      root의 `PREDEFINED_MODEL_CONFIGS[*].recommended_hparams`를 상속한다.
+    - 카탈로그 매칭 실패 시에도 빈 dict.
+
+    모델 직렬화(목록/상세) 경로에서 호출되므로, 예외가 나도 응답이 깨지지 않도록
+    빈 dict로 폴백한다.
+    """
+    try:
+        if not db_model.learning_enable_yn:
+            return {}
+        root_id = ModelService.resolve_lineage_root_model_id(db, db_model.id)
+        root = ModelService.get(db, root_id)
+        if root is None:
+            return {}
+        repo_key = (root.repo_id or root.name or "").strip()
+        return dict((PREDEFINED_MODEL_CONFIGS.get(repo_key) or {}).get("recommended_hparams", {}))
+    except Exception as exc:  # noqa: BLE001 - 직렬화 경로 보호
+        logger.warning("resolve_recommended_hparams 실패 (model_id=%s): %s", getattr(db_model, "id", None), exc)
+        return {}

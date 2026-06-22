@@ -35,7 +35,6 @@ def _apply_env_from_argv() -> None:
 _apply_env_from_argv()
 
 from config.settings import get_settings
-from db.models.experiment import Hyperparameter, HyperparameterType
 from db.models.knowledge_base import ChunkType, KnowledgeBase, Language, SearchMethod
 from db.models.model import Model, ModelFormat, ModelProvider, ModelType
 from db.models.user import UserModel
@@ -43,7 +42,6 @@ from utils.crypto import get_sha256_hash
 
 from .rdb_data import (
     CHUNK_TYPE_DATA,
-    HYPERPARAMETER_TYPE_DATA,
     LANGUAGE_DATA,
     MODEL_FORMAT_DATA,
     MODEL_PROVIDER_DATA,
@@ -89,7 +87,6 @@ SEED_SPECS: tuple[_SeedSpec, ...] = (
     _SeedSpec(ModelFormat, MODEL_FORMAT_DATA, "name"),
     _SeedSpec(ModelProvider, MODEL_PROVIDER_DATA, "name"),
     _SeedSpec(ModelType, MODEL_TYPE_DATA, "name"),
-    _SeedSpec(HyperparameterType, HYPERPARAMETER_TYPE_DATA, "param_name"),
     _SeedSpec(ChunkType, CHUNK_TYPE_DATA, "name"),
     _SeedSpec(Language, LANGUAGE_DATA, "name"),
     _SeedSpec(SearchMethod, SEARCH_METHOD_DATA, "name"),
@@ -155,8 +152,6 @@ def _row_referenced_exists(model_cls: type) -> ColumnElement[bool] | None:
         return exists().where(Model.provider_id == ModelProvider.id)
     if model_cls is ModelType:
         return exists().where(Model.type_id == ModelType.id)
-    if model_cls is HyperparameterType:
-        return exists().where(Hyperparameter.hyperparameter_type_id == HyperparameterType.id)
     if model_cls is ChunkType:
         return exists().where(KnowledgeBase.chunk_type_id == ChunkType.id)
     if model_cls is Language:

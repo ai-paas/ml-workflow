@@ -15,6 +15,7 @@ from app.model_manager.base import BaseModelManager
 from app.model_manager.keras.custom_model import KerasModelManager
 from app.model_manager.onnx.custom_model import OnnxModelManager
 from app.model_manager.pytorch.custom_model import PytorchModelManager
+from app.model_manager.transformers.custom_model import TransformersModelManager
 from app.model_manager.yolox.custom_model import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
@@ -33,6 +34,7 @@ class ModelManagerFactory:
         "keras": KerasModelManager,
         "onnx": OnnxModelManager,
         "yolox": YoloxModelManager,
+        "transformers": TransformersModelManager,
     }
 
     @classmethod
@@ -153,6 +155,19 @@ class InferenceModel(Model):
             input_bytes = payload.inputs[0].data
             data = input_bytes[0]
 
+            device_str = "gpu" if torch.cuda.is_available() else "cpu"
+
+            # transformers(ESM2): 이미지가 아니라 단백질 서열 dict({epitope, cdr3b}) 를 그대로 전달
+            if self.framework == "transformers":
+                result = self.model_manager.predict(data=data, device_str=device_str)
+                return InferResponse(
+                    response_id=generate_uuid(),
+                    model_name=self.name,
+                    infer_outputs=[
+                        InferOutput(name="OUTPUT_0", datatype="BYTES", shape=[1], data=[json.dumps(result)])
+                    ],
+                )
+
             # 이미지 데이터 추출
             image_bytes = base64.b64decode(data["image"])
 
@@ -163,7 +178,6 @@ class InferenceModel(Model):
 
             # Model Manager를 통한 추론 (새로운 방식)
             if hasattr(self, "model_manager") and self.model_manager:
-                device_str = "gpu" if torch.cuda.is_available() else "cpu"
                 result = self.model_manager.predict(data=image_bytes, device_str=device_str)
 
                 # result는 dict 형태: {"predictions": [...], "image_info": {...}}

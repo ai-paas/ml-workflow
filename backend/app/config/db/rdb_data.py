@@ -44,44 +44,6 @@ MODEL_TYPE_DATA = [
     {"name": ModelTypeEnum.PLM.value, "description": "Protein Language Model"},
 ]
 
-HYPERPARAMETER_TYPE_DATA = [
-    {
-        "param_name": "epochs",
-        "param_type": "int",
-        "default_value": "10",
-    },
-    {
-        "param_name": "batch_size",
-        "param_type": "int",
-        "default_value": "16",
-    },
-    {
-        "param_name": "weight_decay",
-        "param_type": "float",
-        "default_value": "0.0001",
-    },
-    {
-        "param_name": "save_period",
-        "param_type": "int",
-        "default_value": "1",
-    },
-    {
-        "param_name": "lr0",
-        "param_type": "float",
-        "default_value": "0.01",
-    },
-    {
-        "param_name": "lrf",
-        "param_type": "float",
-        "default_value": "0.05",
-    },
-    {
-        "param_name": "gpus",
-        "param_type": "int",
-        "default_value": "1",
-    },
-]
-
 CHUNK_TYPE_DATA = [
     {
         "name": "RecursiveCharacterSplitter",

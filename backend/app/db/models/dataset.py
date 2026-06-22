@@ -13,6 +13,8 @@ class Dataset(BaseModel, TimestampMixin):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     subversion: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 데이터셋 분류(학습 태스크 분류명): object-detection / protein-classification
+    kind: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     dataset_registry: Mapped["DatasetRegistry"] = relationship("DatasetRegistry", back_populates="dataset")
 

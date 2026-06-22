@@ -73,8 +73,7 @@ class CustomTrainModel:
         epochs: str = "10",
         save_period: str = "1",
         weight_decay: str = "0.0005",
-        lr0: str = "0.01",
-        lrf: str = "0.01",
+        learning_rate: str = "0.01",
         **kwargs,
     ):
         self.train_name = train_name
@@ -105,8 +104,7 @@ class CustomTrainModel:
         self.epochs = epochs
         self.save_period = save_period
         self.weight_decay = weight_decay
-        self.lr0 = lr0
-        self.lrf = lrf
+        self.learning_rate = learning_rate
         # 기본 설정
         self.output_dir = current_path / "outputs"
         self.mlflow_run_id = None
@@ -376,13 +374,15 @@ class CustomTrainModel:
             # 클래스 수 가져오기
             num_classes = self.get_num_classes_from_json(annotation_file)
             # exp 파일 수정사항 정의
+            # YOLOX_MIN_LR_RATIO: cosine 스케줄 최저 LR 비율. ESM2 와 무관한 YOLOX 전용 상수(yolox_base 기본값).
+            YOLOX_MIN_LR_RATIO = 0.05
             modifications = {
                 "num_classes": num_classes,
                 "max_epoch": self.epochs,
                 "save_history_ckpt": False if self.save_period == "-1" else True,
                 "weight_decay": self.weight_decay,
-                "min_lr_ratio": self.lrf,
-                "basic_lr_per_img": float(self.lr0) / float(self.batch_size),
+                "min_lr_ratio": YOLOX_MIN_LR_RATIO,
+                "basic_lr_per_img": float(self.learning_rate) / float(self.batch_size),
             }
             # 임시 파일 생성 및 경로 저장
             temp_exp_path = self.create_modified_exp_file(
@@ -966,9 +966,12 @@ class CustomTrainModel:
             return ""
 
 
-def main():
-    """메인 함수"""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """학습 entrypoint argparse. YOLOX/ESM2 공통. (transformers/peft 를 import 하지 않는다.)"""
     parser = argparse.ArgumentParser(description="커스텀 모델 학습")
+
+    # 모델군 분기 키 (yolox | esm2)
+    parser.add_argument("--model_kind", type=str, required=True, choices=["yolox", "esm2"], help="모델군")
 
     # 기본 설정
     parser.add_argument("--train_name", type=str, required=True, help="학습 실행명")
@@ -1001,13 +1004,31 @@ def main():
     parser.add_argument("--epochs", type=str, required=True, help="에포크 수")
     parser.add_argument("--save_period", type=str, required=True, help="저장 주기")
     parser.add_argument("--weight_decay", type=str, required=True, help="가중치 감소")
-    parser.add_argument("--lr0", type=str, required=True, help="초기 학습률")
-    parser.add_argument("--lrf", type=str, required=True, help="학습률 감소 비율")
+    parser.add_argument("--learning_rate", type=str, required=True, help="학습률 (lr0/lrf 통합 단일 필드)")
 
-    # 인자 파싱
-    args = parser.parse_args()
+    return parser
 
-    # 모델 초기화
+
+def main():
+    """메인 함수 — --model_kind 로 YOLOX / ESM2 분기."""
+    args = build_arg_parser().parse_args()
+
+    # ESM2 분기: transformers/peft 는 이 경로에서만 lazy import 된다.
+    if args.model_kind == "esm2":
+        from app.esm2_finetuner import EsmFineTuner
+
+        runner = EsmFineTuner.from_args(args)
+        try:
+            runner.preprocess()
+            runner.train()
+            logger.info("ESM2 학습 완료!")
+        except Exception as e:
+            logger.error(f"작업 중 오류 발생: {e}")
+            traceback.print_exc()
+            raise
+        return
+
+    # 기본 분기: YOLOX
     model = CustomTrainModel(
         train_name=args.train_name,
         model_id=args.model_id,
@@ -1037,8 +1058,7 @@ def main():
         epochs=args.epochs,
         save_period=args.save_period,
         weight_decay=args.weight_decay,
-        lr0=args.lr0,
-        lrf=args.lrf,
+        learning_rate=args.learning_rate,
     )
 
     try:

@@ -31,6 +31,7 @@ from services.model import (
     ModelService,
     ModelTypeService,
     OllamaModelService,
+    resolve_recommended_hparams,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session
@@ -461,6 +462,7 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     db_model = ModelService().get(db, model_id)
     if db_model is None:
         raise HTTPException(status_code=404, detail="Model not found")
+    db_model.recommended_hparams = resolve_recommended_hparams(db, db_model)
     return db_model
 
 
@@ -577,14 +579,22 @@ def read_models(
 
     if filters or visibility_filter:
         if page is None or page_size is None:
-            return ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
-        skip = page_size * (page - 1)
-        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter)
+            models = ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().filter(
+                db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter
+            )
     else:
         if page is None or page_size is None:
-            return ModelService().get_multi(db, skip=0, limit=10000)
-        skip = page_size * (page - 1)
-        return ModelService().get_multi(db, skip=skip, limit=page_size)
+            models = ModelService().get_multi(db, skip=0, limit=10000)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().get_multi(db, skip=skip, limit=page_size)
+
+    for m in models:
+        m.recommended_hparams = resolve_recommended_hparams(db, m)
+    return models
 
 
 @router.delete("/{model_id}")

@@ -39,8 +39,8 @@ def container_train_eval_component(
     epochs: str,
     save_period: str,
     weight_decay: str,
-    lr0: str,
-    lrf: str,
+    learning_rate: str,
+    model_kind: str,
     namespace: str,
     train_image_url: str,
     image_pull_secret_name: str = "harbor",
@@ -134,10 +134,10 @@ def container_train_eval_component(
             save_period,
             "--weight_decay",
             weight_decay,
-            "--lr0",
-            lr0,
-            "--lrf",
-            lrf,
+            "--learning_rate",
+            learning_rate,
+            "--model_kind",
+            model_kind,
         ]
 
         job = client.V1Job(
