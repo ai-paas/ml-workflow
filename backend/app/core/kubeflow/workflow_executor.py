@@ -380,6 +380,9 @@ class WorkflowExecutor:
             model_uri = ""
             run_id = ""
             framework = "pytorch"
+            # transformers(ESM2) 서빙 시 base 모델(MLflow 등록 카탈로그)의 위치
+            base_run_id = ""
+            base_model_uri = ""
 
             if db and component.model_id:
                 model = (
@@ -421,6 +424,22 @@ class WorkflowExecutor:
                             framework = "keras"
                         elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
+
+                    # transformers(ESM2): base 모델은 lineage root(카탈로그)의 MLflow 등록본을 사용.
+                    # 서빙 컨테이너가 base(MLflow) + adapter(MLflow) 를 모두 MLflow 에서 받도록 위치를 전달.
+                    if framework == "transformers":
+                        try:
+                            from services.model import ModelService
+
+                            root_id = ModelService.resolve_lineage_root_model_id(db, model.id)
+                            root = (
+                                db.query(Model).options(joinedload(Model.registry)).filter(Model.id == root_id).first()
+                            )
+                            if root and root.registry:
+                                base_run_id = root.registry.run_id or ""
+                                base_model_uri = root.registry.uri or ""
+                        except Exception as base_err:
+                            logger.warning(f"ESM2 base 위치 해석 실패(HF Hub fallback): {base_err}")
 
             from core.serving.serving_workflow_deployment_policy import (
                 parse_remote_serving_model_map,
@@ -971,6 +990,12 @@ class WorkflowExecutor:
 
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
+
+                    # transformers(ESM2): base 모델(MLflow) 위치 전달 — 서빙이 base+adapter 를 MLflow 에서 로드
+                    if base_run_id:
+                        container_args.append(f"--base_run_id={base_run_id}")
+                    if base_model_uri:
+                        container_args.append(f"--base_model_uri={base_model_uri}")
 
                     # 리소스 설정 (§7.9 사전정의 메타 기반, ephemeral-storage requests는 제거)
                     resources = client.V1ResourceRequirements(

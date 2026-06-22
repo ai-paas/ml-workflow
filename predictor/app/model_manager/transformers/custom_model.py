@@ -22,6 +22,9 @@ class TransformersModelManager(BaseModelManager):
         self.model = None
         self.tokenizer = None
         self.device = None
+        # base 모델 MLflow 위치(InferenceModel 이 주입). 없으면 HF Hub(BASE_MODEL_ID) 사용.
+        self.base_run_id = None
+        self.base_model_uri = None
 
     @staticmethod
     def _find_adapter_dir(path: str) -> str:
@@ -41,8 +44,18 @@ class TransformersModelManager(BaseModelManager):
         adapter_dir = self._find_adapter_dir(local_path)
         logging.logger.info(f"ESM2 adapter dir: {adapter_dir}")
 
+        # base 모델: MLflow 등록본(base_run_id/base_model_uri)을 우선 사용, 없으면 HF Hub(BASE_MODEL_ID)
+        base_source = self.BASE_MODEL_ID
+        if self.base_run_id and self.base_model_uri:
+            try:
+                base_source = self._load_artifacts(self.base_run_id, self.base_model_uri)
+                logging.logger.info(f"ESM2 base (MLflow) dir: {base_source}")
+            except Exception as e:
+                logging.logger.warning(f"MLflow base 다운로드 실패, HF Hub fallback: {e}")
+                base_source = self.BASE_MODEL_ID
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        base_model = EsmForSequenceClassification.from_pretrained(self.BASE_MODEL_ID, num_labels=2)
+        base_model = EsmForSequenceClassification.from_pretrained(base_source, num_labels=2)
         self.tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
         self.model = PeftModel.from_pretrained(base_model, adapter_dir).to(self.device)
         self.model.eval()

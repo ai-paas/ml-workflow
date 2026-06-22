@@ -48,6 +48,7 @@ from transformers import (
     AutoProcessor,
     AutoTokenizer,
     CLIPTokenizer,
+    EsmForSequenceClassification,
     Owlv2ForObjectDetection,
     Owlv2ImageProcessor,
     Owlv2Processor,
@@ -674,6 +675,17 @@ class HuggingFaceModelService:
                 ```
         """
         # TODO: MS 제공 Model의 경우, trust_remote_code=True 옵션을 추가해야하는 경우 발견됨
+
+        # ESM2 등 단백질 LM(시퀀스 분류) 계열은 객체감지 로더(AutoModelForObjectDetection)로 받을 수 없으므로
+        # EsmForSequenceClassification + tokenizer 로 로드하여 MLflow 에 등록한다(파인튜닝/서빙이 이 base 를 사용).
+        base_config = AutoConfig.from_pretrained(repo_id)
+        if getattr(base_config, "model_type", "") == "esm":
+            esm_model = EsmForSequenceClassification.from_pretrained(repo_id, num_labels=2)
+            esm_tokenizer = AutoTokenizer.from_pretrained(repo_id)
+            temp_dir = tempfile.mkdtemp()
+            esm_model.save_pretrained(temp_dir)
+            esm_tokenizer.save_pretrained(temp_dir)
+            return temp_dir
 
         if repo_id.startswith(str(MODEL_NAME.OWLV2)):
             processor = Owlv2Processor.from_pretrained(repo_id)

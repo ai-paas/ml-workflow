@@ -273,6 +273,14 @@ def container_train(
 
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
+        # ESM2 는 (최초/재학습 모두) 항상 lineage root 카탈로그의 base 를 LoRA 의 기반으로 쓴다.
+        # 자식 모델의 registry 는 adapter 를 가리키므로, base 는 lineage root 의 registry 에서 가져온다.
+        if model_kind == "esm2":
+            root_id = ModelService.resolve_lineage_root_model_id(db, model_id)
+            root_model = ModelService().get(db, root_id)
+            if root_model is not None and root_model.registry:
+                model_uri = root_model.registry.uri
+                model_artifact_path = root_model.registry.artifact_path
         dataset_download_ref = dataset_obj.dataset_registry.uri
         dataset_storage_type = settings.DATASET_STORAGE_TYPE
         kf = KubeflowManager()

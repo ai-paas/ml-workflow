@@ -11,7 +11,7 @@ from pathlib import Path
 from config.db.enums import DatasetKindEnum
 from config.settings import get_settings
 from core.storage.factory import get_storage_client
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from repos.dataset import dataset_registry_repository, dataset_repository
 from schemas.dataset import (
     DatasetBaseSchema,
@@ -80,7 +80,8 @@ class DatasetService:
         - protein-classification: TCR-Epitope CSV (필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 비어있지 않음, 행≥16)
 
         출력에는 dataset_kind 가 포함되지 않는다(입력으로 이미 분류가 정해져 있음).
-        ZIP 자체가 깨졌으면 is_valid=False 로 응답하고, 형식 불충족도 is_valid=False 로 응답한다.
+        ZIP 자체가 깨진 경우는 HTTP 400 으로 거부하고(api-spec §3.1),
+        분류 형식 요구사항을 충족하지 못한 경우만 200 + is_valid=False 로 응답한다.
         """
         temp_dir = None
         try:
@@ -93,9 +94,7 @@ class DatasetService:
                     zip_ref.extractall(temp_dir)
             except zipfile.BadZipFile as e:
                 logger.warning(f"ZIP 파일 형식 검증 실패: {str(e)}")
-                return DatasetValidationResponse(
-                    is_valid=False, message="파일이 유효한 ZIP 형식이 아닙니다.", details=None
-                )
+                raise HTTPException(status_code=400, detail="파일이 유효한 ZIP 형식이 아닙니다.")
 
             root_dir = DatasetService._resolve_root_dir(temp_dir, file.filename)
 
@@ -117,6 +116,9 @@ class DatasetService:
                 is_valid=False, message="데이터셋 구조 검증 실패", details={"errors": errors}
             )
 
+        except HTTPException:
+            # 깨진 ZIP(400) 등 명시적 HTTP 오류는 그대로 전달
+            raise
         except Exception as e:
             logger.error(f"데이터셋 검증 중 예외 발생: {str(e)}", exc_info=True)
             return DatasetValidationResponse(

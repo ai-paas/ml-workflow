@@ -120,6 +120,7 @@ class EsmFineTuner:
         save_period: str,
         weight_decay: str,
         learning_rate: str,
+        model_artifact_path: str,
         args,
     ):
         self.train_name = train_name
@@ -134,11 +135,14 @@ class EsmFineTuner:
         self.save_period = save_period
         self.weight_decay = weight_decay
         self.learning_rate = learning_rate
+        # 카탈로그 ESM2 base 모델의 MLflow 아티팩트 경로(있으면 여기서 base 로드, 없으면 HF Hub)
+        self.model_artifact_path = model_artifact_path
         self.args = args
 
         self.output_dir = current_path / "outputs" / "esm2"
         self.train_csv: Optional[Path] = None
         self.val_csv: Optional[Path] = None
+        self.base_dir: Optional[str] = None
 
     @classmethod
     def from_args(cls, args) -> "EsmFineTuner":
@@ -155,8 +159,15 @@ class EsmFineTuner:
             save_period=args.save_period,
             weight_decay=args.weight_decay,
             learning_rate=args.learning_rate,
+            model_artifact_path=getattr(args, "model_artifact_path", "") or "",
             args=args,
         )
+
+    def _resolve_base_path(self) -> str:
+        """base 모델 로드 경로. MLflow 에서 받은 디렉토리가 있으면 그것을, 없으면 HF Hub(MODEL_ID)."""
+        if self.base_dir:
+            return self.base_dir
+        return MODEL_ID
 
     @staticmethod
     def _find_csv(root: Path, names) -> Optional[Path]:
@@ -167,8 +178,18 @@ class EsmFineTuner:
         return None
 
     def preprocess(self):
-        """데이터셋 다운로드 → zip 해제 → train/val CSV 확정."""
+        """MLflow base 모델 다운로드(선택) + 데이터셋 다운로드 → zip 해제 → train/val CSV 확정."""
         setup_mlflow(self.args)
+
+        # base 모델: MLflow 에 등록된 카탈로그 base 아티팩트를 우선 사용(없으면 HF Hub fallback)
+        if self.model_artifact_path:
+            try:
+                self.base_dir = mlflow.artifacts.download_artifacts(artifact_uri=self.model_artifact_path)
+                logger.info(f"MLflow base 모델 다운로드: {self.model_artifact_path} → {self.base_dir}")
+            except Exception as e:
+                logger.warning(f"MLflow base 다운로드 실패, HF Hub 로 fallback 합니다: {e}")
+                self.base_dir = None
+
         download_dir = download_dataset_dir(self.args)
         zips = list(Path(download_dir).glob("*.zip"))
         if not zips:
@@ -220,10 +241,12 @@ class EsmFineTuner:
         """ESM2 + LoRA 학습 후 어댑터를 MLflow 'adapter' 아티팩트로 등록."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        base_path = self._resolve_base_path()
+        logger.info(f"ESM2 base 로드 경로: {base_path}")
+        tokenizer = AutoTokenizer.from_pretrained(base_path)
         ds = self._build_datasets(tokenizer)
 
-        model = EsmForSequenceClassification.from_pretrained(MODEL_ID, num_labels=2)
+        model = EsmForSequenceClassification.from_pretrained(base_path, num_labels=2)
         peft_config = LoraConfig(
             task_type="SEQ_CLS",
             inference_mode=False,

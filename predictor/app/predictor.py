@@ -93,6 +93,8 @@ class InferenceModel(Model):
         predictor_use_ssl: bool,
         framework: str = "pytorch",  # 기본값으로 pytorch 설정
         run_id: str = None,
+        base_run_id: str = None,
+        base_model_uri: str = None,
     ):
         super().__init__(name, PredictorConfig(predictor_host, predictor_protocol, predictor_use_ssl))
         self.name = name
@@ -101,6 +103,9 @@ class InferenceModel(Model):
         self.mlflow_experiment_name = mlflow_experiment_name
         self.framework = framework
         self.run_id = run_id
+        # transformers(ESM2) base 모델(MLflow) 위치 — 있으면 MLflow base, 없으면 HF Hub
+        self.base_run_id = base_run_id
+        self.base_model_uri = base_model_uri
 
         logging.logger.info(
             f"""model_uri = {model_uri},
@@ -130,6 +135,11 @@ class InferenceModel(Model):
         try:
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
+
+            # transformers(ESM2): base 모델(MLflow) 위치를 매니저에 전달 → MLflow base + adapter 로드
+            if self.framework == "transformers":
+                self.model_manager.base_run_id = self.base_run_id
+                self.model_manager.base_model_uri = self.base_model_uri
 
             # Model Manager를 통한 모델 로드
             if self.run_id:
@@ -287,6 +297,8 @@ parser.add_argument(
     help="Framework type for model inference",
 )
 parser.add_argument("--run_id", type=str, help="MLflow run ID")
+parser.add_argument("--base_run_id", type=str, default=None, help="(transformers) base 모델 MLflow run ID")
+parser.add_argument("--base_model_uri", type=str, default=None, help="(transformers) base 모델 MLflow artifact path")
 
 args, _ = parser.parse_known_args()
 
@@ -307,6 +319,8 @@ if __name__ == "__main__":
         aws_secret_access_key=args.aws_secret_access_key,
         framework=args.framework,
         run_id=args.run_id,
+        base_run_id=args.base_run_id,
+        base_model_uri=args.base_model_uri,
     )
 
     ModelServer().start([model])
