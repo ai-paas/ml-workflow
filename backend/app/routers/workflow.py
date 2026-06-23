@@ -3900,9 +3900,10 @@ async def finalize_cleanup(
                 f"updating workflow state and cleaning up deployments"
             )
 
-            # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
+            # KServe 리소스가 모두 삭제됐으므로 워크플로우를 DRAFT 로 되돌린다(재배포 가능 상태).
+            # ACTIVE(정상 배포본) / ERROR 어느 쪽이든 DRAFT 로 전환한다(설계서 §7-2).
             workflow_updated = False
-            if workflow.status == WorkflowStatus.ERROR:
+            if workflow.status != WorkflowStatus.DRAFT:
                 workflow.status = WorkflowStatus.DRAFT
                 workflow_updated = True
 
