@@ -20,8 +20,9 @@ type/format/task/parameter/sample_code 를 상속한다. 따라서 모델·파�
     E2E_TRAINING_REFERENCE_MODEL_NAME=facebook/esm2_t6_8M_UR50D \\
     E2E_TRAINING_DATASET_FILE=protein_sample.zip
 
-산출: 자식 모델 id/name 을 .state.{ENV}.json 의 training_child_model_id / training_child_model_name 으로
-저장 → 워크플로우 시나리오 #11 이 E2E_WORKFLOW_TARGET_PLM_MODEL 로 참조.
+산출: 각 학습 런(experiment/child model/auto dataset)을 .state.{ENV}.json 의 training_runs 리스트에
+누적 기록한다 → make e2e-training-clean 이 일괄 삭제. (시나리오 #11 배포는 E2E_WORKFLOW_TARGET_PLM_MODEL
+env 로 모델을 이름 조회하며 상태 파일과 무관하다.)
 """
 
 from __future__ import annotations
@@ -32,7 +33,8 @@ import uuid
 
 import pytest
 import requests
-from config import _E2E_ROOT, save_state
+from config import _E2E_ROOT
+from training.state import append_training_run, update_training_run
 
 REFERENCE_MODEL_NAME = (os.environ.get("E2E_TRAINING_REFERENCE_MODEL_NAME") or "").strip()
 DATASET_ID = (os.environ.get("E2E_TRAINING_DATASET_ID") or "").strip()
@@ -128,8 +130,22 @@ class TestTrainingRegister:
         exp_id = resp.json().get("experiment_id")
         assert exp_id, f"experiment_id 없음: {resp.text}"
         self.__class__.experiment_id = exp_id
-        save_state("training_experiment_id", str(exp_id))
-        print(f"  experiment_id={exp_id}")
+
+        # 자동 생성된 데이터셋 id 조회(파일 업로드 시에만 정리 대상; 재사용 dataset_id 는 제외)
+        auto_dataset_id = None
+        if not DATASET_ID:
+            exp_detail = requests.get(f"{api_url}/experiments/{exp_id}", headers=auth_headers).json()
+            auto_dataset_id = (exp_detail.get("dataset") or {}).get("id") or exp_detail.get("dataset_id")
+        # 학습 런을 상태 파일에 누적 기록(여러 런 + cleanup 용). 등록 성공 시 child_model_id 를 채운다.
+        append_training_run(
+            {
+                "experiment_id": exp_id,
+                "child_model_id": None,
+                "child_model_name": CHILD_MODEL_NAME,
+                "dataset_id": auto_dataset_id,
+            }
+        )
+        print(f"  experiment_id={exp_id} (auto_dataset_id={auto_dataset_id})")
 
     def test_03_wait_training_completed(self, api_url: str, auth_headers: dict):
         assert self.__class__.experiment_id, "experiment_id 미설정"
@@ -165,8 +181,7 @@ class TestTrainingRegister:
             time.sleep(POLL_INTERVAL_SEC)
         assert child_id, f"{REGISTER_TIMEOUT_SEC}s 내 registered_model_id 미생성. 마지막: {last!r}"
         self.__class__.child_model_id = child_id
-        save_state("training_child_model_id", str(child_id))
-        save_state("training_child_model_name", CHILD_MODEL_NAME)
+        update_training_run(self.__class__.experiment_id, child_model_id=child_id)
         print(f"\n✔ 자식 모델 등록 SUCCESS: id={child_id} name={CHILD_MODEL_NAME}")
 
     def test_05_verify_child_inherits_meta(self, api_url: str, auth_headers: dict):

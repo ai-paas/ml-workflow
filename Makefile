@@ -13,7 +13,7 @@
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario \
-        e2e-training \
+        e2e-training e2e-training-clean \
         e2e-service-metric
 
 APP_DIR := backend/app
@@ -287,3 +287,9 @@ e2e-model-improvement-scenario:
 e2e-training:
 	@echo "▶ E2E: 통합 학습→등록 (reference=$(if $(strip $(E2E_TRAINING_REFERENCE_MODEL_NAME)),$(E2E_TRAINING_REFERENCE_MODEL_NAME),.env))"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_register.py -v -s -m training
+
+# 학습→등록 e2e 산출물(experiment/child model/auto dataset) 일괄 삭제 (.state.{ENV}.json 의 training_runs)
+#   make e2e-training-clean ENV=dev
+e2e-training-clean:
+	@echo "▶ E2E: 학습 산출물 정리 (training_runs)"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_cleanup.py -v -s -m training_clean
