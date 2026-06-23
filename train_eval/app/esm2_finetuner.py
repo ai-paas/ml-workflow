@@ -17,7 +17,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 import torch
-from app._common import download_dataset_dir, get_token_from_restapi, setup_mlflow, update_experiment
+from app._common import download_dataset_dir, setup_mlflow, update_experiment
 from datasets import Dataset, DatasetDict
 from loguru import logger
 from peft import LoraConfig, get_peft_model
@@ -121,6 +121,7 @@ class EsmFineTuner:
         weight_decay: str,
         learning_rate: str,
         model_artifact_path: str,
+        internal_api_key: str,
         args,
     ):
         self.train_name = train_name
@@ -137,6 +138,8 @@ class EsmFineTuner:
         self.learning_rate = learning_rate
         # 카탈로그 ESM2 base 모델의 MLflow 아티팩트 경로(있으면 여기서 base 로드, 없으면 HF Hub)
         self.model_artifact_path = model_artifact_path
+        # 백엔드 internal-access(X-Internal-API-Key) 콜백용 키
+        self.internal_api_key = internal_api_key
         self.args = args
 
         self.output_dir = current_path / "outputs" / "esm2"
@@ -160,6 +163,7 @@ class EsmFineTuner:
             weight_decay=args.weight_decay,
             learning_rate=args.learning_rate,
             model_artifact_path=getattr(args, "model_artifact_path", "") or "",
+            internal_api_key=getattr(args, "internal_api_key", "") or "",
             args=args,
         )
 
@@ -305,12 +309,12 @@ class EsmFineTuner:
             callbacks=callbacks,
         )
 
-        token = get_token_from_restapi(self.restapi_url, self.restapi_username, self.restapi_password)
         with mlflow.start_run(run_name=self.train_name) as run:
-            # run_id 를 백엔드 experiment 에 즉시 전달 (metrics_polling 이 이를 기다린다)
+            # run_id 를 백엔드 experiment 에 즉시 전달 (metrics_polling 이 이를 기다린다).
+            # internal-access 는 X-Internal-API-Key 인증을 요구하므로 internal_api_key 를 사용.
             update_experiment(
                 restapi_url=self.restapi_url,
-                restapi_token=token,
+                internal_api_key=self.internal_api_key,
                 experiment_id=self.experiment_id,
                 status="RUNNING",
                 mlflow_run_id=run.info.run_id,
@@ -323,7 +327,7 @@ class EsmFineTuner:
             adapter_dir.mkdir(parents=True, exist_ok=True)
             trainer.save_model(str(adapter_dir))
             tokenizer.save_pretrained(str(adapter_dir))
-            mlflow.log_artifacts(local_path=str(adapter_dir), artifact_path="adapter")
+            mlflow.log_artifacts(str(adapter_dir), artifact_path="adapter")
             logger.info(f"ESM2 LoRA 어댑터 등록 완료: {adapter_dir} → mlflow artifact 'adapter'")
 
     def postprocess(self):

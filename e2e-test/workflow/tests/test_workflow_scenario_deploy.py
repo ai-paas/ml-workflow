@@ -19,6 +19,7 @@ E2E 시나리오: 워크플로우 시나리오 배포 테스트
   8. 추론 테스트
 """
 
+import json
 import os
 import time
 import uuid
@@ -37,6 +38,7 @@ from config import (
     STATE_FILE,
     TARGET_EMBEDDING_MODEL_NAME,
     WORKFLOW_ODM_TEST_IMAGE,
+    WORKFLOW_PLM_TEST_SAMPLE,
     workflow_primary_target_model_name,
 )
 from workflow.definitions import (
@@ -98,7 +100,7 @@ class TestWorkflowScenarioDeploy:
         model = self._find_model_by_name(api_url, auth_headers, target)
         assert model["id"]
         self.__class__.model = model
-        kind = "ODM" if SCENARIO_NUM == 10 else "LLM"
+        kind = {10: "ODM", 11: "pLM"}.get(SCENARIO_NUM, "LLM")
         print(f"\n✔ {kind} 모델 발견: id={model['id']}, name={model['name']}")
 
     def test_02_find_embedding_model(self, api_url: str, auth_headers: dict):
@@ -314,7 +316,8 @@ class TestWorkflowScenarioDeploy:
         wf_id = self.__class__.workflow_id
         assert wf_id
 
-        if SCENARIO.get("inference_kind") == "ml":
+        inference_kind = SCENARIO.get("inference_kind")
+        if inference_kind == "ml":
             img = WORKFLOW_ODM_TEST_IMAGE
             assert img.is_file(), f"ODM 테스트 이미지가 없습니다: {img}"
             with open(img, "rb") as f:
@@ -324,6 +327,16 @@ class TestWorkflowScenarioDeploy:
                     headers=auth_headers,
                     timeout=INFERENCE_TIMEOUT_SEC,
                 )
+        elif inference_kind == "plm":
+            sample_path = WORKFLOW_PLM_TEST_SAMPLE
+            assert sample_path.is_file(), f"pLM 테스트 샘플이 없습니다: {sample_path}"
+            sample = json.loads(sample_path.read_text())
+            resp = requests.post(
+                f"{api_url}/workflows/{wf_id}/test/plm",
+                json={"epitope": sample["epitope"], "cdr3b": sample["cdr3b"]},
+                headers=auth_headers,
+                timeout=INFERENCE_TIMEOUT_SEC,
+            )
         else:
             resp = requests.post(
                 f"{api_url}/workflows/{wf_id}/test/rag",
@@ -336,14 +349,24 @@ class TestWorkflowScenarioDeploy:
         data = resp.json()
         assert data["workflow_id"] == wf_id
         assert len(data["results"]) > 0
-        fr = data.get("final_result") or ""
-        assert len(fr) > 0
 
         print("\n✔ 추론 성공")
-        if SCENARIO.get("inference_kind") == "ml":
-            print(f"  final_result: (base64 이미지 문자열, 길이 {len(fr)})")
+        if inference_kind == "plm":
+            # pLM 응답은 final_result 없이 results[].result.predictions 를 검증
+            result = data["results"][0]
+            assert result.get("model_type") == "pLM", f"model_type 기대=pLM, 실제={result.get('model_type')}"
+            preds = (result.get("result") or {}).get("predictions") or []
+            assert preds, f"predictions 가 비어 있습니다: {result}"
+            top = preds[0]
+            assert "label" in top and "score" in top, f"predictions 형식 오류: {top}"
+            print(f"  predictions[0]: label={top.get('label')}, score={top.get('score')}")
         else:
-            print(f"  final_result: {fr[:100]}{'…' if len(fr) > 100 else ''}")
+            fr = data.get("final_result") or ""
+            assert len(fr) > 0
+            if inference_kind == "ml":
+                print(f"  final_result: (base64 이미지 문자열, 길이 {len(fr)})")
+            else:
+                print(f"  final_result: {fr[:100]}{'…' if len(fr) > 100 else ''}")
         _env = (os.environ.get("ENV") or "").strip()
         if _env:
             print(f"\n  ℹ 삭제하려면: make e2e-wf-scenario-delete SCENARIO={SCENARIO_NUM} ENV={_env}")

@@ -73,7 +73,8 @@ def _expected_dataset_kind(db: Session, db_model) -> str:
     fmt = (root.format_info.name or "").lower() if root and root.format_info else ""
     if fmt == ModelFormatEnum.YOLOX.value:
         return DatasetKindEnum.OBJECT_DETECTION.value
-    if fmt == ModelFormatEnum.TRANSFORMERS.value and (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
+    # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 공유되므로 format 비의존)
+    if (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
         return DatasetKindEnum.PROTEIN_CLASSIFICATION.value
     raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
 
@@ -157,6 +158,7 @@ def container_train(
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        internal_api_key: str,
         gpu_limit: str,
         batch_size: str,
         epochs: str,
@@ -192,6 +194,7 @@ def container_train(
             restapi_url=restapi_url,
             restapi_username=restapi_username,
             restapi_password=restapi_password,
+            internal_api_key=internal_api_key,
             gpu_limit=gpu_limit,
             batch_size=batch_size,
             epochs=epochs,
@@ -221,14 +224,15 @@ def container_train(
 
         # 데이터셋 확보: dataset_file 이면 즉시 등록, dataset_id 면 조회 후 kind 검사
         if has_dataset_file:
-            if body.dataset_kind is None:
-                raise HTTPException(status_code=400, detail="dataset_file 동반 시 dataset_kind 는 필수입니다.")
-            if body.dataset_kind.value != expected_kind:
+            # dataset_kind 는 모델(lineage root)에서 도출되므로(_expected_dataset_kind) 클라이언트가 보낼 필요가 없다.
+            # 보냈으면 expected_kind 와 일치하는지만 검증하고, 미지정이면 expected_kind 를 그대로 사용한다.
+            if body.dataset_kind is not None and body.dataset_kind.value != expected_kind:
                 raise HTTPException(
                     status_code=400,
                     detail=f"데이터셋 분류 '{body.dataset_kind.value}' 가 "
                     f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
                 )
+            resolved_kind = DatasetKindEnum(expected_kind)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             auto_name = f"auto-{train_name or 'dataset'}-{ts}"
             auto_desc = f"학습 요청 시 자동 등록된 데이터셋 kind={expected_kind}"
@@ -239,7 +243,7 @@ def container_train(
                     description=auto_desc,
                     version=1,
                     subversion=1,
-                    kind=body.dataset_kind,
+                    kind=resolved_kind,
                 ),
                 file=dataset_file,
             )
@@ -333,6 +337,7 @@ def container_train(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
+                "internal_api_key": settings.INTERNAL_API_KEY,
                 "gpu_limit": hparams["gpus"],
                 "batch_size": hparams["batch_size"],
                 "epochs": hparams["epochs"],
@@ -529,8 +534,15 @@ def register_model(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+        # 파인튜닝 자식은 MLflow registry(LoRA adapter/가중치) 기반이므로 provider 는 항상 CUSTOM 으로 등록한다.
+        # (huggingface 로 상속하면 create_model 이 repo_id 필수 + HF Hub 다운로드 경로로 가서 실패한다.)
+        # 단 type 은 reference 모델에서 상속해야 추론 디스패치가 맞다 (ESM2 → pLM, YOLOX → ODM).
+        reference_model = ModelService().get(db, reference_model_id)
         provider_name = ModelProviderEnum.CUSTOM.value
-        type_name = ModelTypeEnum.ODM.value
+        if reference_model is not None and reference_model.type_info:
+            type_name = reference_model.type_info.name
+        else:
+            type_name = ModelTypeEnum.ODM.value
         yolox_format_name = ModelFormatEnum.YOLOX.value
         pytorch_format_name = ModelFormatEnum.PYTORCH.value
 

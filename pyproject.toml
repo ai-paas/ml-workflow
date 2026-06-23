@@ -31,6 +31,7 @@ markers = [
     "workflow_template_clone: 워크플로 템플릿 생성 → 복제 → 실행 → 추론 → 정리",
     "model_improvement: 최적화/경량화 API",
     "model_improvement_scenario: 최적화/경량화 E2E(작업 생성~성공 폴링)",
+    "training: 통합 학습→등록 파이프라인 E2E(YOLOX/ESM2 공통)",
 ]
 
 [tool.black]

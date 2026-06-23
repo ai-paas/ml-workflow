@@ -101,7 +101,7 @@ def register_model_component(
                 return None
 
         def get_model_info(self, model_id: int) -> Optional[Dict[str, Any]]:
-            """모델 ID로부터 모델 정보 조회 (name, format_id)"""
+            """모델 ID로부터 모델 정보 조회 (name, format_id, task, parameter, sample_code)"""
             try:
                 response = self._session.get(
                     f"{self.base_url}/api/v1/models/{model_id}",
@@ -115,7 +115,14 @@ def register_model_component(
                     if data.get("format_info"):
                         format_id = data["format_info"].get("id")
 
-                    return {"name": data.get("name"), "format_id": format_id}
+                    return {
+                        "name": data.get("name"),
+                        "format_id": format_id,
+                        # 파인튜닝 산출물에 부모(reference) 모델의 메타를 그대로 상속
+                        "task": data.get("task"),
+                        "parameter": data.get("parameter"),
+                        "sample_code": data.get("sample_code"),
+                    }
                 else:
                     logger.error(f"모델 조회 실패: {response.status_code} - {response.text}")
                     return None
@@ -257,6 +264,10 @@ def register_model_component(
 
             reference_model_name = reference_model_info.get("name")
             reference_format_id = reference_model_info.get("format_id")
+            # 부모(reference) 모델의 task/parameter/sample_code 를 파인튜닝 산출물에 상속
+            reference_task = reference_model_info.get("task")
+            reference_parameter = reference_model_info.get("parameter")
+            reference_sample_code = reference_model_info.get("sample_code")
 
             if not reference_model_name:
                 raise Exception(f"모델 ID {reference_model_id}의 이름을 조회할 수 없습니다.")
@@ -296,8 +307,8 @@ def register_model_component(
 
             with mlflow.start_run(run_name=f"{uuid.uuid4()}-model") as run:
                 if adapter_dir:
-                    # ESM2: PEFT 어댑터 디렉토리 통째를 'adapter' 아티팩트로 등록
-                    mlflow.log_artifacts(local_path=adapter_dir, artifact_path="adapter", run_id=run.info.run_id)
+                    # ESM2: PEFT 어댑터 디렉토리 통째를 'adapter' 아티팩트로 등록 (활성 run 컨텍스트)
+                    mlflow.log_artifacts(adapter_dir, artifact_path="adapter")
                     registry_artifact_path = f"{run.info.artifact_uri}/adapter"
                     registry_uri = "adapter"
                     logger.info("ESM2 LoRA 어댑터 디렉토리를 'adapter' 아티팩트로 등록했습니다.")
@@ -320,7 +331,7 @@ def register_model_component(
                 # 모델 메타데이터 조회 (provider, type만 조회)
                 metadata = api_client.get_model_metadata(provider_name, type_name)
 
-                # 모델 데이터 준비 (format_id는 reference_model의 것을 사용)
+                # 모델 데이터 준비 (format_id·task·parameter·sample_code 는 reference_model 의 것을 상속)
                 model_data = {
                     "name": train_model_name,
                     "description": description,
@@ -336,9 +347,22 @@ def register_model_component(
                         }
                     ),
                 }
+                # 부모 모델의 task/parameter/sample_code 를 그대로 업로드 (값이 있을 때만)
+                if reference_task:
+                    model_data["task"] = reference_task
+                if reference_parameter:
+                    model_data["parameter"] = reference_parameter
+                if reference_sample_code:
+                    model_data["sample_code"] = reference_sample_code
 
-                # 메타데이터 삽입
-                api_client.insert_model_metadata(model_data)
+                # 메타데이터 삽입 (실패 시 raise — 조용한 실패로 registration 이 거짓 SUCCESS 되는 것 방지)
+                insert_result = api_client.insert_model_metadata(model_data)
+                if not insert_result:
+                    raise Exception(
+                        "모델 메타데이터 삽입(POST /api/v1/models) 실패. "
+                        f"name={model_data.get('name')} provider_id={model_data.get('provider_id')} "
+                        f"type_id={model_data.get('type_id')} format_id={model_data.get('format_id')}"
+                    )
 
         finally:
             # 임시 파일 정리

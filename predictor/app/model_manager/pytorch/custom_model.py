@@ -38,7 +38,7 @@ categories = {
 }
 
 
-class PytorchModelManager(BaseModelManager):
+class ImageProcessingModelManager(BaseModelManager):
     def __init__(self):
         """
         ex)
@@ -342,7 +342,7 @@ class PytorchModelManager(BaseModelManager):
 
 @lru_cache
 def get_model_manager():
-    model_manager = PytorchModelManager()
+    model_manager = ImageProcessingModelManager()
     return model_manager
 
 

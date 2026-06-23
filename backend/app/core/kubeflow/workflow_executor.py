@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config.db.enums import ModelFormatEnum, ModelProviderEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from db.models.model import Model
@@ -83,8 +83,6 @@ class WorkflowExecutor:
                     framework = "tensorflow"
                 elif ModelFormatEnum.ONNX.value.lower() in format_name:
                     framework = "onnx"
-                elif ModelFormatEnum.TRANSFORMERS.value.lower() in format_name:
-                    framework = "transformers"
                 elif ModelFormatEnum.KERAS.value.lower() in format_name:
                     framework = "keras"
                 elif ModelFormatEnum.YOLOX.value.lower() in format_name:
@@ -380,14 +378,20 @@ class WorkflowExecutor:
             model_uri = ""
             run_id = ""
             framework = "pytorch"
-            # transformers(ESM2) 서빙 시 base 모델(MLflow 등록 카탈로그)의 위치
+            # 매니저 선택용 model_type ((framework, model_type) 복합 키). pLM 이면 base 주입 게이트로도 사용.
+            model_type = ""
+            # pLM(ESM2) 서빙 시 base 모델(MLflow 등록 카탈로그)의 위치
             base_run_id = ""
             base_model_uri = ""
 
             if db and component.model_id:
                 model = (
                     db.query(Model)
-                    .options(joinedload(Model.provider_info), joinedload(Model.registry))
+                    .options(
+                        joinedload(Model.provider_info),
+                        joinedload(Model.registry),
+                        joinedload(Model.type_info),
+                    )
                     .filter(Model.id == component.model_id)
                     .first()
                 )
@@ -409,7 +413,12 @@ class WorkflowExecutor:
                         model_uri = model.registry.uri or ""
                         run_id = model.registry.run_id or ""
 
-                    # framework 정보 추론
+                    # model_type 추출 ((framework, model_type) 복합 키 + pLM base 주입 게이트)
+                    if hasattr(model, "type_info") and model.type_info:
+                        model_type = model.type_info.name or ""
+
+                    # framework 정보 추론 (model_format 기반). ESM2(pLM)는 format=pytorch 이므로 pytorch 로 매핑되고,
+                    # 세부 매니저는 predictor 가 (framework, model_type) 복합 키로 가른다.
                     if hasattr(model, "format_info") and model.format_info:
                         format_name = model.format_info.name.lower()
                         if ModelFormatEnum.PYTORCH.value.lower() in format_name or "torch" in format_name:
@@ -418,16 +427,14 @@ class WorkflowExecutor:
                             framework = "tensorflow"
                         elif ModelFormatEnum.ONNX.value.lower() in format_name:
                             framework = "onnx"
-                        elif ModelFormatEnum.TRANSFORMERS.value.lower() in format_name:
-                            framework = "transformers"
                         elif ModelFormatEnum.KERAS.value.lower() in format_name:
                             framework = "keras"
                         elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
 
-                    # transformers(ESM2): base 모델은 lineage root(카탈로그)의 MLflow 등록본을 사용.
+                    # pLM(ESM2): base 모델은 lineage root(카탈로그)의 MLflow 등록본을 사용.
                     # 서빙 컨테이너가 base(MLflow) + adapter(MLflow) 를 모두 MLflow 에서 받도록 위치를 전달.
-                    if framework == "transformers":
+                    if model_type == ModelTypeEnum.PLM.value:
                         try:
                             from services.model import ModelService
 
@@ -553,6 +560,9 @@ class WorkflowExecutor:
                 cpu_limit: str = "2000m",
                 kserve_gateway_url: str = "",
                 deployment_mode: str = "kserve",
+                model_type: str = "",
+                base_run_id: str = "",
+                base_model_uri: str = "",
             ) -> str:
                 import json
                 import logging
@@ -991,7 +1001,11 @@ class WorkflowExecutor:
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
 
-                    # transformers(ESM2): base 모델(MLflow) 위치 전달 — 서빙이 base+adapter 를 MLflow 에서 로드
+                    # (framework, model_type) 복합 키로 predictor 가 매니저 선택
+                    if model_type:
+                        container_args.append(f"--model_type={model_type}")
+
+                    # pLM(ESM2): base 모델(MLflow) 위치 전달 — 서빙이 base+adapter 를 MLflow 에서 로드
                     if base_run_id:
                         container_args.append(f"--base_run_id={base_run_id}")
                     if base_model_uri:
@@ -1433,6 +1447,9 @@ class WorkflowExecutor:
                 cpu_limit=cpu_lim,
                 kserve_gateway_url=parameters.get("kserve_gateway_url", ""),
                 deployment_mode=deployment_mode,
+                model_type=model_type,
+                base_run_id=base_run_id,
+                base_model_uri=base_model_uri,
             )
 
         return None

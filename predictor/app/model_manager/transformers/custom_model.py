@@ -5,7 +5,7 @@ from app.model_manager.base import BaseModelManager
 from kserve import logging
 
 
-class TransformersModelManager(BaseModelManager):
+class ProteinLanguageModelManager(BaseModelManager):
     """ESM2 (facebook/esm2_t6_8M_UR50D) LoRA 어댑터 시퀀스 분류 추론 매니저.
 
     학습 산출물은 `.pth` 단일 파일이 아니라 PEFT 어댑터 디렉토리(adapter_model.safetensors +

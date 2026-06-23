@@ -127,7 +127,7 @@ class TrainingRequest(BaseModel):
 
     # 데이터셋 입력 — dataset_file(별도 인자)과 XOR
     dataset_id: Optional[int] = None
-    # 데이터셋 분류 — dataset_file 동반 시 필수, dataset_id 케이스에서는 무시
+    # 데이터셋 분류 — 미지정 시 모델(_expected_dataset_kind)에서 도출. 지정 시 expected_kind 와 일치 검증.
     dataset_kind: Optional[DatasetKindEnum] = None
 
     # 학습 파라미터 (lr0/lrf 통합 → 단일 learning_rate)

@@ -314,6 +314,15 @@ SCENARIOS: dict[int, dict] = {
         "inference_kind": "ml",
         "prompts": {},
     },
+    11: {
+        "name": "pLM 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "plm",
+        "prompts": {},
+    },
 }
 
 
@@ -348,6 +357,22 @@ def _build_scenario_10(model_id: int, kb_ids: list[int], top_k: int, prompt_ids:
         "connections": [
             {"source_ref_id": start, "target_ref_id": odm},
             {"source_ref_id": odm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_11(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → pLM(MODEL) → 종료 — ODM 단순과 위상 동일. 백엔드는 model_type(pLM)으로 추론 경로를 가른다."""
+    start, plm, end = _ref("start"), _ref("plm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(plm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": plm},
+            {"source_ref_id": plm, "target_ref_id": end},
         ],
     }
 
@@ -574,6 +599,7 @@ _BUILDERS = {
     8: _build_scenario_8,
     9: _build_scenario_9,
     10: _build_scenario_10,
+    11: _build_scenario_11,
 }
 
 

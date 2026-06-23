@@ -40,6 +40,7 @@ from schemas.workflow import (
     ModelComponentTestResult,
     ModelLLMTestResult,
     ModelODMTestResult,
+    ModelPLMTestResult,
     ValidationCheckResponse,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
@@ -47,6 +48,7 @@ from schemas.workflow import (
     WorkflowExecuteResponse,
     WorkflowListSchema,
     WorkflowMLTestResponse,
+    WorkflowPLMTestResponse,
     WorkflowRAGTestResponse,
     WorkflowReadSchema,
     WorkflowTemplateBriefSchema,
@@ -3113,6 +3115,135 @@ async def _execute_odm_inference(
         )
 
 
+async def _execute_plm_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    epitope: str,
+    cdr3b: str,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """pLM(ESM2) 모델 추론 실행. 단백질 서열 {epitope, cdr3b} 를 KServe predictor(transformers)로 보낸다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 pLM 추론을 지원하지 않습니다.",
+        )
+    if not epitope or not cdr3b:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="pLM model requires non-empty 'epitope' and 'cdr3b'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe pLM 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 transformers 경로는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"epitope": epitope, "cdr3b": cdr3b}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.PLM.value,
+            result=ModelPLMTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"pLM inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
 # ============= Workflow Test Endpoints =============
 
 
@@ -3382,6 +3513,80 @@ async def test_ml_workflow(
         execution_order=execution_order_ids,
         results=results,
         final_result=final_result,
+    )
+
+
+@router.post("/{workflow_id}/test/plm", response_model=WorkflowPLMTestResponse)
+async def test_plm_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    epitope: str = Body(..., embed=True, description="단백질 epitope 서열"),
+    cdr3b: str = Body(..., embed=True, description="TCR β-chain CDR3 서열"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    pLM(ESM2) 워크플로우 테스트
+
+    단백질 서열 분류(TCR-Epitope 결합) 모델을 배포한 워크플로우에 `{epitope, cdr3b}` 를 보내
+    이진 분류 추론을 수행한다.
+
+    ## Request Body (JSON)
+    - **epitope** (str, required): epitope 서열
+    - **cdr3b** (str, required): cdr3b 서열
+
+    ## Response (WorkflowPLMTestResponse)
+    - **results[].result** (ModelPLMTestResult): `predictions`(label/score/probabilities) + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **model_type 이 pLM 이 아닌 모델 컴포넌트가 있으면 400 으로 거부**한다(pLM 전용 엔드포인트).
+
+    ## Errors
+    - 400: pLM 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — pLM 이 아닌 모델이 섞여 있으면 거부, pLM 이 하나도 없어도 거부
+    plm_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            type_name = model.type_info.name if (model and model.type_info) else None
+            if type_name == ModelTypeEnum.PLM.value:
+                plm_components.append(component)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"pLM 전용 추론 엔드포인트입니다. 비-pLM 모델 컴포넌트가 포함되어 있습니다: "
+                    f"{component.name} (type={type_name})",
+                )
+
+    if not plm_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="pLM 워크플로우가 아닙니다 (pLM 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in plm_components:
+        results.append(
+            await _execute_plm_inference(db, workflow.id, component, epitope, cdr3b, workflow.service_id, current_user)
+        )
+
+    return WorkflowPLMTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in plm_components],
+        results=results,
     )
 
 

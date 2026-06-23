@@ -44,6 +44,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restapi_url", type=str, required=True, help="REST API URL")
     parser.add_argument("--restapi_username", type=str, required=True, help="REST API 사용자명")
     parser.add_argument("--restapi_password", type=str, required=True, help="REST API 비밀번호")
+    parser.add_argument("--internal_api_key", type=str, default="", help="internal-access 콜백용 X-Internal-API-Key")
     parser.add_argument("--gpu_limit", type=str, required=True, help="GPU 제한")
     parser.add_argument("--batch_size", type=str, required=True, help="배치 크기")
     parser.add_argument("--epochs", type=str, required=True, help="에포크 수")
@@ -100,6 +101,7 @@ def main():
         restapi_url=args.restapi_url,
         restapi_username=args.restapi_username,
         restapi_password=args.restapi_password,
+        internal_api_key=args.internal_api_key,
         gpu_limit=args.gpu_limit,
         batch_size=args.batch_size,
         epochs=args.epochs,

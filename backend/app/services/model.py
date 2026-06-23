@@ -454,9 +454,8 @@ class ModelService:
 
         format_obj = model_format_repository.get(db, format_id)
         format_name = format_obj.name if format_obj is not None else ""
-        learning_enable_yn = format_name == ModelFormatEnum.YOLOX.value or (
-            format_name == ModelFormatEnum.TRANSFORMERS.value and (repo_id or "").strip() == ESM2_T6_8M_REPO_ID
-        )
+        # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 detr/yolos 와 공유되므로 format 비의존)
+        learning_enable_yn = format_name == ModelFormatEnum.YOLOX.value or (repo_id or "").strip() == ESM2_T6_8M_REPO_ID
         if not repo_id and learning_enable_yn:
             key = (name or "").strip()
             pred = PREDEFINED_MODEL_CONFIGS.get(key)
@@ -1480,7 +1479,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "task": "feature-extraction",
         "provider_name": "huggingface",
         "type_name": "pLM",
-        "format_name": "transformers",
+        "format_name": "pytorch",
         "recommended_hparams": {
             "learning_rate": "0.001",
             "batch_size": "16",

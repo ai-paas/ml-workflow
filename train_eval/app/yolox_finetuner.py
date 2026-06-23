@@ -74,6 +74,7 @@ class CustomTrainModel:
         restapi_url: str = "",
         restapi_username: str = "",
         restapi_password: str = "",
+        internal_api_key: str = "",
         gpu_limit: str = "1",
         batch_size: str = "8",
         epochs: str = "10",
@@ -105,6 +106,7 @@ class CustomTrainModel:
         self.restapi_url = restapi_url
         self.restapi_username = restapi_username
         self.restapi_password = restapi_password
+        self.internal_api_key = internal_api_key
         self.batch_size = batch_size
         self.gpu_limit = gpu_limit
         self.epochs = epochs
@@ -496,9 +498,6 @@ class CustomTrainModel:
                     experiment_id=self.experiment_id,
                     mlflow_run_id=run.info.run_id,
                     restapi_url=self.restapi_url,
-                    restapi_token=self.get_token_from_restapi(
-                        url=self.restapi_url, username=self.restapi_username, password=self.restapi_password
-                    ),
                 )
                 launch(
                     train.main,
@@ -913,16 +912,13 @@ class CustomTrainModel:
     def update_experiment(
         self,
         restapi_url: str,
-        restapi_token: str,
         experiment_id: int,
         status: Optional[str] = None,
         mlflow_run_id: Optional[str] = None,
         kubeflow_run_id: Optional[str] = None,
     ):
         """
-        실험 정보 업데이트 (내부 통신 전용 API 사용)
-
-        내부 통신 전용 API를 사용하며, 인증 토큰이 필요합니다.
+        실험 정보 업데이트 (internal-access 전용 API, X-Internal-API-Key 인증).
         """
         try:
             data = {}
@@ -932,11 +928,11 @@ class CustomTrainModel:
                 data["mlflow_run_id"] = mlflow_run_id
             if kubeflow_run_id:
                 data["kubeflow_run_id"] = kubeflow_run_id
-            # 내부 통신 전용 API 사용 (인증 필요)
+            # 내부 통신 전용 API 사용 (X-Internal-API-Key 인증)
             response = requests.patch(
                 f"{restapi_url}/api/v1/experiments/{experiment_id}/internal-access",
                 json=data,
-                headers={"Authorization": f"Bearer {restapi_token}"},
+                headers={"X-Internal-API-Key": self.internal_api_key},
             )
             if response.status_code == 200:
                 logger.info("실험 업데이트 성공")

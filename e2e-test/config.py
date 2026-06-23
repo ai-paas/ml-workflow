@@ -75,12 +75,19 @@ WORKFLOW_TARGET_LLM_MODEL: str = (
     (os.environ.get("E2E_WORKFLOW_TARGET_LLM_MODEL") or os.environ.get("E2E_TARGET_MODEL_NAME") or "gpt-oss-20b")
 ).strip()
 WORKFLOW_TARGET_ODM_MODEL: str = (os.environ.get("E2E_WORKFLOW_TARGET_ODM_MODEL") or "facebook/detr-resnet-50").strip()
+# 시나리오 #11(pLM) 타깃: 파인튜닝된 ESM2 자식 모델 name (학습→등록 e2e 산출물)
+WORKFLOW_TARGET_PLM_MODEL: str = (os.environ.get("E2E_WORKFLOW_TARGET_PLM_MODEL") or "").strip()
 
 TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NAME", "bge-m3")
 
 # 시나리오 #10(ODM) ML 추론 시 업로드할 이미지 (PNG/JPEG 등)
 WORKFLOW_ODM_TEST_IMAGE: Path = Path(
     os.environ.get("E2E_WORKFLOW_ODM_TEST_IMAGE") or str(_E2E_ROOT / "workflow" / "fixtures" / "odm_sample.jpg")
+).expanduser()
+
+# 시나리오 #11(pLM) 추론 입력 단백질 서열 샘플 (JSON: {"epitope": ..., "cdr3b": ...})
+WORKFLOW_PLM_TEST_SAMPLE: Path = Path(
+    os.environ.get("E2E_WORKFLOW_PLM_TEST_SAMPLE") or str(_E2E_ROOT / "workflow" / "fixtures" / "plm_sample.json")
 ).expanduser()
 
 # ── 최적화/경량화 E2E (model-improvements 시나리오) ─────────────────────────
@@ -102,9 +109,11 @@ else:
 
 
 def workflow_primary_target_model_name() -> str:
-    """워크플로 시나리오 배포/생명주기: #10 은 ODM, 그 외는 LLM."""
+    """워크플로 시나리오 배포/생명주기: #10 은 ODM, #11 은 pLM, 그 외는 LLM."""
     if SCENARIO_NUM == 10:
         return WORKFLOW_TARGET_ODM_MODEL
+    if SCENARIO_NUM == 11:
+        return WORKFLOW_TARGET_PLM_MODEL
     return WORKFLOW_TARGET_LLM_MODEL
 
 

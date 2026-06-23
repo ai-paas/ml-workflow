@@ -347,6 +347,13 @@ class ModelLLMTestResult(BaseModel):
     full_response: Optional[Dict[str, Any]] = Field(None, description="전체 응답 (Ollama API 응답)")
 
 
+class ModelPLMTestResult(BaseModel):
+    """pLM(ESM2) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="추론 결과 목록 (label/score/probabilities)")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (epitope/cdr3b)")
+
+
 class ComponentTestResultBase(BaseModel):
     """컴포넌트 테스트 결과 기본"""
 
@@ -368,8 +375,8 @@ class ModelComponentTestResult(ComponentTestResultBase):
     """모델 컴포넌트 테스트 결과"""
 
     component_type: str = Field(default="MODEL", description="컴포넌트 타입")
-    model_type: str  # ODM 또는 LLM
-    result: Union[ModelODMTestResult, ModelLLMTestResult]
+    model_type: str  # ODM, LLM, 또는 pLM
+    result: Union[ModelODMTestResult, ModelLLMTestResult, ModelPLMTestResult]
 
 
 class ComponentTestErrorResult(BaseModel):
@@ -403,6 +410,14 @@ class WorkflowMLTestResponse(BaseModel):
     final_result: Optional[str] = Field(
         None, description="최종 결과 이미지 (bbox와 label이 그려진 이미지를 base64로 인코딩한 문자열)"
     )
+
+
+class WorkflowPLMTestResponse(BaseModel):
+    """pLM(ESM2) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
 
 
 # ============= Workflow Validation 스키마 =============

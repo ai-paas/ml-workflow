@@ -13,6 +13,7 @@
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario \
+        e2e-training \
         e2e-service-metric
 
 APP_DIR := backend/app
@@ -276,3 +277,13 @@ e2e-model-improvement-scenario:
 	@echo "▶ E2E: 최적화/경량화 시나리오 — 작업 생성 후 SUCCEEDED까지 폴링"
 	@echo "    소스: E2E_OPTIMIZATION_SOURCE_MODEL_NAME (E2E_WORKFLOW_TARGET_LLM_MODEL 과 동일 패턴), 선택 E2E_OPTIMIZATION_TASK_TYPE"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_improvement/test_model_improvement.py -v -s -m model_improvement_scenario
+
+# ─── E2E: 통합 학습→등록 (YOLOX/ESM2 공통, 모델 무관) ─────────────────────────────
+# .env.{ENV} 또는 인라인 환경변수로 모델군 선택. 자식 모델 id/name 을 .state.{ENV}.json 에 저장.
+#   make e2e-training ENV=dev \
+#     E2E_TRAINING_REFERENCE_MODEL_NAME=facebook/esm2_t6_8M_UR50D \
+#     E2E_TRAINING_DATASET_FILE=protein_sample.zip E2E_TRAINING_DATASET_KIND=protein-classification \
+#     E2E_TRAINING_EXPECT_TYPE=pLM E2E_TRAINING_EXPECT_FORMAT=pytorch
+e2e-training:
+	@echo "▶ E2E: 통합 학습→등록 (reference=$(if $(strip $(E2E_TRAINING_REFERENCE_MODEL_NAME)),$(E2E_TRAINING_REFERENCE_MODEL_NAME),.env))"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_register.py -v -s -m training

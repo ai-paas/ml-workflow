@@ -115,13 +115,13 @@ def get_token_from_restapi(url: str, username: str, password: str) -> str:
 
 def update_experiment(
     restapi_url: str,
-    restapi_token: str,
+    internal_api_key: str,
     experiment_id: int,
     status: str = None,
     mlflow_run_id: str = None,
     kubeflow_run_id: str = None,
 ):
-    """실험 정보 업데이트 (internal-access 전용 API). status/mlflow_run_id 등을 PATCH."""
+    """실험 정보 업데이트 (internal-access 전용 API). X-Internal-API-Key 인증."""
     try:
         data = {}
         if status:
@@ -133,7 +133,7 @@ def update_experiment(
         response = requests.patch(
             f"{restapi_url}/api/v1/experiments/{experiment_id}/internal-access",
             json=data,
-            headers={"Authorization": f"Bearer {restapi_token}"},
+            headers={"X-Internal-API-Key": internal_api_key},
         )
         if response.status_code == 200:
             logger.info("실험 업데이트 성공")
