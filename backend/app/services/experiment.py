@@ -1,3 +1,5 @@
+from typing import Optional
+
 from config.settings import get_settings
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
@@ -21,6 +23,11 @@ class ExperimentService:
         experiment_db_obj = experiment_repository.create(db, obj_in=obj_in)
         db.commit()
         return experiment_db_obj
+
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[ExperimentModel]:
+        """이름으로 실험 1건 조회(실험명 중복 거부용). 없으면 None."""
+        return experiment_repository.get_by_name(db, name)
 
     @staticmethod
     def get(db: Session, pk: int) -> ExperimentReadSchema:

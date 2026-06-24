@@ -400,6 +400,9 @@ def _plan_serving_resources_with_inventory_nodes(
                 serving_node_name=(node_name if pin else None),
                 planner_note=_append_planner_note(f"k8s_gpu slack_bytes={slack}", pod_inventory_note),
                 reservation_node_name=node_name,
+                gpu_resource_key=node.gpu_resource_key,
+                node_selector_json=node.node_selector_json,
+                tolerations_json=node.tolerations_json,
             )
         extra = "no_feasible_gpu_node"
         fallback_reason = ", ".join(x for x in (fallback_reason, extra) if x)
@@ -453,6 +456,10 @@ def _plan_serving_resources_with_inventory_nodes(
             serving_node_name=(cpu_node if pin else None),
             planner_note=_append_planner_note("k8s_cpu_path", pod_inventory_note),
             reservation_node_name=cpu_node,
+            # CPU 가 taint 걸린 GPU 노드(tier2)로 떨어질 수 있으므로 선택 노드의 toleration/selector 를 전파
+            gpu_resource_key=node.gpu_resource_key,
+            node_selector_json=node.node_selector_json,
+            tolerations_json=node.tolerations_json,
         )
 
     logger.warning(
@@ -498,6 +505,7 @@ def plan_serving_resources_with_k8s(
             default_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
             vram_overrides_json=settings.SERVING_NODE_VRAM_OVERRIDES_JSON,
             serving_node_names_csv=settings.SERVING_NODE_NAMES or "",
+            gpu_pool_profiles_json=getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]",
             exclude_control_plane_nodes=not settings.SERVING_INCLUDE_CONTROL_PLANE_NODES,
         )
     )

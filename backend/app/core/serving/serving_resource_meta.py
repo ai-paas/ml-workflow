@@ -47,6 +47,10 @@ class ServingResourcePlan:
     planner_note: Optional[str] = None
     #: §7.3.2 가상 점유: 플래너가 잔여를 차감할 때 사용한 노드(핀 해제여도 내부 선정 노드).
     reservation_node_name: Optional[str] = None
+    #: GPU 노드풀 프로파일 기반 배치(MIG taint 등). 선택 노드의 값(없으면 dev 기본).
+    gpu_resource_key: str = "nvidia.com/gpu"
+    node_selector_json: str = "{}"
+    tolerations_json: str = "[]"
 
 
 def _has_complete_serving_keys(cfg: dict[str, Any]) -> bool:

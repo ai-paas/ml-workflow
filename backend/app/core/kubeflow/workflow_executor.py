@@ -47,6 +47,7 @@ class WorkflowExecutor:
             default_vram_bytes=s.SERVING_DEFAULT_GPU_VRAM_BYTES,
             vram_overrides_json=s.SERVING_NODE_VRAM_OVERRIDES_JSON,
             serving_node_names_csv=s.SERVING_NODE_NAMES or "",
+            gpu_pool_profiles_json=getattr(s, "GPU_POOL_PROFILES_JSON", "[]") or "[]",
             exclude_control_plane_nodes=not s.SERVING_INCLUDE_CONTROL_PLANE_NODES,
         )
         frees: dict[str, tuple[int, int, int]] = (
@@ -129,6 +130,10 @@ class WorkflowExecutor:
                 "reservation_node_name": plan.reservation_node_name,
                 "chain_step": step,
                 "chain_model_count": chain_n,
+                # GPU 노드풀 프로파일 배치(MIG taint 등) — KServe/Ollama PodSpec 에 주입
+                "gpu_resource_key": plan.gpu_resource_key,
+                "node_selector_json": plan.node_selector_json,
+                "tolerations_json": plan.tolerations_json,
             }
 
         parameters["serving_plans"] = plans
@@ -563,6 +568,9 @@ class WorkflowExecutor:
                 model_type: str = "",
                 base_run_id: str = "",
                 base_model_uri: str = "",
+                gpu_resource_key: str = "nvidia.com/gpu",
+                node_selector_json: str = "{}",
+                tolerations_json: str = "[]",
             ) -> str:
                 import json
                 import logging
@@ -687,12 +695,24 @@ class WorkflowExecutor:
 
                         if gpus > 0:
                             gpu_count = str(gpus)
-                            ollama_resources.requests["nvidia.com/gpu"] = gpu_count
-                            ollama_resources.limits["nvidia.com/gpu"] = gpu_count
-                            logger.info(f"Allocating {gpu_count} GPU(s) for model: {ollama_model_name}")
+                            ollama_resources.requests[gpu_resource_key] = gpu_count
+                            ollama_resources.limits[gpu_resource_key] = gpu_count
+                            logger.info(f"Allocating {gpu_count} x {gpu_resource_key} for model: {ollama_model_name}")
                         else:
                             ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
                             logger.info(f"CPU-only mode for model: {ollama_model_name} (GPU access blocked)")
+
+                        # GPU 노드풀 프로파일: taint 통과용 toleration + nodeSelector(가드)
+                        try:
+                            ollama_node_selector = json.loads(node_selector_json) or {}
+                        except Exception:
+                            ollama_node_selector = {}
+                        try:
+                            ollama_tolerations = [
+                                client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])
+                            ]
+                        except Exception:
+                            ollama_tolerations = []
 
                         # 2. Deployment 생성
                         deployment = client.V1Deployment(
@@ -758,6 +778,8 @@ class WorkflowExecutor:
                                             )
                                         ],
                                         node_name=node_name if node_name else None,
+                                        node_selector=(ollama_node_selector or None),
+                                        tolerations=(ollama_tolerations or None),
                                     ),
                                 ),
                             ),
@@ -1031,9 +1053,9 @@ class WorkflowExecutor:
 
                     if gpus > 0:
                         gpu_count = str(gpus)
-                        resources.requests["nvidia.com/gpu"] = gpu_count
-                        resources.limits["nvidia.com/gpu"] = gpu_count
-                        logger.info(f"Allocating {gpu_count} GPU(s) for MLflow model: {model_name}")
+                        resources.requests[gpu_resource_key] = gpu_count
+                        resources.limits[gpu_resource_key] = gpu_count
+                        logger.info(f"Allocating {gpu_count} x {gpu_resource_key} for MLflow model: {model_name}")
                     else:
                         kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
@@ -1051,8 +1073,21 @@ class WorkflowExecutor:
                         ],
                         "image_pull_secrets": [client.V1LocalObjectReference(name=image_pull_secret_name)],
                     }
+                    # GPU 노드풀 프로파일 nodeSelector + hostname 핀 병합, taint 통과용 toleration 주입
+                    try:
+                        sel = json.loads(node_selector_json) or {}
+                    except Exception:
+                        sel = {}
                     if node_name:
-                        pred_kwargs["node_selector"] = {"kubernetes.io/hostname": node_name}
+                        sel["kubernetes.io/hostname"] = node_name
+                    if sel:
+                        pred_kwargs["node_selector"] = sel
+                    try:
+                        tols = json.loads(tolerations_json) or []
+                    except Exception:
+                        tols = []
+                    if tols:
+                        pred_kwargs["tolerations"] = [client.V1Toleration(**t) for t in tols]
                     predictor_spec = V1beta1PredictorSpec(**pred_kwargs)
 
                     # InferenceService 생성
@@ -1450,6 +1485,9 @@ class WorkflowExecutor:
                 model_type=model_type,
                 base_run_id=base_run_id,
                 base_model_uri=base_model_uri,
+                gpu_resource_key=(plan.get("gpu_resource_key") or "nvidia.com/gpu"),
+                node_selector_json=(plan.get("node_selector_json") or "{}"),
+                tolerations_json=(plan.get("tolerations_json") or "[]"),
             )
 
         return None

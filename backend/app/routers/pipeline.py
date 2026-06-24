@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from datetime import datetime
@@ -124,6 +125,11 @@ def container_train(
     train_name = body.train_name
     description = body.description
 
+    # 실험명 중복 거부 — 같은 이름이 이미 있으면 학습(실험) 생성을 막는다.
+    # (요청 측에서 실험명 뒤에 uuid 등을 붙여 유니크하게 보내야 통과한다.)
+    if train_name and ExperimentService.get_by_name(db, train_name) is not None:
+        raise HTTPException(status_code=409, detail=f"이미 존재하는 실험명입니다: '{train_name}'")
+
     # 데이터셋 입력: dataset_id XOR dataset_file (정확히 하나)
     has_dataset_id = body.dataset_id is not None
     has_dataset_file = dataset_file is not None
@@ -169,6 +175,9 @@ def container_train(
         namespace: str,
         train_image_url: str,
         image_pull_secret_name: str,
+        gpu_resource_key: str,
+        node_selector_json: str,
+        tolerations_json: str,
     ):
         container_train_eval_component(
             model_id=model_id,
@@ -205,6 +214,9 @@ def container_train(
             namespace=namespace,
             train_image_url=train_image_url,
             image_pull_secret_name=image_pull_secret_name,
+            gpu_resource_key=gpu_resource_key,
+            node_selector_json=node_selector_json,
+            tolerations_json=tolerations_json,
         )
 
     try:
@@ -309,6 +321,14 @@ def container_train(
         for name, value in hparams.items():
             create_hyperparameter(db, experiment_db_obj.id, name, value)
 
+        # GPU 노드풀 프로파일(MIG taint 등) 정적 배치 — 학습 Job 에 toleration/nodeSelector/자원키 주입.
+        # 학습은 서빙 플래너를 거치지 않으므로 첫 프로파일을 채택(dev: 빈 프로파일 → nvidia.com/gpu 기본).
+        from core.serving.gpu_placement import parse_gpu_pool_profiles, static_training_placement
+
+        _train_placement = static_training_placement(
+            parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
+        )
+
         client.create_run_from_pipeline_func(
             train_pipeline,
             enable_caching=False,
@@ -348,6 +368,9 @@ def container_train(
                 "namespace": settings.KUBEFLOW_NAMESPACE,
                 "train_image_url": settings.TRAIN_IMAGE_URL,
                 "image_pull_secret_name": settings.KUBEFLOW_IMAGE_PULL_SECRET,
+                "gpu_resource_key": _train_placement["gpu_resource_key"],
+                "node_selector_json": json.dumps(_train_placement["node_selector"]),
+                "tolerations_json": json.dumps(_train_placement["tolerations"]),
             },
         )
 
@@ -470,6 +493,10 @@ def register_model(
     model_name = body.model_name
     description = body.description
     experiment_id = body.experiment_id
+
+    # 모델명 중복 사전 거부(조기 종료) — KFP 제출 전에 막는다. 단일 가드 메서드 재사용.
+    # (재등록 요청 측에서 모델명 뒤에 uuid 등을 붙여 유니크하게 보내야 통과한다.)
+    ModelService.assert_model_name_available(db, model_name)
 
     @dsl.pipeline
     def register_model_pipeline(

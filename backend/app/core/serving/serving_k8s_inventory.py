@@ -14,6 +14,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from core.serving.gpu_placement import parse_gpu_pool_profiles, resolve_placement
+
 logger = logging.getLogger(__name__)
 
 _GIB = 1024**3
@@ -34,6 +36,10 @@ class NodeInventory:
     m_free: int
     c_free: int
     pod_requests_applied: bool
+    # GPU 노드풀 프로파일 기반 배치(§ docs/k8s-gpu-allocation). frozen 친화 위해 JSON 문자열로 보관.
+    gpu_resource_key: str = "nvidia.com/gpu"
+    node_selector_json: str = "{}"
+    tolerations_json: str = "[]"
 
 
 def _try_load_core_v1():
@@ -257,12 +263,14 @@ def collect_node_inventory(
     vram_overrides_json: str,
     serving_node_names_csv: str,
     gpu_resource_key: str = _GPU_RESOURCE_KEY,
+    gpu_pool_profiles_json: str = "[]",
     exclude_control_plane_nodes: bool = True,
 ) -> list[NodeInventory]:
     """
     Ready·스케줄 가능 노드 목록. SERVING_NODE_NAMES 비면 클러스터 전체(필터: Ready).
     §7.3.1: Pod requests 합산으로 g_free / m_free / c_free 채움.
     exclude_control_plane_nodes: control-plane/master 역할 노드는 서빙 후보에서 제외(기본 True).
+    gpu_pool_profiles_json: GPU 노드풀 프로파일(MIG taint 등). 매칭 노드에 nodeSelector/tolerations/자원키 부여.
     """
     core = _try_load_core_v1()
     if core is None:
@@ -270,6 +278,7 @@ def collect_node_inventory(
 
     whitelist = [n.strip() for n in (serving_node_names_csv or "").split(",") if n.strip()]
     vram_gib = parse_vram_overrides_json(vram_overrides_json)
+    gpu_profiles = parse_gpu_pool_profiles(gpu_pool_profiles_json)
 
     try:
         resp = core.list_node()
@@ -297,7 +306,15 @@ def collect_node_inventory(
         alloc = node.status.allocatable or {}
         labels = node.metadata.labels or {}
 
-        alloc_gpu = _parse_alloc_gpu(alloc, gpu_resource_key)
+        # GPU 노드풀 프로파일 매칭 → 자원키/nodeSelector/tolerations 결정 (MIG taint 노드 등)
+        taints = [
+            {"key": t.key, "value": getattr(t, "value", None), "effect": getattr(t, "effect", None)}
+            for t in ((node.spec.taints if node.spec else None) or [])
+        ]
+        placement = resolve_placement(labels, profiles=gpu_profiles, taints=taints, default_gpu_key=gpu_resource_key)
+        node_gpu_key = placement["gpu_resource_key"]
+
+        alloc_gpu = _parse_alloc_gpu(alloc, node_gpu_key)
         mem_s = alloc.get("memory", "0")
         cpu_s = alloc.get("cpu", "0")
         alloc_mem = _parse_quantity_memory_to_bytes(mem_s)
@@ -313,9 +330,14 @@ def collect_node_inventory(
 
         v_card: Optional[int] = None
         if alloc_gpu > 0:
-            v_card = _v_card_bytes_for_node(
-                name, labels, default_vram_bytes=default_vram_bytes, vram_overrides_gib=vram_gib
-            )
+            # 프로파일에 slice_vram_gib 가 있으면 강제(예: gpu.memory 라벨 없는 MIG-미적용 노드 보정)
+            slice_gib = placement.get("slice_vram_gib")
+            if slice_gib:
+                v_card = int(slice_gib) * _GIB
+            else:
+                v_card = _v_card_bytes_for_node(
+                    name, labels, default_vram_bytes=default_vram_bytes, vram_overrides_gib=vram_gib
+                )
             if v_card is None or v_card <= 0:
                 v_card = default_vram_bytes if default_vram_bytes > 0 else None
 
@@ -331,6 +353,9 @@ def collect_node_inventory(
                 m_free=m_free,
                 c_free=c_free,
                 pod_requests_applied=pod_ok,
+                gpu_resource_key=node_gpu_key,
+                node_selector_json=json.dumps(placement["node_selector"]),
+                tolerations_json=json.dumps(placement["tolerations"]),
             )
         )
 
@@ -360,6 +385,9 @@ def node_inventories_with_free_overrides(
                 m_free=m,
                 c_free=c,
                 pod_requests_applied=n.pod_requests_applied,
+                gpu_resource_key=n.gpu_resource_key,
+                node_selector_json=n.node_selector_json,
+                tolerations_json=n.tolerations_json,
             )
         )
     return out

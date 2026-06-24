@@ -45,6 +45,9 @@ def container_train_eval_component(
     namespace: str,
     train_image_url: str,
     image_pull_secret_name: str = "harbor",
+    gpu_resource_key: str = "nvidia.com/gpu",
+    node_selector_json: str = "{}",
+    tolerations_json: str = "[]",
 ) -> str:
     import json
     import logging
@@ -62,17 +65,27 @@ def container_train_eval_component(
 
         logger.info(f"Creating training job for model_id: {model_id}, experiment_id: {experiment_id}")
 
-        # 리소스 설정 (Pod YAML 형식과 유사)
+        # 리소스 설정 (Pod YAML 형식과 유사). GPU 노드풀 프로파일(MIG taint 등)에 따라 자원키가 달라질 수 있음.
         resources = client.V1ResourceRequirements(
             requests={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
             limits={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
         )
 
-        logger.info(f"GPU resources added: {gpu_limit} GPU(s) (fixed to: {gpu_limit})")
+        # 노드풀 프로파일: taint 통과용 toleration + nodeSelector (학습은 플래너 미경유 → 정적 주입)
+        try:
+            train_node_selector = json.loads(node_selector_json) or {}
+        except Exception:
+            train_node_selector = {}
+        try:
+            train_tolerations = [client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])]
+        except Exception:
+            train_tolerations = []
+
+        logger.info(f"GPU resources added: {gpu_limit} x {gpu_resource_key}")
 
         # Job 생성
         job_name = f"train-eval-{model_id}-{experiment_id}-{int(time.time())}"
@@ -187,6 +200,8 @@ def container_train_eval_component(
                             if image_pull_secret_name
                             else []
                         ),
+                        node_selector=(train_node_selector or None),
+                        tolerations=(train_tolerations or None),
                     ),
                 ),
                 backoff_limit=0,

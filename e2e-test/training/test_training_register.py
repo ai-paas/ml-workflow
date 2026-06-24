@@ -9,7 +9,7 @@ E2E: 통합 학습 → 등록 파이프라인 (YOLOX / ESM2 공통).
   E2E_TRAINING_DATASET_ID             재사용할 데이터셋 id (있으면 파일 업로드 대신 사용)
   E2E_TRAINING_DATASET_FILE           업로드할 데이터셋 파일 (e2e-test/dataset-file/ 하위)
   E2E_TRAINING_EPOCHS                 빠른 검증용 epoch (기본 2)
-  E2E_TRAINING_CHILD_MODEL_NAME       등록할 자식 모델 name (기본 자동 생성)
+  E2E_TRAINING_CHILD_MODEL_NAME       등록할 자식 모델 name 의 베이스 (뒤에 uuid 접미로 유니크화; 기본 e2e-ft)
 
 dataset_kind 는 백엔드가 모델에서 도출(_expected_dataset_kind)하고, 자식은 reference 의
 type/format/task/parameter/sample_code 를 상속한다. 따라서 모델·파일만 지정하면 되고, 검증은
@@ -40,7 +40,10 @@ REFERENCE_MODEL_NAME = (os.environ.get("E2E_TRAINING_REFERENCE_MODEL_NAME") or "
 DATASET_ID = (os.environ.get("E2E_TRAINING_DATASET_ID") or "").strip()
 DATASET_FILE = (os.environ.get("E2E_TRAINING_DATASET_FILE") or "").strip()
 EPOCHS = (os.environ.get("E2E_TRAINING_EPOCHS") or "2").strip()
-CHILD_MODEL_NAME = (os.environ.get("E2E_TRAINING_CHILD_MODEL_NAME") or f"e2e-ft-{uuid.uuid4().hex[:8]}").strip()
+# 재등록은 모델명/실험명이 유니크해야 통과한다(백엔드가 중복 시 409 거부).
+# 베이스 이름(env 또는 기본 e2e-ft) 뒤에 uuid 를 잘라 붙여 런마다 유니크하게 만든다.
+_BASE_CHILD_MODEL_NAME = (os.environ.get("E2E_TRAINING_CHILD_MODEL_NAME") or "e2e-ft").strip()
+CHILD_MODEL_NAME = f"{_BASE_CHILD_MODEL_NAME}-{uuid.uuid4().hex[:8]}"
 
 TRAIN_TIMEOUT_SEC = int(os.environ.get("E2E_TRAINING_TIMEOUT_SEC", "2400"))
 REGISTER_TIMEOUT_SEC = int(os.environ.get("E2E_TRAINING_REGISTER_TIMEOUT_SEC", "1200"))

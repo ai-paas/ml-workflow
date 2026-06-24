@@ -235,6 +235,7 @@ def auto_generate_model(
     ## Errors
     - 400: 모델 키에 해당하는 provider/type/format을 DB에서 찾을 수 없음
     - 401: 인증되지 않은 사용자
+    - 409: 이미 등록된 모델명 (중복 등록 방지 — 가중치 다운로드 전에 거부)
     - 422: 유효하지 않은 model_key
     - 500: 모델 등록 중 서버 내부 오류 (가중치 다운로드 실패 포함)
     """
@@ -245,6 +246,10 @@ def auto_generate_model(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"유효하지 않은 model_key: {model_key}",
         )
+
+    # 가중치 다운로드 전 모델명 중복 사전 체크(조기 종료) — 단일 가드 메서드 재사용.
+    # (register_model 도 같은 메서드를 호출해 동시성/타 경로까지 최종 보장한다.)
+    ModelService.assert_model_name_available(db, config["name"])
 
     ids = ModelService.resolve_predefined_model_ids(db, config)
 

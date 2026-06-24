@@ -111,6 +111,25 @@ class ModelService:
         return model_repository.get(db, pk)
 
     @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[Model]:
+        """이름으로 Model 1건 조회(모델명 중복 거부용). 없으면 None."""
+        return model_repository.get_by_name(db, name)
+
+    @staticmethod
+    def assert_model_name_available(db: Session, name: str) -> None:
+        """모델명 중복 등록 방지의 **단일 정의**. 같은 이름이 이미 있으면 409.
+
+        모델 생성의 모든 경로(POST /models · auto-generate · 자식 등록 컴포넌트→POST /models)는
+        register_model 을 거치므로, 그 안에서 이 메서드를 호출해 한 곳에서 일괄 차단한다.
+        라우터의 사전 체크(가중치 다운로드/파이프라인 제출 전 조기 종료)도 같은 메서드를 재사용한다.
+        """
+        if name and model_repository.get_by_name(db, name) is not None:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=f"이미 존재하는 모델명입니다: '{name}'",
+            )
+
+    @staticmethod
     def get_latest_child_model(db: Session, parent_model_id: int) -> Optional[Model]:
         """
         parent_model_id의 자식 모델 중 가장 최근 생성된 것을 반환한다.
@@ -441,6 +460,8 @@ class ModelService:
         file: UploadFile | None = None,
     ):
         """POST /api/v1/models 와 POST /api/v1/models/auto-generate 공통 등록 로직"""
+        # 모델명 중복 등록 방지(단일 가드) — 모든 생성 경로가 이 메서드를 거치므로 여기서 일괄 차단.
+        ModelService.assert_model_name_available(db, name)
         if task is not None:
             try:
                 task_enum = ModelTaskType(task)

@@ -19,6 +19,10 @@ class ModelRepository(CRUDBase[Model, ModelBaseSchema, ModelBaseSchema]):
         """parent_model_id로 자식 모델 목록 조회"""
         return db.query(self.model).filter(self.model.parent_model_id == parent_model_id).all()
 
+    def get_by_name(self, db: Session, name: str) -> Optional[Model]:
+        """이름으로 모델 1건 조회(이름 중복 방지용)."""
+        return db.query(self.model).filter(self.model.name == name).first()
+
     def filter_with_visibility(
         self,
         db: Session,

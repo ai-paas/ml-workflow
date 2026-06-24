@@ -125,6 +125,18 @@ class Settings(BaseSettings):
         default="{}",
         description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8} (§7.10)',
     )
+    GPU_POOL_PROFILES_JSON: str = Field(
+        default="[]",
+        description=(
+            "GPU 노드풀 프로파일(JSON 배열, 학습·서빙 공용). 노드 라벨이 match_labels 에 매칭되면 그 노드의 "
+            "학습·서빙 Pod 에 tolerations(taint 통과) + node_selector + 자원키를 주입한다(MIG taint 노드 등). "
+            "빈 배열이면 기존 동작(nvidia.com/gpu, 주입 없음). "
+            "필수키: match_labels + tolerations. "
+            "(node_selector 미지정 시 match_labels 자동, resource_key 미지정 시 nvidia.com/gpu. "
+            "tolerations 는 학습이 노드를 미리 모르므로 자동 생성 불가 → 명시 필요.) "
+            "예/override(node_selector·resource_key·slice_vram_gib) 는 docs/k8s-gpu-allocation 참조."
+        ),
+    )
     SERVING_PIN_SELECTED_NODE: bool = Field(
         default=True,
         description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임(§7.7).",
