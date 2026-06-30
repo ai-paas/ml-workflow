@@ -75,7 +75,8 @@ def _expected_dataset_kind(db: Session, db_model) -> str:
     if fmt == ModelFormatEnum.YOLOX.value:
         return DatasetKindEnum.OBJECT_DETECTION.value
     # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 공유되므로 format 비의존)
-    if (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
+    # root 가 None 이면(예: lineage root 모델 삭제) 여기서 AttributeError 가 나지 않도록 가드 — 아래 400 으로 떨어진다.
+    if root and (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
         return DatasetKindEnum.PROTEIN_CLASSIFICATION.value
     raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
 
@@ -108,7 +109,7 @@ def container_train(
     YOLOX/ESM2 양쪽을 지원하며, 모델군에 맞지 않는 데이터셋 분류는 400 으로 거부합니다.
 
     ## Response (200, dict)
-    - **experiment_id** (int | null): 생성된 실험 ID. 파이프라인 생성/실행 실패 등으로 실험을 만들지 못한 경우 `null`일 수 있음.
+    - **experiment_id** (int): 생성된 실험 ID. (내부 오류 시 null 로 격하하지 않고 500 으로 응답)
 
     ## Status (DB `experiment`와의 관계, 참고)
     - 성공 시 새 실험 행은 **status = `CREATED`** 로 생성된 뒤,
@@ -119,7 +120,7 @@ def container_train(
     - **400**: GPU 0 이하, 유효하지 않은 인자
     - **401**: 미인증
     - **404**: 모델/데이터셋 없음
-    - **500** 또는 `experiment_id: null`: 내부 오류(파이프라인 제출 실패 등)
+    - **500**: 내부 오류(파이프라인 생성/제출 실패 등). 이전엔 200 `{experiment_id: null}` 로 격하됐으나 이제 500 으로 명확히 응답.
     """
     model_id = body.model_id
     train_name = body.train_name
@@ -385,10 +386,12 @@ def container_train(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"error occured when register pipeline : {e}")
-        return {
-            "experiment_id": None,
-        }
+        # 침묵 실패 방지: 내부 오류를 200 {experiment_id: null} 로 격하하지 않고 500 으로 명확히 알린다.
+        logger.exception("학습 파이프라인 생성/제출 중 오류")
+        raise HTTPException(
+            status_code=500,
+            detail=f"학습 파이프라인 생성 중 오류가 발생했습니다: {e}",
+        ) from e
 
 
 # ──────────────────────────────────────────────

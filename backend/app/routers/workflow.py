@@ -2013,7 +2013,8 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 4. OD+LLM 혼합
+    # 4. OD/LLM/pLM 상호 배타 — 세 타입은 서로 혼합 불가
+    #    (EMBEDDING 은 RAG 구성에서 LLM 과 공존하므로 배타 집합에서 제외)
     model_types = set()
     for comp in definition.components:
         if comp.type == ComponentType.MODEL and comp.model_id:
@@ -2022,11 +2023,26 @@ def _validate_workflow_definition_checks(
                 model_types.add(model.type_info.name)
     has_od = ModelTypeEnum.ODM.value in model_types
     has_llm = ModelTypeEnum.LLM.value in model_types
+    has_plm = ModelTypeEnum.PLM.value in model_types
+    exclusive_present = [
+        name
+        for name, present in (
+            (ModelTypeEnum.ODM.value, has_od),
+            (ModelTypeEnum.LLM.value, has_llm),
+            (ModelTypeEnum.PLM.value, has_plm),
+        )
+        if present
+    ]
     results.append(
         ValidationCheckResult(
-            rule="no_od_llm_mix",
-            passed=not (has_od and has_llm),
-            message="하나의 워크플로우에 OD 모델과 LLM 모델을 혼합할 수 없습니다." if (has_od and has_llm) else None,
+            rule="no_incompatible_model_type_mix",
+            passed=len(exclusive_present) <= 1,
+            message=(
+                f"하나의 워크플로우에 서로 혼합할 수 없는 모델 타입이 함께 있습니다: "
+                f"{', '.join(exclusive_present)} (OD/LLM/pLM 은 상호 배타적입니다)."
+                if len(exclusive_present) > 1
+                else None
+            ),
         )
     )
 
@@ -2039,6 +2055,33 @@ def _validate_workflow_definition_checks(
             message=(
                 "ML 워크플로우(OD 모델)에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
                 if (has_od and has_kb)
+                else None
+            ),
+        )
+    )
+
+    # 5b. pLM + KB 공존 불가 (pLM 은 단백질 서열 분류기라 RAG/KB 를 쓰지 않음; has_plm 은 위 4번에서 계산)
+    results.append(
+        ValidationCheckResult(
+            rule="no_plm_with_kb",
+            passed=not (has_plm and has_kb),
+            message=(
+                "pLM 모델 워크플로우에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
+                if (has_plm and has_kb)
+                else None
+            ),
+        )
+    )
+
+    # 5c. pLM + prompt 공존 불가 (pLM 은 프롬프트를 쓰지 않음; prompt_id 는 MODEL 컴포넌트의 필드)
+    has_prompt = any(getattr(c, "prompt_id", None) is not None for c in definition.components)
+    results.append(
+        ValidationCheckResult(
+            rule="no_plm_with_prompt",
+            passed=not (has_plm and has_prompt),
+            message=(
+                "pLM 모델 워크플로우에는 프롬프트(prompt_id)를 사용할 수 없습니다."
+                if (has_plm and has_prompt)
                 else None
             ),
         )
