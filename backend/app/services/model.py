@@ -12,6 +12,7 @@ from config.optimization_sources import is_optimization_eligible
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
+from core.training.families import resolve_family
 from db.models.model import Model, ModelTaskType
 from fastapi import HTTPException, UploadFile
 from fastapi import status as http_status
@@ -476,7 +477,8 @@ class ModelService:
         format_obj = model_format_repository.get(db, format_id)
         format_name = format_obj.name if format_obj is not None else ""
         # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 detr/yolos 와 공유되므로 format 비의존)
-        learning_enable_yn = format_name == ModelFormatEnum.YOLOX.value or (repo_id or "").strip() == ESM2_T6_8M_REPO_ID
+        # 학습 가능 여부 = 학습 가능 모델군(yolox/esm2) 레지스트리에 매칭되는가 (단일 진실원천)
+        learning_enable_yn = resolve_family(format_name=format_name, repo_id=repo_id) is not None
         if not repo_id and learning_enable_yn:
             key = (name or "").strip()
             pred = PREDEFINED_MODEL_CONFIGS.get(key)
@@ -1403,9 +1405,6 @@ class OllamaModelService:
 
 
 _GIB = 1024**3
-
-# 학습 가능 ESM2 베이스 모델 repo_id (transformers 포맷 중 학습 대상 식별용)
-ESM2_T6_8M_REPO_ID = "facebook/esm2_t6_8M_UR50D"
 
 PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "hustvl/yolos-tiny": {

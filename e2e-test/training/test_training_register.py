@@ -8,12 +8,13 @@ E2E: 통합 학습 → 등록 파이프라인 (YOLOX / ESM2 공통).
   E2E_TRAINING_REFERENCE_MODEL_NAME   학습할 reference 모델 name (/models)         (필수)
   E2E_TRAINING_DATASET_ID             재사용할 데이터셋 id (있으면 파일 업로드 대신 사용)
   E2E_TRAINING_DATASET_FILE           업로드할 데이터셋 파일 (e2e-test/dataset-file/ 하위)
+  E2E_TRAINING_DATASET_KIND           업로드 데이터의 분류 (dataset_file 동반 시 필수, 데이터 파일과 짝)
   E2E_TRAINING_EPOCHS                 빠른 검증용 epoch (기본 2)
   E2E_TRAINING_CHILD_MODEL_NAME       등록할 자식 모델 name 의 베이스 (뒤에 uuid 접미로 유니크화; 기본 e2e-ft)
 
-dataset_kind 는 백엔드가 모델에서 도출(_expected_dataset_kind)하고, 자식은 reference 의
-type/format/task/parameter/sample_code 를 상속한다. 따라서 모델·파일만 지정하면 되고, 검증은
-자식이 reference 의 type/format 을 상속했는지 확인한다.
+dataset_kind 는 '업로드 데이터의 분류'라 dataset_file 동반 시 필수다(api-spec §2.1) — 데이터 파일과 짝지어
+env 로 명시한다(모델에서 도출하면 호환성 검사가 동어반복이 됨). 자식은 reference 의
+type/format/task/parameter/sample_code 를 상속하며, 검증은 자식이 reference 의 type/format 을 상속했는지 확인한다.
 
 예 (ESM2):
   make e2e-training ENV=dev \\
@@ -39,6 +40,8 @@ from training.state import append_training_run, update_training_run
 REFERENCE_MODEL_NAME = (os.environ.get("E2E_TRAINING_REFERENCE_MODEL_NAME") or "").strip()
 DATASET_ID = (os.environ.get("E2E_TRAINING_DATASET_ID") or "").strip()
 DATASET_FILE = (os.environ.get("E2E_TRAINING_DATASET_FILE") or "").strip()
+# dataset_file 업로드 시 필수(데이터의 분류; api-spec §2.1). 데이터 파일과 짝지어 env 로 명시(모델 도출 아님).
+DATASET_KIND = (os.environ.get("E2E_TRAINING_DATASET_KIND") or "").strip()
 EPOCHS = (os.environ.get("E2E_TRAINING_EPOCHS") or "2").strip()
 # 재등록은 모델명/실험명이 유니크해야 통과한다(백엔드가 중복 시 409 거부).
 # 베이스 이름(env 또는 기본 e2e-ft) 뒤에 uuid 를 잘라 붙여 런마다 유니크하게 만든다.
@@ -119,12 +122,14 @@ class TestTrainingRegister:
             resp = requests.post(f"{api_url}/pipeline/training", data=data, headers=auth_headers)
         else:
             assert DATASET_FILE, "E2E_TRAINING_DATASET_ID 또는 E2E_TRAINING_DATASET_FILE 중 하나는 필요합니다."
+            assert DATASET_KIND, "dataset_file 업로드 시 E2E_TRAINING_DATASET_KIND(데이터의 분류)가 필요합니다."
             ds_path = DATASET_DIR / DATASET_FILE
             assert ds_path.is_file(), f"데이터셋 파일이 없습니다: {ds_path}"
-            # dataset_kind 는 백엔드가 모델에서 도출(_expected_dataset_kind)하므로 보내지 않는다.
+            # dataset_kind 는 '업로드 데이터의 분류' 라 필수(api-spec §2.1). 데이터 파일과 짝지은 env 값을 명시한다.
+            data["dataset_kind"] = DATASET_KIND
             fh = open(ds_path, "rb")
             files = {"dataset_file": (ds_path.name, fh, "application/zip")}
-            print(f"\n▶ 학습 시작 (file={DATASET_FILE}, kind=백엔드 도출, epochs={EPOCHS})")
+            print(f"\n▶ 학습 시작 (file={DATASET_FILE}, kind={DATASET_KIND}, epochs={EPOCHS})")
             resp = requests.post(f"{api_url}/pipeline/training", data=data, files=files, headers=auth_headers)
         if fh:
             fh.close()

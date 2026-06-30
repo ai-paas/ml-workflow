@@ -6,11 +6,12 @@ from typing import Optional
 
 import mlflow
 from config.db.connect import SessionDepends
-from config.db.enums import DatasetKindEnum, ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.component.train_eval.register_model import register_model_component
 from core.kubeflow.component.train_eval.train_eval import container_train_eval_component
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from core.training.families import resolve_family
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
 from kfp import dsl
 from schemas.dataset import DatasetBaseSchema
@@ -26,7 +27,7 @@ from schemas.user import UserSchema
 from services.dataset import DatasetService
 from services.experiment import ExperimentService, HyperparameterService
 from services.metrics_polling import poll_training_metrics
-from services.model import ESM2_T6_8M_REPO_ID, ModelService, resolve_recommended_hparams
+from services.model import ModelService, resolve_recommended_hparams
 from services.registration_polling import poll_registration_status
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
@@ -63,27 +64,20 @@ def backfill_hparams(body: TrainingRequest, recommended: dict[str, str]) -> dict
     return resolved
 
 
-def _expected_dataset_kind(db: Session, db_model) -> str:
-    """학습 대상 모델의 lineage root 기준으로 기대 데이터셋 분류(kind)를 반환.
+def _resolve_root_family(db: Session, db_model):
+    """lineage root 를 1회 조회하고 학습 가능 모델군(family)을 함께 반환. (root, family|None).
 
-    재학습 자식 모델은 repo_id 가 비어 있을 수 있으므로 lineage root 의 format/repo_id 로 판정한다.
-    학습 가능한 모델군이 아니면 400.
+    재학습 자식은 repo_id 가 비어 있을 수 있으므로 lineage root 의 (format, repo_id) 로 군을 판정한다.
+    판별 기준은 core.training.families.TRAINABLE_FAMILIES 단일 레지스트리(yolox 는 format, esm2 는 repo_id).
+    root 가 None(삭제 등)이면 (None, None).
     """
     root_id = ModelService.resolve_lineage_root_model_id(db, db_model.id)
     root = ModelService.get(db, root_id)
-    fmt = (root.format_info.name or "").lower() if root and root.format_info else ""
-    if fmt == ModelFormatEnum.YOLOX.value:
-        return DatasetKindEnum.OBJECT_DETECTION.value
-    # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 공유되므로 format 비의존)
-    # root 가 None 이면(예: lineage root 모델 삭제) 여기서 AttributeError 가 나지 않도록 가드 — 아래 400 으로 떨어진다.
-    if root and (root.repo_id or "").strip() == ESM2_T6_8M_REPO_ID:
-        return DatasetKindEnum.PROTEIN_CLASSIFICATION.value
-    raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
-
-
-def _resolve_model_kind(db: Session, db_model) -> str:
-    """train_eval 컨테이너 분기 키. object-detection → yolox, protein-classification → esm2."""
-    return "yolox" if _expected_dataset_kind(db, db_model) == DatasetKindEnum.OBJECT_DETECTION.value else "esm2"
+    if root is None:
+        return None, None
+    fmt = root.format_info.name if root.format_info else ""
+    fam = resolve_family(format_name=fmt, repo_id=(root.repo_id or ""))
+    return root, fam
 
 
 # ──────────────────────────────────────────────
@@ -231,24 +225,36 @@ def container_train(
                 detail=f"모델 ID '{model_id}'는 학습이 불가능한 모델입니다. 학습 가능한 모델만 사용할 수 있습니다.",
             )
 
-        # 모델군 ↔ 데이터셋 호환성 판정 (lineage root 기준)
-        expected_kind = _expected_dataset_kind(db, db_model)
-        model_kind = _resolve_model_kind(db, db_model)
+        # 모델군 ↔ 데이터셋 호환성 판정 (lineage root 1회 조회 → family)
+        root, fam = _resolve_root_family(db, db_model)
+        if fam is None:
+            raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
+        # 모델군 ↔ type_info 교차검증 — 손상된 타입(예: 자식 등록 ODM 오저장)을 학습 진입에서 차단(backstop).
+        if db_model.type_info and db_model.type_info.name != fam.model_type.value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"모델 '{db_model.name}' 타입 정보가 계보와 불일치합니다 "
+                f"(계보상 {fam.model_type.value}, 등록 타입 {db_model.type_info.name}). 모델 메타 재등록·정정이 필요합니다.",
+            )
+        expected_kind = fam.dataset_kind.value
+        model_kind = fam.key
 
         # 데이터셋 확보: dataset_file 이면 즉시 등록, dataset_id 면 조회 후 kind 검사
         if has_dataset_file:
-            # dataset_kind 는 모델(lineage root)에서 도출되므로(_expected_dataset_kind) 클라이언트가 보낼 필요가 없다.
-            # 보냈으면 expected_kind 와 일치하는지만 검증하고, 미지정이면 expected_kind 를 그대로 사용한다.
-            if body.dataset_kind is not None and body.dataset_kind.value != expected_kind:
+            # dataset_kind 는 '업로드한 데이터의 사실'이라 필수다(api-spec §2.1). 모델에서 도출(자동부여)하면
+            # 검사가 동어반복이 되어 호환성 검증이 무력화된다 → 클라이언트가 명시한 값을 모델 요구와 대조한다.
+            if body.dataset_kind is None:
+                raise HTTPException(status_code=400, detail="dataset_file 동반 시 dataset_kind 는 필수입니다.")
+            if body.dataset_kind.value != expected_kind:
                 raise HTTPException(
                     status_code=400,
                     detail=f"데이터셋 분류 '{body.dataset_kind.value}' 가 "
                     f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
                 )
-            resolved_kind = DatasetKindEnum(expected_kind)
+            resolved_kind = body.dataset_kind
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             auto_name = f"auto-{train_name or 'dataset'}-{ts}"
-            auto_desc = f"학습 요청 시 자동 등록된 데이터셋 kind={expected_kind}"
+            auto_desc = f"학습 요청 시 자동 등록된 데이터셋 kind={resolved_kind.value}"
             dataset_obj = DatasetService.create(
                 db,
                 obj_in=DatasetBaseSchema(
@@ -293,11 +299,10 @@ def container_train(
         # ESM2 는 (최초/재학습 모두) 항상 lineage root 카탈로그의 base 를 LoRA 의 기반으로 쓴다.
         # 자식 모델의 registry 는 adapter 를 가리키므로, base 는 lineage root 의 registry 에서 가져온다.
         if model_kind == "esm2":
-            root_id = ModelService.resolve_lineage_root_model_id(db, model_id)
-            root_model = ModelService().get(db, root_id)
-            if root_model is not None and root_model.registry:
-                model_uri = root_model.registry.uri
-                model_artifact_path = root_model.registry.artifact_path
+            # lineage root 는 위 _resolve_root_family 에서 이미 1회 조회했으므로 재사용(M3 중복조회 제거).
+            if root is not None and root.registry:
+                model_uri = root.registry.uri
+                model_artifact_path = root.registry.artifact_path
         dataset_download_ref = dataset_obj.dataset_registry.uri
         dataset_storage_type = settings.DATASET_STORAGE_TYPE
         kf = KubeflowManager()
@@ -572,7 +577,16 @@ def register_model(
         if reference_model is not None and reference_model.type_info:
             type_name = reference_model.type_info.name
         else:
-            type_name = ModelTypeEnum.ODM.value
+            # type 미해결 시 ODM 조용한 오저장 대신 모델군 레지스트리로 재판정, 그래도 없으면 400.
+            _ref_root, _ref_fam = (
+                _resolve_root_family(db, reference_model) if reference_model is not None else (None, None)
+            )
+            if _ref_fam is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference 모델의 타입을 확정할 수 없어 자식 모델을 등록할 수 없습니다. 모델 메타를 정정해 주세요.",
+                )
+            type_name = _ref_fam.model_type.value
         yolox_format_name = ModelFormatEnum.YOLOX.value
         pytorch_format_name = ModelFormatEnum.PYTORCH.value
 
