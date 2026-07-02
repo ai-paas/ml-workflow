@@ -30,6 +30,13 @@ con = {
 
 class ModelRegistry:
     def __init__(self):
+        # mlflow.log_artifacts 등은 자격증명을 boto3 기본 체인(표준 AWS 환경변수)과
+        # MLFLOW_S3_ENDPOINT_URL 에서만 읽는다(메소드 인자로 키를 넘길 수 없음). 아티팩트 스토어가
+        # 직접 s3:// 인 배포에서는 이 값들이 프로세스 env 에 있어야 업로드가 되므로 설정값에서 채워 준다.
+        # 이미 주입돼 있으면 덮지 않으며, 명시 자격증명을 쓰는 S3StorageClient/MLFlowS3Manager 에는 영향이 없다.
+        os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", settings.MLFLOW_S3_ENDPOINT_URL)
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", settings.MLFLOW_S3_ACCESS_KEY_ID)
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", settings.MLFLOW_S3_SECRET_ACCESS_KEY)
         self._client = MlflowClient(tracking_uri=settings.MLFLOW_TRACKING_URI)
         self._experiment_name = settings.MLFLOW_EXPERIMENT_NAME
         experiment = mlflow.get_experiment_by_name(self._experiment_name)
