@@ -15,7 +15,7 @@ from app.model_manager.base import BaseModelManager
 from app.model_manager.keras.custom_model import KerasModelManager
 from app.model_manager.onnx.custom_model import OnnxModelManager
 from app.model_manager.pytorch.custom_model import ImageProcessingModelManager
-from app.model_manager.transformers.custom_model import ProteinLanguageModelManager
+from app.model_manager.transformers.custom_model import ProteinClassificationModelManager
 from app.model_manager.yolox.custom_model import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
@@ -26,20 +26,20 @@ from transformers.utils.constants import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 
 class ModelManagerFactory:
     """
-    (framework, model_type) 복합 키로 모델 매니저를 선택하는 Factory 클래스.
+    (framework, task) 복합 키로 모델 매니저를 선택하는 Factory 클래스.
 
-    - 정확 매치(`(framework, model_type)`)가 우선. 예) (pytorch, pLM) → ProteinLanguageModelManager.
-    - model_type 이 카탈로그에 정의되지 않은 진입점(keras/onnx 등)은 framework-only fallback 으로 흡수.
+    - 정확 매치(`(framework, task)`)가 우선. 예) (pytorch, protein-classification) → ProteinClassificationModelManager.
+    - task 가 카탈로그에 정의되지 않은 진입점(keras/onnx 등)은 framework-only fallback 으로 흡수.
     """
 
-    # (framework, model_type) → 매니저. model_type 으로 세부 분기가 필요한 경우만 등록.
+    # (framework, task) → 매니저. task 로 세부 분기가 필요한 경우만 등록.
     _managers = {
-        ("pytorch", "ODM"): ImageProcessingModelManager,  # detr, yolos
-        ("pytorch", "pLM"): ProteinLanguageModelManager,  # ESM2 (단백질 서열 분류)
-        ("yolox", "ODM"): YoloxModelManager,  # yolox (model_format=yolox 로 framework 분리됨)
+        ("pytorch", "object-detection"): ImageProcessingModelManager,  # detr, yolos
+        ("pytorch", "protein-classification"): ProteinClassificationModelManager,  # ESM2 파인튜닝 자식 (결합 분류)
+        ("yolox", "object-detection"): YoloxModelManager,  # yolox (model_format=yolox 로 framework 분리됨)
     }
 
-    # model_type 미상/미정의 진입점용 framework-only fallback.
+    # task 미상/미정의 진입점용 framework-only fallback.
     _framework_fallback = {
         "pytorch": ImageProcessingModelManager,
         "keras": KerasModelManager,
@@ -48,28 +48,28 @@ class ModelManagerFactory:
     }
 
     @classmethod
-    def create_model_manager(cls, framework: str, model_type: str = None) -> BaseModelManager:
+    def create_model_manager(cls, framework: str, task: str = None) -> BaseModelManager:
         """
-        (framework, model_type) 에 맞는 모델 매니저를 생성.
+        (framework, task) 에 맞는 모델 매니저를 생성.
 
         Args:
             framework: 프레임워크 ("pytorch", "yolox", "keras", "onnx")
-            model_type: 모델 타입 ("ODM", "pLM", ...). 미지정 시 framework-only fallback.
+            task: 추론 task ("object-detection", "protein-classification", ...). 미지정 시 framework-only fallback.
 
         Returns:
             BaseModelManager: 생성된 모델 매니저 인스턴스
 
         Raises:
-            ValueError: (framework, model_type) 도 framework fallback 도 없는 경우
+            ValueError: (framework, task) 도 framework fallback 도 없는 경우
         """
-        manager_class = cls._managers.get((framework, model_type)) or cls._framework_fallback.get(framework)
+        manager_class = cls._managers.get((framework, task)) or cls._framework_fallback.get(framework)
         if manager_class is None:
-            raise ValueError(f"지원하지 않는 (framework={framework}, model_type={model_type}) 조합입니다.")
+            raise ValueError(f"지원하지 않는 (framework={framework}, task={task}) 조합입니다.")
         return manager_class()
 
     @classmethod
     def get_supported_frameworks(cls) -> list:
-        """지원되는 framework 목록 반환 (argparse choices 용 — model_type 축 제외)"""
+        """지원되는 framework 목록 반환 (argparse choices 용 — task 축 제외)"""
         return sorted({fw for (fw, _) in cls._managers} | set(cls._framework_fallback))
 
 
@@ -98,7 +98,7 @@ class InferenceModel(Model):
         predictor_protocol: str,
         predictor_use_ssl: bool,
         framework: str = "pytorch",  # 기본값으로 pytorch 설정
-        model_type: str = None,  # (framework, model_type) 복합 키로 매니저 선택
+        task: str = None,  # (framework, task) 복합 키로 매니저 선택
         run_id: str = None,
         base_run_id: str = None,
         base_model_uri: str = None,
@@ -109,7 +109,7 @@ class InferenceModel(Model):
         self.mlflow_tracking_uri = mlflow_tracking_uri
         self.mlflow_experiment_name = mlflow_experiment_name
         self.framework = framework
-        self.model_type = model_type
+        self.task = task
         self.run_id = run_id
         # transformers(ESM2) base 모델(MLflow) 위치 — 있으면 MLflow base, 없으면 HF Hub
         self.base_run_id = base_run_id
@@ -120,7 +120,7 @@ class InferenceModel(Model):
                 mlflow_tracking_uri = {mlflow_tracking_uri},
                 mlflow_experiment_name = {mlflow_experiment_name},
                 framework = {framework},
-                model_type = {model_type},
+                task = {task},
                 model_name = {name},
                 run_id = {run_id}
                 """
@@ -134,8 +134,8 @@ class InferenceModel(Model):
         os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
         os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
 
-        # Model Manager Factory를 통한 모델 매니저 생성 ((framework, model_type) 복합 키)
-        self.model_manager = ModelManagerFactory.create_model_manager(framework, model_type)
+        # Model Manager Factory를 통한 모델 매니저 생성 ((framework, task) 복합 키)
+        self.model_manager = ModelManagerFactory.create_model_manager(framework, task)
 
         self.load()
 
@@ -145,8 +145,8 @@ class InferenceModel(Model):
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
 
-            # pLM(ESM2): base 모델(MLflow) 위치를 매니저에 전달 → MLflow base + adapter 로드
-            if isinstance(self.model_manager, ProteinLanguageModelManager):
+            # protein-classification(ESM2): base 모델(MLflow) 위치를 매니저에 전달 → MLflow base + adapter 로드
+            if isinstance(self.model_manager, ProteinClassificationModelManager):
                 self.model_manager.base_run_id = self.base_run_id
                 self.model_manager.base_model_uri = self.base_model_uri
 
@@ -176,8 +176,8 @@ class InferenceModel(Model):
 
             device_str = "gpu" if torch.cuda.is_available() else "cpu"
 
-            # pLM(ESM2): 이미지가 아니라 단백질 서열 dict({epitope, cdr3b}) 를 그대로 전달
-            if isinstance(self.model_manager, ProteinLanguageModelManager):
+            # protein-classification(ESM2): 이미지가 아니라 단백질 서열 dict({epitope, cdr3b}) 를 그대로 전달
+            if isinstance(self.model_manager, ProteinClassificationModelManager):
                 result = self.model_manager.predict(data=data, device_str=device_str)
                 return InferResponse(
                     response_id=generate_uuid(),
@@ -306,14 +306,22 @@ parser.add_argument(
     help="Framework type for model inference",
 )
 parser.add_argument(
+    "--task",
+    type=str,
+    default=None,
+    help="추론 task ((framework, task) 복합 키용. 예: object-detection, protein-classification). 미지정 시 framework fallback",
+)
+parser.add_argument(
     "--model_type",
     type=str,
     default=None,
-    help="모델 타입 ((framework, model_type) 복합 키용. 예: ODM, pLM). 미지정 시 framework fallback",
+    help="(하위호환) 모델 타입. 디스패치는 --task 를 사용한다.",
 )
 parser.add_argument("--run_id", type=str, help="MLflow run ID")
-parser.add_argument("--base_run_id", type=str, default=None, help="(pLM) base 모델 MLflow run ID")
-parser.add_argument("--base_model_uri", type=str, default=None, help="(pLM) base 모델 MLflow artifact path")
+parser.add_argument("--base_run_id", type=str, default=None, help="(protein-classification) base 모델 MLflow run ID")
+parser.add_argument(
+    "--base_model_uri", type=str, default=None, help="(protein-classification) base 모델 MLflow artifact path"
+)
 
 args, _ = parser.parse_known_args()
 
@@ -333,7 +341,7 @@ if __name__ == "__main__":
         aws_access_key_id=args.aws_access_key_id,
         aws_secret_access_key=args.aws_secret_access_key,
         framework=args.framework,
-        model_type=args.model_type,
+        task=args.task,
         run_id=args.run_id,
         base_run_id=args.base_run_id,
         base_model_uri=args.base_model_uri,

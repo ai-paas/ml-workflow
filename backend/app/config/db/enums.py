@@ -4,9 +4,8 @@ from enum import Enum
 
 
 class ModelFormatEnum(str, Enum):
-    """모델 포맷 Enum"""
+    """모델 포맷 Enum (= framework family. 가중치 직렬화(.bin/.safetensors)와 무관 — 그건 from_pretrained 가 처리)"""
 
-    TRANSFORMERS = "transformers"
     PYTORCH = "pytorch"
     KERAS = "keras"
     ONNX = "onnx"
@@ -38,7 +37,7 @@ class ModelTypeEnum(str, Enum):
     ODM = "ODM"
     LLM = "LLM"
     EMBEDDING = "Embedding"
-    PLM = "pLM"
+    BFM = "BFM"  # Biomolecular Foundation Model (구 pLM) — esm2/esmc/esmfold2/molformer/rnafm
 
     def __str__(self) -> str:
         return self.value

@@ -7,10 +7,10 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
-from db.models.model import Model
+from db.models.model import Model, ModelTaskType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -383,9 +383,10 @@ class WorkflowExecutor:
             model_uri = ""
             run_id = ""
             framework = "pytorch"
-            # 매니저 선택용 model_type ((framework, model_type) 복합 키). pLM 이면 base 주입 게이트로도 사용.
+            # 매니저 선택 fine 축 = task ((framework, task) 복합 키). model_type 은 coarse(base 주입 판정 보조).
             model_type = ""
-            # pLM(ESM2) 서빙 시 base 모델(MLflow 등록 카탈로그)의 위치
+            task = ""
+            # 파인튜닝 자식(task=protein-classification) 서빙 시 base 모델(MLflow 등록 카탈로그)의 위치
             base_run_id = ""
             base_model_uri = ""
 
@@ -418,12 +419,14 @@ class WorkflowExecutor:
                         model_uri = model.registry.uri or ""
                         run_id = model.registry.run_id or ""
 
-                    # model_type 추출 ((framework, model_type) 복합 키 + pLM base 주입 게이트)
+                    # model_type(coarse) 추출 — base 주입 판정 보조.
                     if hasattr(model, "type_info") and model.type_info:
                         model_type = model.type_info.name or ""
+                    # task(fine) 추출 — (framework, task) 매니저 디스패치 키. predictor 로 --task 전달.
+                    task = getattr(model, "task", None) or ""
 
-                    # framework 정보 추론 (model_format 기반). ESM2(pLM)는 format=pytorch 이므로 pytorch 로 매핑되고,
-                    # 세부 매니저는 predictor 가 (framework, model_type) 복합 키로 가른다.
+                    # framework 정보 추론 (model_format 기반). ESM2(BFM)는 format=pytorch 이므로 pytorch 로 매핑되고,
+                    # 세부 매니저는 predictor 가 (framework, task) 복합 키로 가른다.
                     if hasattr(model, "format_info") and model.format_info:
                         format_name = model.format_info.name.lower()
                         if ModelFormatEnum.PYTORCH.value.lower() in format_name or "torch" in format_name:
@@ -437,9 +440,9 @@ class WorkflowExecutor:
                         elif ModelFormatEnum.YOLOX.value.lower() in format_name:
                             framework = "yolox"
 
-                    # pLM(ESM2): base 모델은 lineage root(카탈로그)의 MLflow 등록본을 사용.
+                    # 파인튜닝 자식(task=protein-classification): base 모델은 lineage root(카탈로그)의 MLflow 등록본을 사용.
                     # 서빙 컨테이너가 base(MLflow) + adapter(MLflow) 를 모두 MLflow 에서 받도록 위치를 전달.
-                    if model_type == ModelTypeEnum.PLM.value:
+                    if task == ModelTaskType.PROTEIN_CLASSIFICATION.value:
                         try:
                             from services.model import ModelService
 
@@ -566,6 +569,7 @@ class WorkflowExecutor:
                 kserve_gateway_url: str = "",
                 deployment_mode: str = "kserve",
                 model_type: str = "",
+                task: str = "",
                 base_run_id: str = "",
                 base_model_uri: str = "",
                 gpu_resource_key: str = "nvidia.com/gpu",
@@ -1023,11 +1027,13 @@ class WorkflowExecutor:
                     if run_id:
                         container_args.append(f"--run_id={run_id}")
 
-                    # (framework, model_type) 복합 키로 predictor 가 매니저 선택
+                    # (framework, task) 복합 키로 predictor 가 매니저 선택. model_type 은 하위호환용으로 병행 전달.
+                    if task:
+                        container_args.append(f"--task={task}")
                     if model_type:
                         container_args.append(f"--model_type={model_type}")
 
-                    # pLM(ESM2): base 모델(MLflow) 위치 전달 — 서빙이 base+adapter 를 MLflow 에서 로드
+                    # 파인튜닝 자식(protein-classification): base 모델(MLflow) 위치 전달 — 서빙이 base+adapter 를 MLflow 에서 로드
                     if base_run_id:
                         container_args.append(f"--base_run_id={base_run_id}")
                     if base_model_uri:
@@ -1483,6 +1489,7 @@ class WorkflowExecutor:
                 kserve_gateway_url=parameters.get("kserve_gateway_url", ""),
                 deployment_mode=deployment_mode,
                 model_type=model_type,
+                task=task,
                 base_run_id=base_run_id,
                 base_model_uri=base_model_uri,
                 gpu_resource_key=(plan.get("gpu_resource_key") or "nvidia.com/gpu"),

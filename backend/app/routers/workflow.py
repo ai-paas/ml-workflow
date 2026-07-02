@@ -21,7 +21,7 @@ from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
 from core.serving.remote_workflow_serving import remote_chat_completion_async
 from core.serving.serving_resource_meta import serving_meta_validation_error
-from db.models.model import Model
+from db.models.model import Model, ModelTaskType
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.prompt import PromptVariableType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
@@ -40,7 +40,7 @@ from schemas.workflow import (
     ModelComponentTestResult,
     ModelLLMTestResult,
     ModelODMTestResult,
-    ModelPLMTestResult,
+    ModelProteinClassificationTestResult,
     ValidationCheckResponse,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
@@ -48,7 +48,7 @@ from schemas.workflow import (
     WorkflowExecuteResponse,
     WorkflowListSchema,
     WorkflowMLTestResponse,
-    WorkflowPLMTestResponse,
+    WorkflowProteinClassificationTestResponse,
     WorkflowRAGTestResponse,
     WorkflowReadSchema,
     WorkflowTemplateBriefSchema,
@@ -2013,7 +2013,7 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 4. OD/LLM/pLM 상호 배타 — 세 타입은 서로 혼합 불가
+    # 4. OD/LLM/BFM 상호 배타 — 세 타입은 서로 혼합 불가
     #    (EMBEDDING 은 RAG 구성에서 LLM 과 공존하므로 배타 집합에서 제외)
     model_types = set()
     for comp in definition.components:
@@ -2023,13 +2023,13 @@ def _validate_workflow_definition_checks(
                 model_types.add(model.type_info.name)
     has_od = ModelTypeEnum.ODM.value in model_types
     has_llm = ModelTypeEnum.LLM.value in model_types
-    has_plm = ModelTypeEnum.PLM.value in model_types
+    has_bfm = ModelTypeEnum.BFM.value in model_types
     exclusive_present = [
         name
         for name, present in (
             (ModelTypeEnum.ODM.value, has_od),
             (ModelTypeEnum.LLM.value, has_llm),
-            (ModelTypeEnum.PLM.value, has_plm),
+            (ModelTypeEnum.BFM.value, has_bfm),
         )
         if present
     ]
@@ -2039,7 +2039,7 @@ def _validate_workflow_definition_checks(
             passed=len(exclusive_present) <= 1,
             message=(
                 f"하나의 워크플로우에 서로 혼합할 수 없는 모델 타입이 함께 있습니다: "
-                f"{', '.join(exclusive_present)} (OD/LLM/pLM 은 상호 배타적입니다)."
+                f"{', '.join(exclusive_present)} (OD/LLM/BFM 은 상호 배타적입니다)."
                 if len(exclusive_present) > 1
                 else None
             ),
@@ -2060,28 +2060,28 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 5b. pLM + KB 공존 불가 (pLM 은 단백질 서열 분류기라 RAG/KB 를 쓰지 않음; has_plm 은 위 4번에서 계산)
+    # 5b. BFM + KB 공존 불가 (BFM 은 생체분자 서열 모델이라 RAG/KB 를 쓰지 않음; has_bfm 은 위 4번에서 계산)
     results.append(
         ValidationCheckResult(
-            rule="no_plm_with_kb",
-            passed=not (has_plm and has_kb),
+            rule="no_bfm_with_kb",
+            passed=not (has_bfm and has_kb),
             message=(
-                "pLM 모델 워크플로우에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
-                if (has_plm and has_kb)
+                "BFM 모델 워크플로우에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
+                if (has_bfm and has_kb)
                 else None
             ),
         )
     )
 
-    # 5c. pLM + prompt 공존 불가 (pLM 은 프롬프트를 쓰지 않음; prompt_id 는 MODEL 컴포넌트의 필드)
+    # 5c. BFM + prompt 공존 불가 (BFM 은 프롬프트를 쓰지 않음; prompt_id 는 MODEL 컴포넌트의 필드)
     has_prompt = any(getattr(c, "prompt_id", None) is not None for c in definition.components)
     results.append(
         ValidationCheckResult(
-            rule="no_plm_with_prompt",
-            passed=not (has_plm and has_prompt),
+            rule="no_bfm_with_prompt",
+            passed=not (has_bfm and has_prompt),
             message=(
-                "pLM 모델 워크플로우에는 프롬프트(prompt_id)를 사용할 수 없습니다."
-                if (has_plm and has_prompt)
+                "BFM 모델 워크플로우에는 프롬프트(prompt_id)를 사용할 수 없습니다."
+                if (has_bfm and has_prompt)
                 else None
             ),
         )
@@ -3167,7 +3167,7 @@ async def _execute_plm_inference(
     service_id,
     current_user: UserSchema,
 ) -> ComponentTestResult:
-    """pLM(ESM2) 모델 추론 실행. 단백질 서열 {epitope, cdr3b} 를 KServe predictor(transformers)로 보낸다."""
+    """protein-classification(ESM2) 모델 추론 실행. 단백질 서열 {epitope, cdr3b} 를 KServe predictor(transformers)로 보낸다."""
     model_type_name = None
     if component.model_id:
         model = ModelService.get(db, component.model_id)
@@ -3191,7 +3191,7 @@ async def _execute_plm_inference(
             component_name=component.name,
             component_type="MODEL",
             model_type=model_type_name,
-            error="REMOTE 배포 유형은 pLM 추론을 지원하지 않습니다.",
+            error="REMOTE 배포 유형은 protein-classification 추론을 지원하지 않습니다.",
         )
     if not epitope or not cdr3b:
         return ComponentTestErrorResult(
@@ -3199,7 +3199,7 @@ async def _execute_plm_inference(
             component_name=component.name,
             component_type="MODEL",
             model_type=model_type_name,
-            error="pLM model requires non-empty 'epitope' and 'cdr3b'",
+            error="protein-classification model requires non-empty 'epitope' and 'cdr3b'",
         )
 
     start_time = time.time()
@@ -3218,7 +3218,7 @@ async def _execute_plm_inference(
                     component_name=component.name,
                     component_type="MODEL",
                     model_type=model_type_name,
-                    error="KServe pLM 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                    error="KServe protein-classification 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
                 )
             url = f"{infer_svc_url}/v2/models/{model_name}/infer"
             headers = {"Content-Type": "application/json", "Host": service_hostname}
@@ -3272,12 +3272,13 @@ async def _execute_plm_inference(
             component_id=component.id,
             component_name=component.name,
             component_type="MODEL",
-            model_type=model_type_name or ModelTypeEnum.PLM.value,
-            result=ModelPLMTestResult(predictions=predictions, input_info=input_info),
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.PROTEIN_CLASSIFICATION.value,
+            result=ModelProteinClassificationTestResult(predictions=predictions, input_info=input_info),
         )
 
     except Exception as e:
-        logger.error(f"pLM inference failed for component {component.id}: {e}")
+        logger.error(f"protein-classification inference failed for component {component.id}: {e}")
         return ComponentTestErrorResult(
             component_id=component.id,
             component_name=component.name,
@@ -3559,8 +3560,8 @@ async def test_ml_workflow(
     )
 
 
-@router.post("/{workflow_id}/test/plm", response_model=WorkflowPLMTestResponse)
-async def test_plm_workflow(
+@router.post("/{workflow_id}/test/protein-classification", response_model=WorkflowProteinClassificationTestResponse)
+async def test_protein_classification_workflow(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
@@ -3569,7 +3570,7 @@ async def test_plm_workflow(
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    pLM(ESM2) 워크플로우 테스트
+    protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 — 구 `/test/plm` 리네임.
 
     단백질 서열 분류(TCR-Epitope 결합) 모델을 배포한 워크플로우에 `{epitope, cdr3b}` 를 보내
     이진 분류 추론을 수행한다.
@@ -3578,15 +3579,16 @@ async def test_plm_workflow(
     - **epitope** (str, required): epitope 서열
     - **cdr3b** (str, required): cdr3b 서열
 
-    ## Response (WorkflowPLMTestResponse)
-    - **results[].result** (ModelPLMTestResult): `predictions`(label/score/probabilities) + `input_info`
+    ## Response (WorkflowProteinClassificationTestResponse)
+    - **results[].result** (ModelProteinClassificationTestResult): `predictions` + `input_info`
 
     ## Notes
     - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
-    - **model_type 이 pLM 이 아닌 모델 컴포넌트가 있으면 400 으로 거부**한다(pLM 전용 엔드포인트).
+    - **task 가 protein-classification 이 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - **base(파인튜닝 안 된, parent_model_id IS NULL) 모델이면 400** — 어댑터가 없어 서빙 불가.
 
     ## Errors
-    - 400: pLM 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 400: 해당 task 워크플로우가 아님 / base 모델 / ACTIVE 아님 / 필수 입력 누락
     - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
@@ -3599,36 +3601,42 @@ async def test_plm_workflow(
             detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
         )
 
-    # MODEL 컴포넌트 수집 — pLM 이 아닌 모델이 섞여 있으면 거부, pLM 이 하나도 없어도 거부
-    plm_components = []
+    # MODEL 컴포넌트 수집 — task 가 protein-classification 이 아니면 거부, 하나도 없어도 거부.
+    pc_task = ModelTaskType.PROTEIN_CLASSIFICATION.value
+    pc_components = []
     for component in workflow.components:
         if component.type == ComponentType.MODEL and component.model_id:
             model = ModelService.get(db, component.model_id)
-            type_name = model.type_info.name if (model and model.type_info) else None
-            if type_name == ModelTypeEnum.PLM.value:
-                plm_components.append(component)
-            else:
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != pc_task:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"pLM 전용 추론 엔드포인트입니다. 비-pLM 모델 컴포넌트가 포함되어 있습니다: "
-                    f"{component.name} (type={type_name})",
+                    detail=f"protein-classification 전용 추론 엔드포인트입니다. 비-protein-classification 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
                 )
+            # base(파인튜닝 안 된) 모델은 LoRA 어댑터가 없어 서빙 불가 → 파인튜닝 자식을 서빙해야 함.
+            if model.parent_model_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"base 모델({component.name})은 서빙할 수 없습니다. 파인튜닝된 자식 모델을 배포하세요.",
+                )
+            pc_components.append(component)
 
-    if not plm_components:
+    if not pc_components:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="pLM 워크플로우가 아닙니다 (pLM 모델 컴포넌트가 없습니다).",
+            detail="protein-classification 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
         )
 
     results = []
-    for component in plm_components:
+    for component in pc_components:
         results.append(
             await _execute_plm_inference(db, workflow.id, component, epitope, cdr3b, workflow.service_id, current_user)
         )
 
-    return WorkflowPLMTestResponse(
+    return WorkflowProteinClassificationTestResponse(
         workflow_id=workflow_id,
-        execution_order=[c.id for c in plm_components],
+        execution_order=[c.id for c in pc_components],
         results=results,
     )
 

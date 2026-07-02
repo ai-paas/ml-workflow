@@ -347,8 +347,8 @@ class ModelLLMTestResult(BaseModel):
     full_response: Optional[Dict[str, Any]] = Field(None, description="전체 응답 (Ollama API 응답)")
 
 
-class ModelPLMTestResult(BaseModel):
-    """pLM(ESM2) 모델 테스트 결과"""
+class ModelProteinClassificationTestResult(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 모델 테스트 결과"""
 
     predictions: List[Dict[str, Any]] = Field(..., description="추론 결과 목록 (label/score/probabilities)")
     input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (epitope/cdr3b)")
@@ -360,7 +360,8 @@ class ComponentTestResultBase(BaseModel):
     component_id: str
     component_name: str
     component_type: str  # KNOWLEDGE_BASE 또는 MODEL
-    model_type: str  # embedding, ODM, LLM
+    model_type: str  # coarse: embedding, ODM, LLM, BFM
+    task: Optional[str] = None  # fine: object-detection/text-generation/protein-classification 등 (라우팅 키)
 
 
 class KnowledgeBaseComponentTestResult(ComponentTestResultBase):
@@ -375,8 +376,8 @@ class ModelComponentTestResult(ComponentTestResultBase):
     """모델 컴포넌트 테스트 결과"""
 
     component_type: str = Field(default="MODEL", description="컴포넌트 타입")
-    model_type: str  # ODM, LLM, 또는 pLM
-    result: Union[ModelODMTestResult, ModelLLMTestResult, ModelPLMTestResult]
+    model_type: str  # ODM, LLM, 또는 BFM
+    result: Union[ModelODMTestResult, ModelLLMTestResult, ModelProteinClassificationTestResult]
 
 
 class ComponentTestErrorResult(BaseModel):
@@ -412,8 +413,8 @@ class WorkflowMLTestResponse(BaseModel):
     )
 
 
-class WorkflowPLMTestResponse(BaseModel):
-    """pLM(ESM2) 워크플로우 테스트 응답"""
+class WorkflowProteinClassificationTestResponse(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 응답"""
 
     workflow_id: str
     execution_order: List[str]

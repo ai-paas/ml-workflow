@@ -97,7 +97,7 @@ class TestWorkflowValidation:
         cls.model = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_LLM_MODEL)
         cls.odm = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_ODM_MODEL)
         cls.plm = self._find_model_by_name(api_url, auth_headers, PLM_MODEL_NAME)
-        assert (cls.plm.get("type_info") or {}).get("name") == "pLM", f"pLM 타입 아님: {cls.plm.get('type_info')}"
+        assert (cls.plm.get("type_info") or {}).get("name") == "BFM", f"BFM 타입 아님: {cls.plm.get('type_info')}"
         print(f"\n✔ 모델: LLM={cls.model['id']} ODM={cls.odm['id']} pLM={cls.plm['id']}")
 
     # ── 정상 케이스 (baseline) ───────────────────────────────
@@ -332,8 +332,8 @@ class TestWorkflowValidation:
             ],
         }
         data = self._validate(api_url, auth_headers, defn)
-        self._assert_rule_failed(data, "no_plm_with_kb")
-        print("\n✔ no_plm_with_kb (pLM+KB) 검증 통과")
+        self._assert_rule_failed(data, "no_bfm_with_kb")
+        print("\n✔ no_bfm_with_kb (BFM+KB) 검증 통과")
 
     def test_15_plm_with_prompt(self, api_url: str, auth_headers: dict):
         """pLM 모델 + prompt_id 공존 → no_plm_with_prompt"""
@@ -342,8 +342,8 @@ class TestWorkflowValidation:
             if comp["type"] == "MODEL":
                 comp["prompt_id"] = 1
         data = self._validate(api_url, auth_headers, defn)
-        self._assert_rule_failed(data, "no_plm_with_prompt")
-        print("\n✔ no_plm_with_prompt (pLM+prompt) 검증 통과")
+        self._assert_rule_failed(data, "no_bfm_with_prompt")
+        print("\n✔ no_bfm_with_prompt (BFM+prompt) 검증 통과")
 
     def test_16_od_plm_mix(self, api_url: str, auth_headers: dict):
         """OD + pLM 혼합 → no_incompatible_model_type_mix"""

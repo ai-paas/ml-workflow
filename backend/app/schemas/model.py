@@ -22,7 +22,10 @@ class ModelBaseSchema(TimeStampSchemaMixin):
     subversion: int
     task: Optional[str] = Field(
         None,
-        description="모델 태스크 타입: 'embedding', 'text-generation', 'object-detection', 'feature-extraction' 중 하나",
+        description=(
+            "모델 태스크 타입: 'embedding', 'text-generation', 'object-detection', "
+            "'fill-mask', 'protein-classification', 'protein-structure-prediction', 'vqa' 중 하나"
+        ),
     )
     parameter: str | None = None
     sample_code: str | None = None

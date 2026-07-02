@@ -525,6 +525,7 @@ def register_model(
         type_name: str,
         yolox_format_name: str,
         pytorch_format_name: str,
+        output_task: str = "",
         mlflow_run_id: str = "",
     ):
         register_model_component(
@@ -545,6 +546,7 @@ def register_model(
             type_name=type_name,
             yolox_format_name=yolox_format_name,
             pytorch_format_name=pytorch_format_name,
+            output_task=output_task,
             mlflow_run_id=mlflow_run_id,
         )
 
@@ -571,16 +573,17 @@ def register_model(
 
         # 파인튜닝 자식은 MLflow registry(LoRA adapter/가중치) 기반이므로 provider 는 항상 CUSTOM 으로 등록한다.
         # (huggingface 로 상속하면 create_model 이 repo_id 필수 + HF Hub 다운로드 경로로 가서 실패한다.)
-        # 단 type 은 reference 모델에서 상속해야 추론 디스패치가 맞다 (ESM2 → pLM, YOLOX → ODM).
+        # model_type(coarse)은 reference 에서 상속(ESM2 → BFM, YOLOX → ODM). task(fine)는 전이한다:
+        #   base(fill-mask 등) → 자식은 family.output_task(protein-classification). 부모 task 상속이 아님.
         reference_model = ModelService().get(db, reference_model_id)
         provider_name = ModelProviderEnum.CUSTOM.value
+        _ref_root, _ref_fam = _resolve_root_family(db, reference_model) if reference_model is not None else (None, None)
+        # KFP 격리: families 를 백엔드에서 resolve 해 output_task 를 컴포넌트 파라미터로 전달(컴포넌트 body 에선 import 불가).
+        output_task = _ref_fam.output_task if _ref_fam is not None else ""
         if reference_model is not None and reference_model.type_info:
             type_name = reference_model.type_info.name
         else:
             # type 미해결 시 ODM 조용한 오저장 대신 모델군 레지스트리로 재판정, 그래도 없으면 400.
-            _ref_root, _ref_fam = (
-                _resolve_root_family(db, reference_model) if reference_model is not None else (None, None)
-            )
             if _ref_fam is None:
                 raise HTTPException(
                     status_code=400,
@@ -612,6 +615,7 @@ def register_model(
                 "type_name": type_name,
                 "yolox_format_name": yolox_format_name,
                 "pytorch_format_name": pytorch_format_name,
+                "output_task": output_task,
                 "mlflow_run_id": experiment_db_obj.mlflow_run_id or "",
             },
         )

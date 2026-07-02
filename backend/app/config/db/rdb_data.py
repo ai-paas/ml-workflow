@@ -19,7 +19,6 @@ USER_DATA = [
 ]
 
 MODEL_FORMAT_DATA = [
-    {"name": ModelFormatEnum.TRANSFORMERS.value, "description": "Huggingface transformers"},
     {"name": ModelFormatEnum.PYTORCH.value, "description": "Pytorch"},
     {"name": ModelFormatEnum.KERAS.value, "description": "Keras"},
     {"name": ModelFormatEnum.ONNX.value, "description": "ONNX"},
@@ -41,7 +40,7 @@ MODEL_TYPE_DATA = [
     {"name": ModelTypeEnum.ODM.value, "description": "Object Detection Model"},
     {"name": ModelTypeEnum.LLM.value, "description": "Large Language Model"},
     {"name": ModelTypeEnum.EMBEDDING.value, "description": "Embedding Model"},
-    {"name": ModelTypeEnum.PLM.value, "description": "Protein Language Model"},
+    {"name": ModelTypeEnum.BFM.value, "description": "Biomolecular Foundation Model"},
 ]
 
 CHUNK_TYPE_DATA = [

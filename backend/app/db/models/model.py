@@ -7,12 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
 class ModelTaskType(PyEnum):
-    """모델 태스크 타입 열거형"""
+    """모델 태스크 타입 열거형 (추론 계약 = 라우팅/디스패치 fine 축)"""
 
     EMBEDDING = "embedding"
     TEXT_GENERATION = "text-generation"
     OBJECT_DETECTION = "object-detection"
-    FEATURE_EXTRACTION = "feature-extraction"
+    FILL_MASK = "fill-mask"
+    PROTEIN_CLASSIFICATION = "protein-classification"
+    PROTEIN_STRUCTURE_PREDICTION = "protein-structure-prediction"
+    VQA = "vqa"
 
 
 class Model(BaseModel, TimestampMixin):

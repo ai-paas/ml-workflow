@@ -8,8 +8,6 @@
   - yolox 는 고유 포맷(model_format=yolox)을 가지므로 format 으로 식별.
   - esm2 는 포맷이 pytorch 로 detr/yolos(학습 불가)와 공유되므로 repo_id 로만 유일 식별.
 매칭 코드는 균일하고, 이 비대칭은 "어느 판별자 집합을 채우느냐"는 데이터로 표현된다.
-
-설계: docs/fine-tuning-and-inference/training-validation-refactor.md
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from config.db.enums import DatasetKindEnum, ModelFormatEnum, ModelTypeEnum
+from db.models.model import ModelTaskType
 
 # 학습 가능 ESM2 repo_id 집합 — 변형 추가 시 여기 한 곳만 늘리면 된다.
 ESM2_T6_8M_REPO_ID = "facebook/esm2_t6_8M_UR50D"
@@ -26,11 +25,12 @@ ESM2_SUPPORTED_REPO_IDS = frozenset({ESM2_T6_8M_REPO_ID})
 
 @dataclass(frozen=True)
 class TrainableFamily:
-    """학습 가능 모델군 1개의 정의(판별 기준 + 데이터셋 분류 + 컨테이너 키)."""
+    """학습 가능 모델군 1개의 정의(판별 기준 + 데이터셋 분류 + 컨테이너 키 + 자식 task)."""
 
     key: str  # train_eval 컨테이너 디스패치 키(= 기존 model_kind): "yolox" | "esm2"
-    model_type: ModelTypeEnum  # 이 군이 가져야 할 모델 타입(ODM | pLM)
+    model_type: ModelTypeEnum  # 이 군이 가져야 할 모델 타입(coarse: ODM | BFM). base·자식 공통(전이 안 함)
     dataset_kind: DatasetKindEnum  # 이 군이 요구하는 데이터셋 분류
+    output_task: str  # 파인튜닝 자식이 가질 task(fine). yolox=object-detection, esm2=protein-classification
     match_formats: frozenset = frozenset()  # 이 model_format 이면 이 군(yolox 처럼 고유 포맷)
     match_repo_ids: frozenset = frozenset()  # 이 repo_id 면 이 군(esm2 처럼 포맷 공유 → repo_id 로만 구분)
 
@@ -45,12 +45,14 @@ TRAINABLE_FAMILIES: tuple[TrainableFamily, ...] = (
         key="yolox",
         model_type=ModelTypeEnum.ODM,
         dataset_kind=DatasetKindEnum.OBJECT_DETECTION,
+        output_task=ModelTaskType.OBJECT_DETECTION.value,
         match_formats=frozenset({ModelFormatEnum.YOLOX.value}),
     ),
     TrainableFamily(
         key="esm2",
-        model_type=ModelTypeEnum.PLM,
+        model_type=ModelTypeEnum.BFM,
         dataset_kind=DatasetKindEnum.PROTEIN_CLASSIFICATION,
+        output_task=ModelTaskType.PROTEIN_CLASSIFICATION.value,
         match_repo_ids=ESM2_SUPPORTED_REPO_IDS,
     ),
 )

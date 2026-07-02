@@ -1494,11 +1494,11 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "facebook/esm2_t6_8M_UR50D": {
         "name": "facebook/esm2_t6_8M_UR50D",
-        "description": "ESM-2 8M (TCR-Epitope 결합 분류 파인튜닝)",
+        "description": "ESM-2 8M (base=fill-mask, 파인튜닝 시 protein-classification)",
         "repo_id": "facebook/esm2_t6_8M_UR50D",
-        "task": "feature-extraction",
+        "task": "fill-mask",
         "provider_name": "huggingface",
-        "type_name": "pLM",
+        "type_name": "BFM",
         "format_name": "pytorch",
         "recommended_hparams": {
             "learning_rate": "0.001",

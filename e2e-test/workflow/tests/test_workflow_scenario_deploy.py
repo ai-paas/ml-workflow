@@ -332,7 +332,7 @@ class TestWorkflowScenarioDeploy:
             assert sample_path.is_file(), f"pLM 테스트 샘플이 없습니다: {sample_path}"
             sample = json.loads(sample_path.read_text())
             resp = requests.post(
-                f"{api_url}/workflows/{wf_id}/test/plm",
+                f"{api_url}/workflows/{wf_id}/test/protein-classification",
                 json={"epitope": sample["epitope"], "cdr3b": sample["cdr3b"]},
                 headers=auth_headers,
                 timeout=INFERENCE_TIMEOUT_SEC,
@@ -352,9 +352,11 @@ class TestWorkflowScenarioDeploy:
 
         print("\n✔ 추론 성공")
         if inference_kind == "plm":
-            # pLM 응답은 final_result 없이 results[].result.predictions 를 검증
+            # protein-classification 응답은 final_result 없이 results[].result.predictions 를 검증
             result = data["results"][0]
-            assert result.get("model_type") == "pLM", f"model_type 기대=pLM, 실제={result.get('model_type')}"
+            assert (
+                result.get("task") == "protein-classification"
+            ), f"task 기대=protein-classification, 실제={result.get('task')}"
             preds = (result.get("result") or {}).get("predictions") or []
             assert preds, f"predictions 가 비어 있습니다: {result}"
             top = preds[0]

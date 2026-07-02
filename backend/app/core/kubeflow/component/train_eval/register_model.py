@@ -25,6 +25,7 @@ def register_model_component(
     type_name: str,  # Enum 값 전달
     yolox_format_name: str,  # Enum 값 전달
     pytorch_format_name: str,  # Enum 값 전달
+    output_task: str = "",  # 자식 task 전이값(family.output_task). 있으면 부모 task 상속 대신 이 값 사용
     mlflow_run_id: str = "",  # 학습 실험의 MLflow run ID (직접 전달)
 ):
     import glob
@@ -347,9 +348,13 @@ def register_model_component(
                         }
                     ),
                 }
-                # 부모 모델의 task/parameter/sample_code 를 그대로 업로드 (값이 있을 때만)
-                if reference_task:
-                    model_data["task"] = reference_task
+                # task 전이: output_task(family.output_task)가 있으면 그 값(예: protein-classification)을 쓴다.
+                # base 가 fill-mask 여도 자식은 protein-classification 이어야 하므로 부모 task 상속이 아님.
+                # output_task 미전달 시에만 부모 task 상속(하위호환).
+                child_task = output_task or reference_task
+                if child_task:
+                    model_data["task"] = child_task
+                # parameter/sample_code 는 부모 것 상속(값 있을 때만)
                 if reference_parameter:
                     model_data["parameter"] = reference_parameter
                 if reference_sample_code:
