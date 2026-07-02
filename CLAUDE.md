@@ -23,3 +23,8 @@ ml-workflow 백엔드 작업 시 지켜야 할 규칙.
 - 환경 프로파일: `backend/app/config/.env.{local,dev,innogrid}` — `ENV` 로 선택.
 - 린트: `make lint` (isort + black + flake8, line-length 120) / 자동수정: `make lint-fix`.
 - DB 시드: `make db-seed [MODE=ensure|upsert|sync] [DRY_RUN=1] [ENV=local]` (자세한 옵션은 `make help`).
+
+
+
+## 기타 규약
+- 모든 결론 문장 끝에 [측정: 스크립트경로] 또는 [기억: 재검증필요] 또는 [추정: 미검증] 중 하나를 붙여라. 태그 없는 단정 금지.

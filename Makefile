@@ -13,7 +13,7 @@
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario \
-        e2e-training e2e-training-clean \
+        e2e-training e2e-training-clean e2e-training-validation \
         e2e-service-metric
 
 APP_DIR := backend/app
@@ -293,3 +293,10 @@ e2e-training:
 e2e-training-clean:
 	@echo "▶ E2E: 학습 산출물 정리 (training_runs)"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_cleanup.py -v -s -m training_clean
+
+# 학습 요청 검증 negative 케이스 — dataset_kind 필수/불일치 (POST /pipeline/training 400, 부작용 없음)
+#   make e2e-training-validation ENV=dev
+#   (워크플로우 정의 검증 negative — pLM+KB/prompt·OD/LLM/pLM 혼합 등 — 은 make e2e-workflow-validation)
+e2e-training-validation:
+	@echo "▶ E2E: 학습 요청 검증 negative 케이스"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_validation.py -v -s -m training_validation
