@@ -24,15 +24,18 @@ RUN uv pip install --no-cache setuptools wheel \
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Final stage - 실행 환경
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04
+# 런타임엔 CUDA 툴킷(nvcc)이 불필요하고 torch wheel 이 CUDA 런타임·cudnn 을 자체 번들하므로
+# devel 대신 runtime 베이스를 쓴다(이미지 크기 대폭 절감).
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
 WORKDIR /app
 
 ENV TZ=Asia/Seoul
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN apt-get update && apt-get install -y --no-install-recommends wget \
-    cmake \
+# cudnn 은 torch(cu128)가 nvidia-cudnn-cu12 로 번들하므로 apt 로 설치하지 않는다.
+# OpenCV 등 런타임에 필요한 시스템 라이브러리만 남긴다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
@@ -40,13 +43,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends wget \
     libxrender-dev \
     libgomp1 \
     python3 \
-    && wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && rm -f cuda-keyring_1.1-1_all.deb \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libcudnn9-cuda-12 \
-        libcudnn9-dev-cuda-12 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
