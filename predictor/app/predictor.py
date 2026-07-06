@@ -12,11 +12,11 @@ import torch
 
 # Model Manager Factory 및 관련 import
 from app.model_manager.base import BaseModelManager
-from app.model_manager.keras.custom_model import KerasModelManager
-from app.model_manager.onnx.custom_model import OnnxModelManager
-from app.model_manager.pytorch.custom_model import ImageProcessingModelManager
-from app.model_manager.transformers.custom_model import FillMaskModelManager, ProteinClassificationModelManager
-from app.model_manager.yolox.custom_model import YoloxModelManager
+from app.model_manager.onnx.image_processing import OnnxModelManager
+from app.model_manager.pytorch.fill_mask import FillMaskModelManager
+from app.model_manager.pytorch.image_processing import ImageProcessingModelManager
+from app.model_manager.pytorch.protein_classification import ProteinClassificationModelManager
+from app.model_manager.yolox import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
 from kserve.utils.utils import generate_uuid
@@ -29,7 +29,7 @@ class ModelManagerFactory:
     (framework, task) 복합 키로 모델 매니저를 선택하는 Factory 클래스.
 
     - 정확 매치(`(framework, task)`)가 우선. 예) (pytorch, protein-classification) → ProteinClassificationModelManager.
-    - task 가 카탈로그에 정의되지 않은 진입점(keras/onnx 등)은 framework-only fallback 으로 흡수.
+    - task 가 카탈로그에 정의되지 않은 진입점(onnx 등)은 framework-only fallback 으로 흡수.
     """
 
     # (framework, task) → 매니저. task 로 세부 분기가 필요한 경우만 등록.
@@ -41,9 +41,11 @@ class ModelManagerFactory:
     }
 
     # task 미상/미정의 진입점용 framework-only fallback.
+    # keras/tensorflow 포맷은 카탈로그(ModelFormatEnum)에 라벨로 남아있으나 서빙 매니저가 없다.
+    # transformers 5.x 가 TensorFlow(TFAuto*) 지원을 제거해 기존 TF 기반 KerasModelManager 를 없앴기 때문이며,
+    # 해당 포맷 서빙을 되살리려면 torch(AutoModelForImageClassification 등) 또는 순수 tf.keras 기반 매니저를 새로 등록한다.
     _framework_fallback = {
         "pytorch": ImageProcessingModelManager,
-        "keras": KerasModelManager,
         "onnx": OnnxModelManager,
         "yolox": YoloxModelManager,
     }
@@ -54,7 +56,7 @@ class ModelManagerFactory:
         (framework, task) 에 맞는 모델 매니저를 생성.
 
         Args:
-            framework: 프레임워크 ("pytorch", "yolox", "keras", "onnx")
+            framework: 프레임워크 ("pytorch", "yolox", "onnx")
             task: 추론 task ("object-detection", "protein-classification", ...). 미지정 시 framework-only fallback.
 
         Returns:

@@ -303,7 +303,7 @@ class EsmFineTuner:
             args=training_args,
             train_dataset=ds["train"],
             eval_dataset=ds["val"],
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             data_collator=DataCollatorWithPadding(tokenizer),
             compute_metrics=_compute_metrics,
             callbacks=callbacks,
