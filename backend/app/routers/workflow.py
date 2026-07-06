@@ -38,6 +38,7 @@ from schemas.workflow import (
     KnowledgeBaseComponentTestResult,
     KnowledgeBaseTestResult,
     ModelComponentTestResult,
+    ModelFillMaskTestResult,
     ModelLLMTestResult,
     ModelODMTestResult,
     ModelProteinClassificationTestResult,
@@ -46,6 +47,7 @@ from schemas.workflow import (
     WorkflowCreateRequest,
     WorkflowDefinition,
     WorkflowExecuteResponse,
+    WorkflowFillMaskTestResponse,
     WorkflowListSchema,
     WorkflowMLTestResponse,
     WorkflowProteinClassificationTestResponse,
@@ -2151,7 +2153,7 @@ def _validate_workflow_definition_checks(
         if ctx_len and int(max_tokens_val) > ctx_len:
             max_tokens_errors.append(
                 f"{comp.ref_id}: max_tokens({int(max_tokens_val)})가 "
-                f"{model.repo_id}의 context length({ctx_len:,})를 초과합니다."
+                f"{model.repo_id}의 context length({ctx_len})를 초과합니다."
             )
     results.append(
         ValidationCheckResult(
@@ -3327,6 +3329,136 @@ async def _execute_plm_inference(
         )
 
 
+async def _execute_fill_mask_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    sequence: str,
+    top_k: int,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """fill-mask(base BFM) 모델 추론 실행. 마스크 포함 서열 {sequence, top_k} 를 KServe predictor(transformers)로 보낸다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 fill-mask 추론을 지원하지 않습니다.",
+        )
+    if not sequence:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="fill-mask model requires non-empty 'sequence'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe fill-mask 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 transformers 경로는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"sequence": sequence, "top_k": top_k}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.FILL_MASK.value,
+            result=ModelFillMaskTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"fill-mask inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
 # ============= Workflow Test Endpoints =============
 
 
@@ -3676,6 +3808,83 @@ async def test_protein_classification_workflow(
     return WorkflowProteinClassificationTestResponse(
         workflow_id=workflow_id,
         execution_order=[c.id for c in pc_components],
+        results=results,
+    )
+
+
+@router.post("/{workflow_id}/test/fill-mask", response_model=WorkflowFillMaskTestResponse)
+async def test_fill_mask_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    sequence: str = Body(..., embed=True, description="마스크(<mask>) 토큰이 포함된 서열"),
+    top_k: int = Body(5, embed=True, description="마스크 위치별 반환할 top-k 후보 수"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 워크플로우 테스트.
+
+    마스크 토큰이 포함된 서열을 배포된 base BFM 모델에 보내 각 마스크 위치의 top-k 토큰 예측을 받는다.
+    protein-classification 과 달리 파인튜닝이 불필요하며 base 모델을 그대로 서빙한다.
+
+    ## Request Body (JSON)
+    - **sequence** (str, required): 마스크 토큰을 포함한 서열
+    - **top_k** (int, optional, 기본 5): 마스크당 반환 후보 수
+
+    ## Response (WorkflowFillMaskTestResponse)
+    - **results[].result** (ModelFillMaskTestResult): 마스크 위치별 `predictions` + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **task 가 fill-mask 가 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - base 모델 서빙이 정상이므로 protein-classification 과 달리 base 가드는 없다.
+
+    ## Errors
+    - 400: 해당 task 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — task 가 fill-mask 가 아니면 거부, 하나도 없어도 거부.
+    fm_task = ModelTaskType.FILL_MASK.value
+    fm_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != fm_task:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"fill-mask 전용 추론 엔드포인트입니다. 비-fill-mask 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
+                )
+            fm_components.append(component)
+
+    if not fm_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="fill-mask 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in fm_components:
+        results.append(
+            await _execute_fill_mask_inference(
+                db, workflow.id, component, sequence, top_k, workflow.service_id, current_user
+            )
+        )
+
+    return WorkflowFillMaskTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in fm_components],
         results=results,
     )
 

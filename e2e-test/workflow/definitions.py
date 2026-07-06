@@ -323,6 +323,15 @@ SCENARIOS: dict[int, dict] = {
         "inference_kind": "plm",
         "prompts": {},
     },
+    12: {
+        "name": "BFM fill-mask 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "fill_mask",
+        "prompts": {},
+    },
 }
 
 
@@ -588,6 +597,22 @@ def _build_scenario_9(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
+def _build_scenario_12(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → BFM(MODEL, base fill-mask) → 종료 — base 모델을 어댑터 없이 직접 서빙, task=fill-mask 로 추론 경로를 가른다."""
+    start, bfm, end = _ref("start"), _ref("bfm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(bfm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": bfm},
+            {"source_ref_id": bfm, "target_ref_id": end},
+        ],
+    }
+
+
 _BUILDERS = {
     1: _build_scenario_1,
     2: _build_scenario_2,
@@ -600,6 +625,7 @@ _BUILDERS = {
     9: _build_scenario_9,
     10: _build_scenario_10,
     11: _build_scenario_11,
+    12: _build_scenario_12,
 }
 
 

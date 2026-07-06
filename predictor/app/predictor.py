@@ -15,7 +15,7 @@ from app.model_manager.base import BaseModelManager
 from app.model_manager.keras.custom_model import KerasModelManager
 from app.model_manager.onnx.custom_model import OnnxModelManager
 from app.model_manager.pytorch.custom_model import ImageProcessingModelManager
-from app.model_manager.transformers.custom_model import ProteinClassificationModelManager
+from app.model_manager.transformers.custom_model import FillMaskModelManager, ProteinClassificationModelManager
 from app.model_manager.yolox.custom_model import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
@@ -36,6 +36,7 @@ class ModelManagerFactory:
     _managers = {
         ("pytorch", "object-detection"): ImageProcessingModelManager,  # detr, yolos
         ("pytorch", "protein-classification"): ProteinClassificationModelManager,  # ESM2 파인튜닝 자식 (결합 분류)
+        ("pytorch", "fill-mask"): FillMaskModelManager,  # base BFM(ESM2/ESMC/RNA-FM/MoLFormer) MaskedLM 서빙
         ("yolox", "object-detection"): YoloxModelManager,  # yolox (model_format=yolox 로 framework 분리됨)
     }
 
@@ -176,8 +177,9 @@ class InferenceModel(Model):
 
             device_str = "gpu" if torch.cuda.is_available() else "cpu"
 
-            # protein-classification(ESM2): 이미지가 아니라 단백질 서열 dict({epitope, cdr3b}) 를 그대로 전달
-            if isinstance(self.model_manager, ProteinClassificationModelManager):
+            # 서열 기반 매니저(protein-classification, fill-mask): 이미지가 아니라 dict 페이로드
+            # (protein-classification={epitope,cdr3b} / fill-mask={sequence,top_k})를 그대로 전달
+            if isinstance(self.model_manager, (ProteinClassificationModelManager, FillMaskModelManager)):
                 result = self.model_manager.predict(data=data, device_str=device_str)
                 return InferResponse(
                     response_id=generate_uuid(),

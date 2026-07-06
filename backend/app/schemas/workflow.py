@@ -315,6 +315,13 @@ class ModelProteinClassificationTestResult(BaseModel):
     input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (epitope/cdr3b)")
 
 
+class ModelFillMaskTestResult(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="마스크 위치별 top-k 토큰 예측 목록")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (sequence/top_k)")
+
+
 class ComponentTestResultBase(BaseModel):
     """컴포넌트 테스트 결과 기본"""
 
@@ -338,7 +345,7 @@ class ModelComponentTestResult(ComponentTestResultBase):
 
     component_type: str = Field(default="MODEL", description="컴포넌트 타입")
     model_type: str  # ODM, LLM, 또는 BFM
-    result: Union[ModelODMTestResult, ModelLLMTestResult, ModelProteinClassificationTestResult]
+    result: Union[ModelODMTestResult, ModelLLMTestResult, ModelProteinClassificationTestResult, ModelFillMaskTestResult]
 
 
 class ComponentTestErrorResult(BaseModel):
@@ -376,6 +383,14 @@ class WorkflowMLTestResponse(BaseModel):
 
 class WorkflowProteinClassificationTestResponse(BaseModel):
     """protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+class WorkflowFillMaskTestResponse(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 워크플로우 테스트 응답"""
 
     workflow_id: str
     execution_order: List[str]

@@ -37,6 +37,8 @@ from config import (
     SCENARIO_NUM,
     STATE_FILE,
     TARGET_EMBEDDING_MODEL_NAME,
+    WORKFLOW_FILLMASK_TEST_SEQUENCE,
+    WORKFLOW_FILLMASK_TOP_K,
     WORKFLOW_ODM_TEST_IMAGE,
     WORKFLOW_PLM_TEST_SAMPLE,
     workflow_primary_target_model_name,
@@ -100,7 +102,7 @@ class TestWorkflowScenarioDeploy:
         model = self._find_model_by_name(api_url, auth_headers, target)
         assert model["id"]
         self.__class__.model = model
-        kind = {10: "ODM", 11: "pLM"}.get(SCENARIO_NUM, "LLM")
+        kind = {10: "ODM", 11: "pLM", 12: "BFM(fill-mask)"}.get(SCENARIO_NUM, "LLM")
         print(f"\n✔ {kind} 모델 발견: id={model['id']}, name={model['name']}")
 
     def test_02_find_embedding_model(self, api_url: str, auth_headers: dict):
@@ -337,6 +339,13 @@ class TestWorkflowScenarioDeploy:
                 headers=auth_headers,
                 timeout=INFERENCE_TIMEOUT_SEC,
             )
+        elif inference_kind == "fill_mask":
+            resp = requests.post(
+                f"{api_url}/workflows/{wf_id}/test/fill-mask",
+                json={"sequence": WORKFLOW_FILLMASK_TEST_SEQUENCE, "top_k": WORKFLOW_FILLMASK_TOP_K},
+                headers=auth_headers,
+                timeout=INFERENCE_TIMEOUT_SEC,
+            )
         else:
             resp = requests.post(
                 f"{api_url}/workflows/{wf_id}/test/rag",
@@ -362,6 +371,17 @@ class TestWorkflowScenarioDeploy:
             top = preds[0]
             assert "label" in top and "score" in top, f"predictions 형식 오류: {top}"
             print(f"  predictions[0]: label={top.get('label')}, score={top.get('score')}")
+        elif inference_kind == "fill_mask":
+            # fill-mask 응답도 final_result 없이 results[].result.predictions(마스크 위치별 top-k) 를 검증
+            result = data["results"][0]
+            assert result.get("task") == "fill-mask", f"task 기대=fill-mask, 실제={result.get('task')}"
+            preds = (result.get("result") or {}).get("predictions") or []
+            assert preds, f"fill-mask predictions 가 비어 있습니다: {result}"
+            top = preds[0]
+            assert "position" in top and top.get("predictions"), f"fill-mask 형식 오류(position/predictions): {top}"
+            tok0 = top["predictions"][0]
+            assert "token" in tok0 and "score" in tok0, f"토큰 예측 형식 오류: {tok0}"
+            print(f"  mask@pos{top.get('position')} top1: token={tok0.get('token')!r}, score={tok0.get('score')}")
         else:
             fr = data.get("final_result") or ""
             assert len(fr) > 0
