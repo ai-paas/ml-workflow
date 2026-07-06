@@ -8,7 +8,7 @@ from config.settings import get_settings
 from core.serving.serving_workflow_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.service import ComponentType
-from pydantic import BaseModel, Field, computed_field, model_serializer, model_validator
+from pydantic import BaseModel, Field, computed_field, model_serializer
 from schemas.base import TimeStampSchemaMixin
 from schemas.model import ModelBriefReadSchema
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
@@ -51,45 +51,6 @@ class ComponentCreateRequest(BaseModel):
     config: Optional[Dict[str, Any]] = Field(None, description="컴포넌트별 세부 설정")
     x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
     y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
-
-    @model_validator(mode="after")
-    def validate_config(self):
-        if self.config is None:
-            return self
-
-        if self.type == ComponentType.MODEL:
-            allowed = {"temperature", "top_p", "max_tokens"}
-            for key in self.config:
-                if key not in allowed:
-                    raise ValueError(f"MODEL config에 허용되지 않는 키: {key}")
-            if "temperature" in self.config:
-                v = self.config["temperature"]
-                if not (0.0 <= float(v) <= 1.0):
-                    raise ValueError("temperature: 0.0~1.0")
-            if "top_p" in self.config:
-                v = self.config["top_p"]
-                if not (0.0 <= float(v) <= 1.0):
-                    raise ValueError("top_p: 0.0~1.0")
-            if "max_tokens" in self.config:
-                v = self.config["max_tokens"]
-                if not (1 <= int(v) <= 4096):
-                    raise ValueError("max_tokens: 1~4096")
-
-        elif self.type == ComponentType.KNOWLEDGE_BASE:
-            allowed = {"top_k"}
-            for key in self.config:
-                if key not in allowed:
-                    raise ValueError(f"KNOWLEDGE_BASE config에 허용되지 않는 키: {key}")
-            if "top_k" in self.config:
-                v = self.config["top_k"]
-                if not (1 <= int(v) <= 10):
-                    raise ValueError("top_k: 1~10")
-
-        elif self.type in (ComponentType.START, ComponentType.END):
-            if self.config:
-                raise ValueError("START/END 컴포넌트는 config를 사용하지 않음")
-
-        return self
 
 
 class ComponentReadSchema(TimeStampSchemaMixin):

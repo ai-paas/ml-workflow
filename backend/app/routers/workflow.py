@@ -2161,13 +2161,52 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 10. config 유효성 (Pydantic validator가 이미 처리하지만, validate API 용도로 명시 검증)
+    # 10. config 키·범위 검증 (config_validation) — 요청 스키마(pydantic)가 아닌 규칙 엔진에서 평가한다.
+    # 생성/수정 시엔 _validate_workflow_definition_or_raise 가 400 으로, 검증 API 에선 200 응답의
+    # passed=false 항목으로 일관 보고한다. (MODEL: temperature/top_p 0.0~1.0, max_tokens 1~4096;
+    # KNOWLEDGE_BASE: top_k 1~10; START/END: config 미사용)
     config_errors = []
     for comp in definition.components:
-        try:
-            ComponentCreateRequest.model_validate(comp.model_dump())
-        except Exception as e:
-            config_errors.append(f"{comp.ref_id}: {str(e)}")
+        cfg = comp.config
+        if comp.type in (ComponentType.START, ComponentType.END):
+            if cfg:
+                config_errors.append(f"'{comp.name}': START/END 컴포넌트는 config 를 사용하지 않습니다")
+            continue
+        if not cfg:
+            continue
+        if comp.type == ComponentType.MODEL:
+            for key in cfg:
+                if key not in {"temperature", "top_p", "max_tokens"}:
+                    config_errors.append(f"'{comp.name}': MODEL config 에 허용되지 않는 키: {key}")
+            for k in ("temperature", "top_p"):
+                if k in cfg:
+                    try:
+                        fv = float(cfg[k])
+                    except (TypeError, ValueError):
+                        config_errors.append(f"'{comp.name}': {k} 는 숫자여야 합니다")
+                    else:
+                        if not (0.0 <= fv <= 1.0):
+                            config_errors.append(f"'{comp.name}': {k} 는 0.0~1.0 범위여야 합니다")
+            if "max_tokens" in cfg:
+                try:
+                    iv = int(cfg["max_tokens"])
+                except (TypeError, ValueError):
+                    config_errors.append(f"'{comp.name}': max_tokens 는 정수여야 합니다")
+                else:
+                    if not (1 <= iv <= 4096):
+                        config_errors.append(f"'{comp.name}': max_tokens 는 1~4096 범위여야 합니다")
+        elif comp.type == ComponentType.KNOWLEDGE_BASE:
+            for key in cfg:
+                if key != "top_k":
+                    config_errors.append(f"'{comp.name}': KNOWLEDGE_BASE config 에 허용되지 않는 키: {key}")
+            if "top_k" in cfg:
+                try:
+                    iv = int(cfg["top_k"])
+                except (TypeError, ValueError):
+                    config_errors.append(f"'{comp.name}': top_k 는 정수여야 합니다")
+                else:
+                    if not (1 <= iv <= 10):
+                        config_errors.append(f"'{comp.name}': top_k 는 1~10 범위여야 합니다")
     results.append(
         ValidationCheckResult(
             rule="config_validation",
