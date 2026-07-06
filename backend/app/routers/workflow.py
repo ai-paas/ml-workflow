@@ -2151,7 +2151,7 @@ def _validate_workflow_definition_checks(
         if ctx_len and int(max_tokens_val) > ctx_len:
             max_tokens_errors.append(
                 f"{comp.ref_id}: max_tokens({int(max_tokens_val)})가 "
-                f"{model.repo_id}의 context length({ctx_len: , })를 초과합니다."
+                f"{model.repo_id}의 context length({ctx_len:,})를 초과합니다."
             )
     results.append(
         ValidationCheckResult(
