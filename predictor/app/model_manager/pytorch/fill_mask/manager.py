@@ -22,18 +22,52 @@ class FillMaskModelManager(BaseModelManager):
         self.device = None
 
     def load_model(self, model_name: str, run_id: str):
-        """MLflow run 아티팩트(base 모델 가중치)를 내려받아 MaskedLM 헤드로 로드."""
+        """MLflow run 아티팩트(base 모델 가중치)를 내려받아 MaskedLM 헤드로 로드.
+
+        RNA-FM 처럼 transformers 표준에 없는 아키텍처는 multimolecule 를 사전 import 해 Auto 레지스트리에
+        등록해야 하고(best-effort, ESM2/MoLFormer 에는 무영향), MoLFormer 처럼 config 에 auto_map(커스텀 코드)이
+        있는 모델은 trust_remote_code 로 아티팩트에 포함된 modeling/tokenization 코드를 로드한다.
+        """
         import torch
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
+        # RNA-FM 등 등록형 아키텍처를 Auto 레지스트리에 사전 등록한다(없거나 실패해도 무시).
+        try:
+            import multimolecule  # noqa: F401
+        except Exception as e:
+            logging.logger.info(f"multimolecule 미사용/미설치(RNA-FM 외에는 무관): {e}")
+
         local_path = self._load_artifacts(run_id, model_name)
-        logging.logger.info(f"Fill-Mask 모델 dir: {local_path}")
+        trust_remote_code = self._needs_remote_code(local_path)
+        logging.logger.info(f"Fill-Mask 모델 dir: {local_path} (trust_remote_code={trust_remote_code})")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = AutoModelForMaskedLM.from_pretrained(local_path).to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(local_path)
+        self.model = AutoModelForMaskedLM.from_pretrained(local_path, trust_remote_code=trust_remote_code).to(
+            self.device
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         self.model.eval()
         logging.logger.info("Fill-Mask 모델 로드 완료")
+
+    @staticmethod
+    def _needs_remote_code(local_path: str) -> bool:
+        """아티팩트 config/tokenizer_config 에 auto_map(커스텀 코드 매핑)이 있으면 True.
+
+        MoLFormer 처럼 허브 modeling/tokenization .py 를 함께 받은(스냅샷) 모델 로드에 필요.
+        ESM2/RNA-FM 은 auto_map 이 없어 False. 신뢰 경계는 등록 단계(PREDEFINED 화이트리스트)에서 이미 좁혀진다.
+        """
+        import os
+
+        for fname in ("config.json", "tokenizer_config.json"):
+            fpath = os.path.join(local_path, fname)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, encoding="utf-8") as f:
+                        if "auto_map" in json.load(f):
+                            return True
+                except Exception:
+                    pass
+        return False
 
     def predict(self, data, device_str: str = "cpu"):
         """마스크가 포함된 서열을 받아 각 마스크 위치의 top-k 토큰 예측을 반환.

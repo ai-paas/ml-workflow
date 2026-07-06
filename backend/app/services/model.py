@@ -49,7 +49,6 @@ from transformers import (
     AutoProcessor,
     AutoTokenizer,
     CLIPTokenizer,
-    EsmForSequenceClassification,
     Owlv2ForObjectDetection,
     Owlv2ImageProcessor,
     Owlv2Processor,
@@ -656,7 +655,7 @@ class HuggingFaceModelService:
             raise ValueError("repo_id is required for HuggingFace models")
         # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # if model_format_id == transformers_db_obj.id:  # transformers
-        save_dir = self.load_and_save_transformers(repo_id)
+        save_dir = self.load_and_save_transformers(repo_id, model_schema.task)
         model_name = repo_id.replace("/", "-")
         run_id, artifact_uri = ModelRegistry().log_artifact(model_name=model_name, save_dir=save_dir)
         model_uri = model_name
@@ -678,37 +677,42 @@ class HuggingFaceModelService:
         return model_repository.get(db, model_id)
 
     @staticmethod
-    def load_and_save_transformers(repo_id: str) -> str:
+    def load_and_save_transformers(repo_id: str, task: str) -> str:
         """
-        transformers 계열 Model을 Load하는 method
+        HuggingFace 모델을 내려받아 MLflow 등록용 로컬 디렉토리 경로를 반환한다.
 
         * params
-            * repo_id: str
-                - from HuggingFace: model_name (e.g. 'openbmb/MiniCPM-V-2_6-gguf')
-                - from User: Model과 Tokenizer가 함께 저장된 directory 경로
+            * repo_id: str — HuggingFace 저장소 id (예: 'facebook/detr-resnet-50')
+            * task: str — 모델 task. 'object-detection' 은 프로세서/모델을 인스턴스화해 저장하고,
+                          그 외(BFM fill-mask: esm2/rnafm/molformer 등)는 원본 스냅샷을 그대로 저장한다.
 
-        * return
-            - transformer_model used in mlflow.transformers.log_model
-                ```python
-                components = {
-                    "model": model,
-                    "tokenizer": tokenizer,
-                }
-                ```
+        * return: 저장된 로컬 디렉토리 경로
         """
-        # TODO: MS 제공 Model의 경우, trust_remote_code=True 옵션을 추가해야하는 경우 발견됨
+        # object-detection 외 task(BFM fill-mask 등)는 원본 HF 스냅샷을 그대로 받아 저장한다.
+        # backend 는 모델을 인스턴스화하지 않으므로 multimolecule/원격코드 의존이나 MaskedLM head 손실이
+        # 없고, 서빙 predictor 가 로드한다. HF_TOKEN 은 사용하지 않으며(token=False), 접근 승인(gated)·
+        # 인증이 필요한 저장소는 클라이언트 오류(400)로 반환한다.
+        if task != ModelTaskType.OBJECT_DETECTION.value:
+            from huggingface_hub.utils import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-        # ESM2 등 단백질 LM(시퀀스 분류) 계열은 객체감지 로더(AutoModelForObjectDetection)로 받을 수 없으므로
-        # EsmForSequenceClassification + tokenizer 로 로드하여 MLflow 에 등록한다(파인튜닝/서빙이 이 base 를 사용).
-        base_config = AutoConfig.from_pretrained(repo_id)
-        if getattr(base_config, "model_type", "") == "esm":
-            esm_model = EsmForSequenceClassification.from_pretrained(repo_id, num_labels=2)
-            esm_tokenizer = AutoTokenizer.from_pretrained(repo_id)
             temp_dir = tempfile.mkdtemp()
-            esm_model.save_pretrained(temp_dir)
-            esm_tokenizer.save_pretrained(temp_dir)
-            return temp_dir
+            try:
+                return snapshot_download(repo_id, token=False, local_dir=temp_dir)
+            except (GatedRepoError, RepositoryNotFoundError) as e:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"'{repo_id}' 는 HuggingFace 접근 승인/인증(HF_TOKEN)이 필요한 모델입니다. 토큰 없이 등록할 수 없습니다.",
+                ) from e
+            except HfHubHTTPError as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                if code in (401, 403):
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail=f"'{repo_id}' 접근에 HuggingFace 인증(HF_TOKEN)이 필요합니다. 토큰 없이 등록할 수 없습니다.",
+                    ) from e
+                raise
 
+        # object-detection: OWLV2 / AutoModelForObjectDetection 로 인스턴스화해 저장.
         if repo_id.startswith(str(MODEL_NAME.OWLV2)):
             processor = Owlv2Processor.from_pretrained(repo_id)
             model = Owlv2ForObjectDetection.from_pretrained(repo_id)
@@ -1512,6 +1516,34 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_memory_request_gpu": "2Gi",
         "serving_gpu_pod_cpu_request_millicores": 500,
         "serving_memory_request_cpu": "2Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
+    "multimolecule/rnafm": {
+        "name": "multimolecule/rnafm",
+        "description": "RNA-FM (RNA fill-mask, base MLM)",
+        "repo_id": "multimolecule/rnafm",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
+    "ibm-research/MoLFormer-XL-both-10pct": {
+        "name": "ibm-research/MoLFormer-XL-both-10pct",
+        "description": "MoLFormer-XL (SMILES fill-mask, base MLM, 원격코드)",
+        "repo_id": "ibm-research/MoLFormer-XL-both-10pct",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 1000,
     },
     "yolox_s": {

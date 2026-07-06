@@ -51,6 +51,8 @@ class PredefinedModelKey(str, PyEnum):
     MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
     BGE_M3 = "bge-m3"
     ESM2_T6_8M = "facebook/esm2_t6_8M_UR50D"
+    RNAFM = "multimolecule/rnafm"
+    MOLFORMER_XL = "ibm-research/MoLFormer-XL-both-10pct"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
     QWQ_32B = "qwq:32b"

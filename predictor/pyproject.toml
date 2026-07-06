@@ -25,6 +25,7 @@ dependencies = [
     "thop",
     "psutil",
     "pycocotools==2.0.10",
+    "multimolecule>=0.2.0",
 ]
 
 [tool.uv]
