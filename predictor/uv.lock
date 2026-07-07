@@ -1192,6 +1192,7 @@ name = "ml-workflow-predictor"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "accelerate" },
     { name = "boto3" },
     { name = "datasets" },
     { name = "kserve" },
@@ -1220,6 +1221,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "accelerate", specifier = ">=1.0" },
     { name = "boto3" },
     { name = "datasets", specifier = ">=2.19" },
     { name = "kserve", specifier = "==0.13.1" },

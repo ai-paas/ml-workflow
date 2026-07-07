@@ -5,6 +5,7 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "transformers==5.13.0",
     "peft==0.19.1",
+    "accelerate>=1.0",
     "kserve==0.13.1",
     "mlflow==2.17.0",
     "torch==2.7.1",

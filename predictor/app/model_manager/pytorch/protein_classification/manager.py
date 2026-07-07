@@ -54,11 +54,15 @@ class ProteinClassificationModelManager(BaseModelManager):
                 logging.logger.warning(f"MLflow base 다운로드 실패, HF Hub fallback: {e}")
                 base_source = self.BASE_MODEL_ID
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        base_model = EsmForSequenceClassification.from_pretrained(base_source, num_labels=2)
+        # 단일 cuda:0 가정 제거: base 를 device_map="auto" 로 로드하고, LoRA 어댑터는 그 배치를 계승한다.
+        # 작은 base(ESM2)는 cuda:0 한 장, 6B급(ESMC)은 여러 장에 분산되어 1장 초과 OOM 을 피한다.
+        device_map = "auto" if torch.cuda.is_available() else None
+        base_model = EsmForSequenceClassification.from_pretrained(base_source, num_labels=2, device_map=device_map)
         self.tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
-        self.model = PeftModel.from_pretrained(base_model, adapter_dir).to(self.device)
+        self.model = PeftModel.from_pretrained(base_model, adapter_dir)
         self.model.eval()
+        # 입력 텐서 기준 디바이스(샤딩 시 첫 모듈 디바이스). accelerate 가 이후 디바이스 이동을 처리.
+        self.device = next(self.model.parameters()).device
         logging.logger.info("ESM2 LoRA 모델 로드 완료")
 
     def predict(self, data, device_str: str = "cpu"):
