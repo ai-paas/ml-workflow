@@ -31,20 +31,30 @@ class FillMaskModelManager(BaseModelManager):
         import torch
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-        # RNA-FM 등 등록형 아키텍처를 Auto 레지스트리에 사전 등록한다(없거나 실패해도 무시).
+        # RNA-FM 등 등록형 아키텍처를 Auto 레지스트리에 사전 등록한다. 실패해도 여기서 죽지 않되,
+        # 실제 로드가 "architecture 미인식"으로 실패하면 이 import 실패를 원인으로 함께 드러낸다.
+        mm_error = None
         try:
             import multimolecule  # noqa: F401
         except Exception as e:
-            logging.logger.info(f"multimolecule 미사용/미설치(RNA-FM 외에는 무관): {e}")
+            mm_error = e
+            logging.logger.warning(f"multimolecule import 실패(RNA 계열 로드 시 필요): {e}")
 
         local_path = self._load_artifacts(run_id, model_name)
         trust_remote_code = self._needs_remote_code(local_path)
         logging.logger.info(f"Fill-Mask 모델 dir: {local_path} (trust_remote_code={trust_remote_code})")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = AutoModelForMaskedLM.from_pretrained(local_path, trust_remote_code=trust_remote_code).to(
-            self.device
-        )
+        try:
+            self.model = AutoModelForMaskedLM.from_pretrained(local_path, trust_remote_code=trust_remote_code).to(
+                self.device
+            )
+        except (KeyError, ValueError) as e:
+            if mm_error is not None:
+                raise RuntimeError(
+                    f"등록형 아키텍처 로드 실패 — multimolecule import 가 선행 실패했습니다: {mm_error}"
+                ) from e
+            raise
         self.tokenizer = AutoTokenizer.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         self.model.eval()
         logging.logger.info("Fill-Mask 모델 로드 완료")
