@@ -269,6 +269,13 @@ class EsmFineTuner:
             logger.warning("classifier dropout 패치를 적용하지 못했습니다(구조 상이). 무시하고 진행합니다.")
         return model
 
+    @staticmethod
+    def _preprocess_logits_for_metrics(logits, labels):
+        """eval 로짓 누적 전에 compute_metrics 가 쓸 값만 남기는 훅. ESM2 는 모델이 분류 logits 만
+        반환하므로 그대로 통과한다. 모델이 추가 출력을 함께 반환하는 군(ESMC)은 이 메서드를 재정의한다.
+        """
+        return logits
+
     def train(self):
         """base(ESM2/ESMC) + LoRA 학습 후 어댑터를 MLflow 'adapter' 아티팩트로 등록."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +327,7 @@ class EsmFineTuner:
             processing_class=tokenizer,
             data_collator=DataCollatorWithPadding(tokenizer),
             compute_metrics=_compute_metrics,
+            preprocess_logits_for_metrics=self._preprocess_logits_for_metrics,
             callbacks=callbacks,
         )
 

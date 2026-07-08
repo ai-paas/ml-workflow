@@ -63,3 +63,13 @@ class EsmcFineTuner(EsmFineTuner):
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
         return model
+
+    @staticmethod
+    def _preprocess_logits_for_metrics(logits, labels):
+        """ESMC forward 는 (logits, last_hidden_state, ...) 를 반환한다(분류 logits 는 첫 원소).
+        그대로 누적하면 compute_metrics 의 np.asarray 가 ragged 로 실패하고, 대형 val 셋에서는
+        last_hidden_state 누적으로 OOM 위험도 있어, eval 누적 전에 분류 logits 만 남긴다.
+        """
+        if isinstance(logits, (tuple, list)):
+            return logits[0]
+        return logits
