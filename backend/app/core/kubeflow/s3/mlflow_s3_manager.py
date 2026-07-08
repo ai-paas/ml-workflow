@@ -88,6 +88,24 @@ class MLFlowS3Manager:
         except Exception as e:
             raise Exception(f"파일 삭제 중 오류 발생: {str(e)}")
 
+    @staticmethod
+    def s3_path_from_artifact_uri(artifact_uri: Optional[str]) -> Optional[str]:
+        """MLflow artifact_uri 에서 S3 오브젝트 경로(버킷명 제외)를 추출한다. 파싱 불가 시 None.
+
+        delete_folder 에 넘길 prefix 를 얻는 용도. 두 형식을 지원한다:
+          mlflow-artifacts:/0/abc/artifacts                  -> 0/abc/artifacts
+          s3://mlflow/8/abc/artifacts/google-owlv2-base-...  -> 8/abc/artifacts/google-owlv2-base-...
+        """
+        if not artifact_uri:
+            return None
+        if artifact_uri.startswith("mlflow-artifacts:/"):
+            return artifact_uri.replace("mlflow-artifacts:/", "")
+        if artifact_uri.startswith("s3://"):
+            rest = artifact_uri.replace("s3://", "")  # bucket/key...
+            if "/" in rest:
+                return rest.split("/", 1)[1]  # 첫 '/' 이후(버킷명 제거)
+        return None
+
     def delete_folder(self, folder_path: str) -> bool:
         """
         지정된 폴더 경로와 그 안의 모든 파일을 삭제합니다.

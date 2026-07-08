@@ -40,6 +40,12 @@ class FillMaskModelManager(BaseModelManager):
             mm_error = e
             logging.logger.warning(f"multimolecule import 실패(RNA 계열 로드 시 필요): {e}")
 
+        # ESMC 는 upstream transformers 에 없어 vendored 구현을 import 해 Auto 레지스트리에 등록한다.
+        try:
+            import app.vendored.esmc  # noqa: F401
+        except Exception as e:
+            logging.logger.warning(f"vendored esmc 등록 실패(ESMC 외에는 무관): {e}")
+
         local_path = self._load_artifacts(run_id, model_name)
         trust_remote_code = self._needs_remote_code(local_path)
         logging.logger.info(f"Fill-Mask 모델 dir: {local_path} (trust_remote_code={trust_remote_code})")

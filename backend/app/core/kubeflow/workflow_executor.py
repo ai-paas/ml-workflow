@@ -134,6 +134,7 @@ class WorkflowExecutor:
                 "gpu_resource_key": plan.gpu_resource_key,
                 "node_selector_json": plan.node_selector_json,
                 "tolerations_json": plan.tolerations_json,
+                "ephemeral_storage_limit": plan.ephemeral_storage_limit,
             }
 
         parameters["serving_plans"] = plans
@@ -566,6 +567,7 @@ class WorkflowExecutor:
                 cpu_request: str = "500m",
                 memory_limit: str = "4Gi",
                 cpu_limit: str = "2000m",
+                ephemeral_storage_limit: str = "1Gi",
                 kserve_gateway_url: str = "",
                 deployment_mode: str = "kserve",
                 model_type: str = "",
@@ -1039,7 +1041,8 @@ class WorkflowExecutor:
                     if base_model_uri:
                         container_args.append(f"--base_model_uri={base_model_uri}")
 
-                    # 리소스 설정 (§7.9 사전정의 메타 기반, ephemeral-storage requests는 제거)
+                    # 리소스 설정 (사전정의 메타 기반). ephemeral-storage 는 서빙 시 MLflow 아티팩트를
+                    # Pod 로컬로 내려받는 크기를 감당해야 해 모델별 limit 을 사용한다(request 는 두지 않음).
                     resources = client.V1ResourceRequirements(
                         requests={
                             "memory": memory_request,
@@ -1048,7 +1051,7 @@ class WorkflowExecutor:
                         limits={
                             "memory": memory_limit,
                             "cpu": cpu_limit,
-                            "ephemeral-storage": "1Gi",
+                            "ephemeral-storage": ephemeral_storage_limit,
                         },
                     )
 
@@ -1453,6 +1456,7 @@ class WorkflowExecutor:
             cpu_req = plan.get("cpu_request") or "500m"
             mem_lim = plan.get("memory_limit") or mem_req
             cpu_lim = plan.get("cpu_limit") or cpu_req
+            eph_lim = plan.get("ephemeral_storage_limit") or "1Gi"
             pin_node = (plan.get("serving_node_name") or parameters.get("node_name") or "").strip()
 
             # §6 전까지 REMOTE는 deployment_type/파이프라인 분기 모두 미연동(resolve는 KSERVE|OLLAMA만).
@@ -1486,6 +1490,7 @@ class WorkflowExecutor:
                 cpu_request=cpu_req,
                 memory_limit=mem_lim,
                 cpu_limit=cpu_lim,
+                ephemeral_storage_limit=eph_lim,
                 kserve_gateway_url=parameters.get("kserve_gateway_url", ""),
                 deployment_mode=deployment_mode,
                 model_type=model_type,

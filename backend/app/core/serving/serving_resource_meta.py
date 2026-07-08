@@ -51,6 +51,9 @@ class ServingResourcePlan:
     gpu_resource_key: str = "nvidia.com/gpu"
     node_selector_json: str = "{}"
     tolerations_json: str = "[]"
+    #: 서빙 Pod ephemeral-storage limit. 서빙 시 MLflow 아티팩트(모델 파일)를 Pod 로컬로 내려받으므로
+    #: 모델 디스크 크기보다 커야 한다(초과 시 Pod eviction). 미지정 모델은 소형이라 기본 1Gi.
+    ephemeral_storage_limit: str = "1Gi"
 
 
 def _has_complete_serving_keys(cfg: dict[str, Any]) -> bool:
@@ -180,9 +183,12 @@ def resolve_normalized_serving_meta(
                 "serving_cpu_request_millicores": _parse_positive_int(
                     child_cfg["serving_cpu_request_millicores"], "serving_cpu_request_millicores"
                 ),
+                # 선택 필드(미지정 시 기본 1Gi). 필수 5키 검증과 무관.
+                "serving_ephemeral_storage_limit": str(child_cfg.get("serving_ephemeral_storage_limit", "1Gi")).strip(),
             }
             for mk in ("serving_memory_request_gpu", "serving_memory_request_cpu"):
                 k8s_memory_quantity_to_bytes(meta[mk])
+            k8s_memory_quantity_to_bytes(meta["serving_ephemeral_storage_limit"])  # 형식 검증
             return meta, "direct", None
 
     if model.parent_model_id is None:
@@ -213,6 +219,8 @@ def resolve_normalized_serving_meta(
         learning_enable_yn=bool(model.learning_enable_yn),
         opt_enable_yn=bool(model.opt_enable_yn),
     )
+    # 파인튜닝 자식은 서빙 시 base(대용량)+adapter 를 함께 내려받으므로 부모의 ephemeral limit 을 그대로 상속.
+    derived["serving_ephemeral_storage_limit"] = str(parent_cfg.get("serving_ephemeral_storage_limit", "1Gi")).strip()
     return derived, "parent_derived", parent.repo_id
 
 
@@ -331,6 +339,7 @@ def build_serving_resource_plan(
         fallback_reason=fallback_reason,
         serving_node_name=serving_node_name,
         planner_note=planner_note,
+        ephemeral_storage_limit=str(normalized_meta.get("serving_ephemeral_storage_limit", "1Gi")),
     )
 
 

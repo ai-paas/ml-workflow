@@ -108,21 +108,7 @@ class ExperimentService:
                     run_info = client.get_run(run_id)
                     artifact_uri = run_info.info.artifact_uri
 
-                    # artifact_uri에서 S3 경로 추출
-                    # 형식 1: mlflow-artifacts:/0/abc123/artifacts
-                    # 형식 2: s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/google-owlv2-base-patch16
-                    s3_artifact_path = None
-                    if artifact_uri.startswith("mlflow-artifacts:/"):
-                        s3_artifact_path = artifact_uri.replace("mlflow-artifacts:/", "")
-                    elif artifact_uri.startswith("s3://"):
-                        # s3://bucket/path 형식에서 버킷 이름 제거
-                        # s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                        # -> 8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                        uri_without_protocol = artifact_uri.replace("s3://", "")
-                        # 첫 번째 '/' 이후의 경로만 추출 (버킷 이름 제거)
-                        if "/" in uri_without_protocol:
-                            s3_artifact_path = uri_without_protocol.split("/", 1)[1]
-
+                    s3_artifact_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
                     if s3_artifact_path:
                         MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
                 except Exception as s3_error:

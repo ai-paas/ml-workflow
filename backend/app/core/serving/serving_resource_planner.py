@@ -403,6 +403,7 @@ def _plan_serving_resources_with_inventory_nodes(
                 gpu_resource_key=node.gpu_resource_key,
                 node_selector_json=node.node_selector_json,
                 tolerations_json=node.tolerations_json,
+                ephemeral_storage_limit=str(normalized_meta.get("serving_ephemeral_storage_limit", "1Gi")),
             )
         extra = "no_feasible_gpu_node"
         fallback_reason = ", ".join(x for x in (fallback_reason, extra) if x)
@@ -460,6 +461,7 @@ def _plan_serving_resources_with_inventory_nodes(
             gpu_resource_key=node.gpu_resource_key,
             node_selector_json=node.node_selector_json,
             tolerations_json=node.tolerations_json,
+            ephemeral_storage_limit=str(normalized_meta.get("serving_ephemeral_storage_limit", "1Gi")),
         )
 
     logger.warning(

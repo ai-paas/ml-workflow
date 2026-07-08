@@ -198,7 +198,7 @@ harbor-build-push-all-nc:
 
 # ─── Lint / Format (.pre-commit-config.yaml 규칙과 동일) ──────────────────
 FLAKE8_IGNORE := E203,W503,W605,E712,E266,F401,E402,F821,E711,F403
-FLAKE8_EXCLUDE := .venv,*/.venv
+FLAKE8_EXCLUDE := .venv,*/.venv,*/vendored/*
 
 flake8:
 	uv run --group dev flake8 --max-line-length=120 --ignore=$(FLAKE8_IGNORE) --exclude=$(FLAKE8_EXCLUDE) .

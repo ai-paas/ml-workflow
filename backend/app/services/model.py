@@ -391,21 +391,7 @@ class ModelService:
                             run_info = client.get_run(run_id)
                             artifact_uri = run_info.info.artifact_uri
 
-                            # artifact_uri에서 S3 경로 추출
-                            # 형식 1: mlflow-artifacts:/0/abc123/artifacts
-                            # 형식 2: s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/google-owlv2-base-patch16
-                            s3_artifact_path = None
-                            if artifact_uri.startswith("mlflow-artifacts:/"):
-                                s3_artifact_path = artifact_uri.replace("mlflow-artifacts:/", "")
-                            elif artifact_uri.startswith("s3://"):
-                                # s3://bucket/path 형식에서 버킷 이름 제거
-                                # s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                                # -> 8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                                uri_without_protocol = artifact_uri.replace("s3://", "")
-                                # 첫 번째 '/' 이후의 경로만 추출 (버킷 이름 제거)
-                                if "/" in uri_without_protocol:
-                                    s3_artifact_path = uri_without_protocol.split("/", 1)[1]
-
+                            s3_artifact_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
                             if s3_artifact_path:
                                 MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
                         except Exception as s3_error:
@@ -659,22 +645,42 @@ class HuggingFaceModelService:
         model_name = repo_id.replace("/", "-")
         run_id, artifact_uri = ModelRegistry().log_artifact(model_name=model_name, save_dir=save_dir)
         model_uri = model_name
-        # else:
-        #     print("Error!!!")
 
-        model_obj = model_repository.create(db, obj_in=model_schema)
-        model_id = model_obj.id
-        model_registry_repository.create(
-            db,
-            obj_in=ModelRegistryBaseSchema(
-                artifact_path=artifact_uri,
-                uri=model_uri,
-                run_id=run_id,
-                reference_model_id=model_id,
-            ),
-        )
-        db.commit()
-        return model_repository.get(db, model_id)
+        # 위 snapshot_download/MLflow 업로드는 대형 모델에서 수 분~수십 분 걸린다. 그동안 요청의 DB 연결이
+        # idle 로 방치돼 MySQL 에 끊길 수 있어("MySQL server has gone away"), DB 반영은 새 세션으로 한다
+        # (pool_pre_ping 으로 검증된 새 연결). 반영이 실패하면 진행된 DB 작업을 롤백하고 MLflow 아티팩트도
+        # 삭제해, DB 엔 없는데 MLflow 에만 남는 불일치(고아 아티팩트)를 막는다.
+        from config.db.session import SessionLocal
+
+        write_db = SessionLocal()
+        try:
+            model_obj = model_repository.create(write_db, obj_in=model_schema)
+            model_id = model_obj.id
+            model_registry_repository.create(
+                write_db,
+                obj_in=ModelRegistryBaseSchema(
+                    artifact_path=artifact_uri,
+                    uri=model_uri,
+                    run_id=run_id,
+                    reference_model_id=model_id,
+                ),
+            )
+            write_db.commit()
+            return model_repository.get(write_db, model_id)
+        except Exception:
+            write_db.rollback()
+            # MLflow run(tracking) 과 S3 아티팩트를 함께 정리한다. delete_run 은 run 레코드만 지우고
+            # S3 blob 은 남기므로 delete_folder 로 S3 까지 지운다. artifact_uri 는 이미 확보돼 있어 재조회 불필요.
+            try:
+                ModelRegistry().delete_run_artifacts(run_id)
+                s3_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
+                if s3_path:
+                    MLFlowS3Manager.get_instance().delete_folder(s3_path)
+            except Exception as cleanup_err:
+                logger.error(f"MLflow/S3 아티팩트 정리 실패(run_id={run_id}): {cleanup_err}")
+            raise
+        finally:
+            write_db.close()
 
     @staticmethod
     def load_and_save_transformers(repo_id: str, task: str) -> str:
@@ -1545,6 +1551,30 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_gpu_pod_cpu_request_millicores": 500,
         "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 1000,
+    },
+    "biohub/ESMC-300M": {
+        "name": "biohub/ESMC-300M",
+        "description": "ESM-C 300M (base=fill-mask, 파인튜닝 시 protein-classification)",
+        "repo_id": "biohub/ESMC-300M",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "16",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 1000,
+        # 서빙 시 모델 파일(~1.3GB)을 Pod 로컬로 내려받으므로 기본 1Gi 로는 부족 → 3Gi.
+        "serving_ephemeral_storage_limit": "3Gi",
     },
     "yolox_s": {
         "name": "yolox_s",

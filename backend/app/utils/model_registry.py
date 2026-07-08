@@ -181,13 +181,14 @@ class ModelRegistry:
             raise ValueError("file or save_dir must be provided")
 
     def delete_run_artifacts(self, run_id: str):
-        """
-        특정 run의 모든 artifact를 삭제하는 메서드
+        """MLflow tracking store 의 run 을 삭제하는 메서드.
+
+        주의: 이것은 run 레코드만 삭제하며 S3 아티팩트 blob 은 남는다(delete_run 은 tracking store 만 건드림).
+        S3 까지 지우려면 호출부에서 artifact_uri 를 파싱해 MLFlowS3Manager.delete_folder 를 함께 호출해야 한다.
 
         Args:
             run_id: 삭제할 run의 ID
         """
-        # run을 삭제하면 해당 run의 모든 artifact도 함께 삭제됩니다
         if not run_id:
             return False
         try:

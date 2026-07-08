@@ -37,14 +37,17 @@ markers = [
 
 [tool.black]
 line-length = 120
+# vendored/ 는 외부 모델 구현을 복사해 둔 것이라 재포맷하지 않는다(원본 대비 diff·재-vendoring 보존).
+extend-exclude = "/vendored/"
 
 [tool.isort]
 profile = "black"
 line_length = 120
+extend_skip_glob = ["*/vendored/*"]
 
 [tool.ruff]
 line-length = 120
-exclude = [".venv", "*/.venv", "YOLOX"]
+exclude = [".venv", "*/.venv", "YOLOX", "*/vendored/*"]
 
 [tool.ruff.lint]
 ignore = ["E203", "W605", "E712", "E266", "F401", "E402", "F821", "E711", "F403"]
