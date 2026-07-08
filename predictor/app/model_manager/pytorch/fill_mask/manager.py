@@ -52,10 +52,12 @@ class FillMaskModelManager(BaseModelManager):
 
         # 단일 cuda:0 가정 제거: device_map="auto" 로 가용 GPU에 자동 배치/샤딩한다.
         # 작은 모델(ESM2/RNA-FM/MoLFormer)은 cuda:0 한 장, 6B급(ESMC)은 여러 장에 분산되어 1장 초과 OOM 을 피한다.
+        # ESMC 는 크기 무관 bf16 로 통일 로드(6B fp32=OOM 회피 + 300M 도 동일 정밀도). 그 외는 native(default).
         device_map = "auto" if torch.cuda.is_available() else None
+        load_dtype = self._bf16_if_esmc(local_path)
         try:
             self.model = AutoModelForMaskedLM.from_pretrained(
-                local_path, trust_remote_code=trust_remote_code, device_map=device_map
+                local_path, trust_remote_code=trust_remote_code, device_map=device_map, dtype=load_dtype
             )
         except (KeyError, ValueError) as e:
             if mm_error is not None:
@@ -68,6 +70,23 @@ class FillMaskModelManager(BaseModelManager):
         # 입력 텐서 기준 디바이스(샤딩 시 첫 모듈이 위치한 디바이스). accelerate 가 이후 디바이스 이동을 처리.
         self.device = next(self.model.parameters()).device
         logging.logger.info("Fill-Mask 모델 로드 완료")
+
+    @staticmethod
+    def _bf16_if_esmc(local_path: str):
+        """ESMC(config model_type=esmc)면 bf16, 그 외(ESM2/RNA-FM/MoLFormer 등)는 native(None=default fp32)."""
+        import os
+
+        import torch
+
+        cfg = os.path.join(local_path, "config.json")
+        if os.path.isfile(cfg):
+            try:
+                with open(cfg, encoding="utf-8") as f:
+                    if json.load(f).get("model_type") == "esmc":
+                        return torch.bfloat16
+            except Exception:
+                pass
+        return None
 
     @staticmethod
     def _needs_remote_code(local_path: str) -> bool:

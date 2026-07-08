@@ -1576,6 +1576,32 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         # 서빙 시 모델 파일(~1.3GB)을 Pod 로컬로 내려받으므로 기본 1Gi 로는 부족 → 3Gi.
         "serving_ephemeral_storage_limit": "3Gi",
     },
+    "biohub/ESMC-6B": {
+        "name": "biohub/ESMC-6B",
+        "description": "ESM-C 6B (base=fill-mask, 파인튜닝 시 protein-classification). bf16 로드+멀티GPU 샤딩.",
+        "repo_id": "biohub/ESMC-6B",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "4",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        # 아래 리소스는 추정치다(실제 6B 등록·배포 전 클러스터에서 검증 필요).
+        # bf16 로드 시 가중치 ~12GB + 활성. vram_need 는 멀티GPU 샤딩 장수 계산에 쓰인다.
+        "serving_vram_need_bytes": 16 * _GIB,
+        "serving_memory_request_gpu": "16Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "16Gi",
+        "serving_cpu_request_millicores": 2000,
+        # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 30Gi.
+        "serving_ephemeral_storage_limit": "30Gi",
+    },
     "yolox_s": {
         "name": "yolox_s",
         "description": "yolox_s",

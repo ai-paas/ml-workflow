@@ -296,9 +296,9 @@ def container_train(
 
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
-        # ESM2 는 (최초/재학습 모두) 항상 lineage root 카탈로그의 base 를 LoRA 의 기반으로 쓴다.
+        # BFM(ESM2/ESMC)은 (최초/재학습 모두) 항상 lineage root 카탈로그의 base 를 LoRA 의 기반으로 쓴다.
         # 자식 모델의 registry 는 adapter 를 가리키므로, base 는 lineage root 의 registry 에서 가져온다.
-        if model_kind == "esm2":
+        if model_kind in ("esm2", "esmc"):
             # lineage root 는 위 _resolve_root_family 에서 이미 1회 조회했으므로 재사용(M3 중복조회 제거).
             if root is not None and root.registry:
                 model_uri = root.registry.uri

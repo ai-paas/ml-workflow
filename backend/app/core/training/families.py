@@ -22,12 +22,16 @@ from db.models.model import ModelTaskType
 ESM2_T6_8M_REPO_ID = "facebook/esm2_t6_8M_UR50D"
 ESM2_SUPPORTED_REPO_IDS = frozenset({ESM2_T6_8M_REPO_ID})
 
+# 학습 가능 ESMC repo_id 집합. ESM2 와 같은 BFM/protein-classification 이지만 아키텍처가 달라
+# 별도 학습 컨테이너 키(esmc)로 디스패치한다.
+ESMC_SUPPORTED_REPO_IDS = frozenset({"biohub/ESMC-300M", "biohub/ESMC-6B"})
+
 
 @dataclass(frozen=True)
 class TrainableFamily:
     """학습 가능 모델군 1개의 정의(판별 기준 + 데이터셋 분류 + 컨테이너 키 + 자식 task)."""
 
-    key: str  # train_eval 컨테이너 디스패치 키(= 기존 model_kind): "yolox" | "esm2"
+    key: str  # train_eval 컨테이너 디스패치 키(= 기존 model_kind): "yolox" | "esm2" | "esmc"
     model_type: ModelTypeEnum  # 이 군이 가져야 할 모델 타입(coarse: ODM | BFM). base·자식 공통(전이 안 함)
     dataset_kind: DatasetKindEnum  # 이 군이 요구하는 데이터셋 분류
     output_task: str  # 파인튜닝 자식이 가질 task(fine). yolox=object-detection, esm2=protein-classification
@@ -54,6 +58,13 @@ TRAINABLE_FAMILIES: tuple[TrainableFamily, ...] = (
         dataset_kind=DatasetKindEnum.PROTEIN_CLASSIFICATION,
         output_task=ModelTaskType.PROTEIN_CLASSIFICATION.value,
         match_repo_ids=ESM2_SUPPORTED_REPO_IDS,
+    ),
+    TrainableFamily(
+        key="esmc",
+        model_type=ModelTypeEnum.BFM,
+        dataset_kind=DatasetKindEnum.PROTEIN_CLASSIFICATION,
+        output_task=ModelTaskType.PROTEIN_CLASSIFICATION.value,
+        match_repo_ids=ESMC_SUPPORTED_REPO_IDS,
     ),
 )
 

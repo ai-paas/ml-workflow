@@ -104,7 +104,15 @@ def _resolve_esm_save_args(save_period: str, epochs: int) -> dict:
 
 
 class EsmFineTuner:
-    """ESM2 LoRA 파인튜너. train_eval.CustomTrainModel 과 동일한 preprocess/train 인터페이스."""
+    """ESM2 LoRA 파인튜너. train_eval.CustomTrainModel 과 동일한 preprocess/train 인터페이스.
+
+    preprocess/데이터셋/Trainer 파이프라인은 BFM 공통이라 ESMC 파인튜너가 이 클래스를 상속해
+    _resolve_base_path/_build_peft_model 만 재정의한다(로그 라벨은 MODEL_KIND).
+    """
+
+    MODEL_KIND = "ESM2"
+    #: 혼합정밀. ESM2 는 fp16, ESMC 는 bf16(넓은 동적범위로 학습 안정 + 서빙과 정밀도 통일)로 재정의.
+    USE_BF16 = False
 
     def __init__(
         self,
@@ -241,15 +249,8 @@ class EsmFineTuner:
         ds = ds.rename_column("label", "labels")
         return ds
 
-    def train(self):
-        """ESM2 + LoRA 학습 후 어댑터를 MLflow 'adapter' 아티팩트로 등록."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        base_path = self._resolve_base_path()
-        logger.info(f"ESM2 base 로드 경로: {base_path}")
-        tokenizer = AutoTokenizer.from_pretrained(base_path)
-        ds = self._build_datasets(tokenizer)
-
+    def _build_peft_model(self, base_path: str):
+        """base 모델을 LoRA(PEFT) 로 감싸 반환. ESMC 파인튜너가 아키텍처에 맞게 재정의한다."""
         model = EsmForSequenceClassification.from_pretrained(base_path, num_labels=2)
         peft_config = LoraConfig(
             task_type="SEQ_CLS",
@@ -266,12 +267,25 @@ class EsmFineTuner:
             model.base_model.model.classifier.modules_to_save.default.dropout.p = 0.25
         except AttributeError:
             logger.warning("classifier dropout 패치를 적용하지 못했습니다(구조 상이). 무시하고 진행합니다.")
+        return model
+
+    def train(self):
+        """base(ESM2/ESMC) + LoRA 학습 후 어댑터를 MLflow 'adapter' 아티팩트로 등록."""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        base_path = self._resolve_base_path()
+        logger.info(f"{self.MODEL_KIND} base 로드 경로: {base_path}")
+        tokenizer = AutoTokenizer.from_pretrained(base_path)
+        ds = self._build_datasets(tokenizer)
+
+        model = self._build_peft_model(base_path)
 
         epochs_int = int(self.epochs)
         save_args = _resolve_esm_save_args(self.save_period, epochs_int)
         training_args = TrainingArguments(
             seed=42,
-            fp16=torch.cuda.is_available(),
+            fp16=torch.cuda.is_available() and not self.USE_BF16,
+            bf16=torch.cuda.is_available() and self.USE_BF16,
             output_dir=str(self.output_dir),
             eval_strategy="epoch",
             logging_strategy="epoch",
@@ -328,7 +342,7 @@ class EsmFineTuner:
             trainer.save_model(str(adapter_dir))
             tokenizer.save_pretrained(str(adapter_dir))
             mlflow.log_artifacts(str(adapter_dir), artifact_path="adapter")
-            logger.info(f"ESM2 LoRA 어댑터 등록 완료: {adapter_dir} → mlflow artifact 'adapter'")
+            logger.info(f"{self.MODEL_KIND} LoRA 어댑터 등록 완료: {adapter_dir} → mlflow artifact 'adapter'")
 
     def postprocess(self):
         """현재 단계에서는 별도 후처리 없음 (모델 등록은 register_model 컴포넌트가 수행)."""

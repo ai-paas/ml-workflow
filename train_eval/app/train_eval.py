@@ -15,8 +15,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     """학습 entrypoint argparse. YOLOX/ESM2 공통. (transformers/peft 를 import 하지 않는다.)"""
     parser = argparse.ArgumentParser(description="커스텀 모델 학습")
 
-    # 모델군 분기 키 (yolox | esm2)
-    parser.add_argument("--model_kind", type=str, required=True, choices=["yolox", "esm2"], help="모델군")
+    # 모델군 분기 키 (yolox | esm2 | esmc)
+    parser.add_argument("--model_kind", type=str, required=True, choices=["yolox", "esm2", "esmc"], help="모델군")
 
     # 기본 설정
     parser.add_argument("--train_name", type=str, required=True, help="학습 실행명")
@@ -59,15 +59,18 @@ def main():
     """메인 함수 — --model_kind 로 YOLOX / ESM2 분기."""
     args = build_arg_parser().parse_args()
 
-    # ESM2 분기: transformers/peft 는 이 경로에서만 lazy import 된다.
-    if args.model_kind == "esm2":
-        from app.esm2_finetuner import EsmFineTuner
+    # BFM 분기(ESM2/ESMC): transformers/peft 는 이 경로에서만 lazy import 된다.
+    if args.model_kind in ("esm2", "esmc"):
+        if args.model_kind == "esmc":
+            from app.esmc_finetuner import EsmcFineTuner as FineTuner
+        else:
+            from app.esm2_finetuner import EsmFineTuner as FineTuner
 
-        runner = EsmFineTuner.from_args(args)
+        runner = FineTuner.from_args(args)
         try:
             runner.preprocess()
             runner.train()
-            logger.info("ESM2 학습 완료!")
+            logger.info(f"{args.model_kind} 학습 완료!")
         except Exception as e:
             logger.error(f"작업 중 오류 발생: {e}")
             traceback.print_exc()
