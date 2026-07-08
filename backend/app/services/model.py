@@ -1595,9 +1595,9 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         # 아래 리소스는 추정치다(실제 6B 등록·배포 전 클러스터에서 검증 필요).
         # bf16 로드 시 가중치 ~12GB + 활성. vram_need 는 멀티GPU 샤딩 장수 계산에 쓰인다.
         "serving_vram_need_bytes": 16 * _GIB,
-        "serving_memory_request_gpu": "16Gi",
+        "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 1000,
-        "serving_memory_request_cpu": "16Gi",
+        "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 2000,
         # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 30Gi.
         "serving_ephemeral_storage_limit": "30Gi",

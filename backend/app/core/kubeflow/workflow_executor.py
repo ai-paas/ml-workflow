@@ -1122,8 +1122,10 @@ class WorkflowExecutor:
                     logger.info(f"Deploying model service {service_name}")
                     kserve_client.create(inference_service, namespace=namespace)
 
-                    # 서비스가 준비될 때까지 대기 (최대 10분, ephemeral-storage 문제 대응)
-                    max_wait = 600  # 10분으로 증가
+                    # 서비스가 준비될 때까지 대기. 대형 모델(예: ESMC-6B 24GB)은 파드가 MLflow 에서 아티팩트를
+                    # 내려받아 로드하는 콜드스타트가 길어 10분으론 부족하다. 치명 실패(ImagePull 등)는 아래에서
+                    # 조기 abort 하므로, 상한만 30분으로 둔다.
+                    max_wait = 1800  # 30분
                     wait_interval = 15  # 15초 간격
                     elapsed = 0
                     service_ready = False
