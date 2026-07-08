@@ -6,7 +6,13 @@
 """
 
 import argparse
+import os
 import traceback
+
+# 대형 모델(예: ESMC-6B) 학습 시 PyTorch CUDA caching allocator 의 expandable_segments 가 NVML 로 여유
+# 메모리를 조회하다 컨테이너 환경에서 실패("NVML_SUCCESS == r INTERNAL ASSERT")하는 사례가 있어 끈다.
+# torch import(각 분기 lazy) 전에 세팅해야 하므로 진입점 최상단에 둔다.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
 
 from loguru import logger
 

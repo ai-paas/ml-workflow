@@ -1599,8 +1599,8 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_gpu_pod_cpu_request_millicores": 1000,
         "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 2000,
-        # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 30Gi.
-        "serving_ephemeral_storage_limit": "30Gi",
+        # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 26Gi.
+        "serving_ephemeral_storage_limit": "26Gi",
     },
     "yolox_s": {
         "name": "yolox_s",

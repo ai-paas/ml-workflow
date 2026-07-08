@@ -21,7 +21,9 @@ MLFLOW_TO_EXPERIMENT_STATUS = {
 
 POLL_INTERVAL = 3
 RUN_ID_WAIT_INTERVAL = 5
-RUN_ID_WAIT_MAX = 300
+# 학습 파드는 base 모델을 내려받아 로드한 뒤에야 MLflow run 을 만든다. 대형 모델(예: ESMC-6B 24GB)은
+# 이 선작업(다운로드+bf16 로드)이 길어 300초로는 "run 미생성"으로 오판된다 → 30분으로 둔다.
+RUN_ID_WAIT_MAX = 1800
 
 
 def build_loss_history(loss_history: list, epoch_history: list) -> list[dict]:
