@@ -690,11 +690,12 @@ class HuggingFaceModelService:
         * params
             * repo_id: str — HuggingFace 저장소 id (예: 'facebook/detr-resnet-50')
             * task: str — 모델 task. 'object-detection' 은 프로세서/모델을 인스턴스화해 저장하고,
-                          그 외(BFM fill-mask: esm2/rnafm/molformer 등)는 원본 스냅샷을 그대로 저장한다.
+                          그 외(BFM fill-mask: esm2/rnafm/molformer, 구조예측: esmfold2 등)는 원본 스냅샷을
+                          그대로 저장한다(backend 는 인스턴스화하지 않고 서빙 predictor 가 로드).
 
         * return: 저장된 로컬 디렉토리 경로
         """
-        # object-detection 외 task(BFM fill-mask 등)는 원본 HF 스냅샷을 그대로 받아 저장한다.
+        # object-detection 외 task(BFM fill-mask·protein-structure-prediction 등)는 원본 HF 스냅샷을 받아 저장한다.
         # backend 는 모델을 인스턴스화하지 않으므로 multimolecule/원격코드 의존이나 MaskedLM head 손실이
         # 없고, 서빙 predictor 가 로드한다. HF_TOKEN 은 사용하지 않으며(token=False), 접근 승인(gated)·
         # 인증이 필요한 저장소는 클라이언트 오류(400)로 반환한다.
@@ -1638,6 +1639,24 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_cpu_request_millicores": 2000,
         # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 26Gi.
         "serving_ephemeral_storage_limit": "26Gi",
+    },
+    "biohub/ESMFold2": {
+        "name": "biohub/ESMFold2",
+        "description": "ESMFold2 단백질 3D 구조 예측(서열→전원자 좌표+plddt/ptm). 추론 전용, 단일 GPU.",
+        "repo_id": "biohub/ESMFold2",
+        "task": "protein-structure-prediction",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        # 가중치 ~1.3GB 단일 GPU. 구조예측은 서열 길이 L 에 대해 O(L^2) pairwise 활성이 붙어
+        # 확산 샘플링 중 메모리가 증가하므로 가중치+활성 여유로 vram_need 6Gi 로 잡는다(추정, 배포 전 실측 필요).
+        "serving_vram_need_bytes": 6 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+        # 서빙 시 모델 파일(~1.3GB)을 Pod 로컬로 내려받으므로 기본 1Gi 로는 부족 → 3Gi.
+        "serving_ephemeral_storage_limit": "3Gi",
     },
     "yolox_s": {
         "name": "yolox_s",

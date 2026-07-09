@@ -57,6 +57,7 @@ class PredefinedModelKey(str, PyEnum):
     MOLFORMER_XL = "ibm-research/MoLFormer-XL-both-10pct"
     ESMC_300M = "biohub/ESMC-300M"
     ESMC_6B = "biohub/ESMC-6B"
+    ESMFOLD2 = "biohub/ESMFold2"
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
     QWQ_32B = "qwq:32b"

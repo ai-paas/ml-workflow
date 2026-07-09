@@ -42,6 +42,7 @@ from schemas.workflow import (
     ModelLLMTestResult,
     ModelODMTestResult,
     ModelProteinClassificationTestResult,
+    ModelStructurePredictionTestResult,
     ValidationCheckResponse,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
@@ -51,6 +52,7 @@ from schemas.workflow import (
     WorkflowListSchema,
     WorkflowMLTestResponse,
     WorkflowProteinClassificationTestResponse,
+    WorkflowProteinStructurePredictionTestResponse,
     WorkflowRAGTestResponse,
     WorkflowReadSchema,
     WorkflowTemplateBriefSchema,
@@ -3473,6 +3475,139 @@ async def _execute_fill_mask_inference(
         )
 
 
+async def _execute_structure_prediction_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    sequence: str,
+    num_loops: int,
+    num_sampling_steps: int,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """protein-structure-prediction(ESMFold2) 추론 실행. 서열 {sequence, num_loops, num_sampling_steps} 를
+    KServe predictor(ESMFold2Model)로 보내 전원자 구조(PDB)+신뢰도(plddt/ptm/iptm)를 받는다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 protein-structure-prediction 추론을 지원하지 않습니다.",
+        )
+    if not sequence:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="protein-structure-prediction model requires non-empty 'sequence'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe 구조예측 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 서열 매니저는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"sequence": sequence, "num_loops": num_loops, "num_sampling_steps": num_sampling_steps}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        # 구조예측은 확산 샘플링이라 fill-mask 보다 훨씬 오래 걸린다 → 타임아웃 상향(5분).
+        async with httpx.AsyncClient(timeout=300.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value,
+            result=ModelStructurePredictionTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"protein-structure-prediction inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
 # ============= Workflow Test Endpoints =============
 
 
@@ -3899,6 +4034,88 @@ async def test_fill_mask_workflow(
     return WorkflowFillMaskTestResponse(
         workflow_id=workflow_id,
         execution_order=[c.id for c in fm_components],
+        results=results,
+    )
+
+
+@router.post(
+    "/{workflow_id}/test/protein-structure-prediction",
+    response_model=WorkflowProteinStructurePredictionTestResponse,
+)
+async def test_protein_structure_prediction_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    sequence: str = Body(..., embed=True, description="구조를 예측할 단백질 서열"),
+    num_loops: int = Body(3, embed=True, description="ESMFold2 recycling loop 수"),
+    num_sampling_steps: int = Body(50, embed=True, description="확산 샘플링 스텝 수"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    protein-structure-prediction(ESMFold2) 워크플로우 테스트.
+
+    단백질 서열을 배포된 ESMFold2 모델에 보내 전원자 3D 구조(PDB)와 신뢰도(plddt/ptm/iptm)를 받는다.
+    fill-mask/protein-classification 과 달리 AutoModel 이 아니라 vendored ESMFold2Model.infer_protein 경로다.
+
+    ## Request Body (JSON)
+    - **sequence** (str, required): 구조를 예측할 단백질 서열
+    - **num_loops** (int, optional, 기본 3): recycling loop 수
+    - **num_sampling_steps** (int, optional, 기본 50): 확산 샘플링 스텝 수
+
+    ## Response (WorkflowProteinStructurePredictionTestResponse)
+    - **results[].result** (ModelStructurePredictionTestResult): `predictions`(pdb/plddt_mean/ptm/iptm) + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **task 가 protein-structure-prediction 이 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - 구조예측은 확산 샘플링으로 추론이 오래 걸릴 수 있다(타임아웃 5분).
+
+    ## Errors
+    - 400: 해당 task 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — task 가 protein-structure-prediction 이 아니면 거부, 하나도 없어도 거부.
+    sp_task = ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value
+    sp_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != sp_task:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"protein-structure-prediction 전용 추론 엔드포인트입니다. 비-구조예측 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
+                )
+            sp_components.append(component)
+
+    if not sp_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="protein-structure-prediction 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in sp_components:
+        results.append(
+            await _execute_structure_prediction_inference(
+                db, workflow.id, component, sequence, num_loops, num_sampling_steps, workflow.service_id, current_user
+            )
+        )
+
+    return WorkflowProteinStructurePredictionTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in sp_components],
         results=results,
     )
 

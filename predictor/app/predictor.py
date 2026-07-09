@@ -16,6 +16,7 @@ from app.model_manager.onnx.image_processing import OnnxModelManager
 from app.model_manager.pytorch.fill_mask import FillMaskModelManager
 from app.model_manager.pytorch.image_processing import ImageProcessingModelManager
 from app.model_manager.pytorch.protein_classification import ProteinClassificationModelManager
+from app.model_manager.pytorch.structure_prediction import StructurePredictionModelManager
 from app.model_manager.yolox import YoloxModelManager
 from kserve import InferInput, InferOutput, InferResponse, Model, ModelServer, logging
 from kserve.model import PredictorConfig
@@ -37,6 +38,7 @@ class ModelManagerFactory:
         ("pytorch", "object-detection"): ImageProcessingModelManager,  # detr, yolos
         ("pytorch", "protein-classification"): ProteinClassificationModelManager,  # ESM2 파인튜닝 자식 (결합 분류)
         ("pytorch", "fill-mask"): FillMaskModelManager,  # base BFM(ESM2/ESMC/RNA-FM/MoLFormer) MaskedLM 서빙
+        ("pytorch", "protein-structure-prediction"): StructurePredictionModelManager,  # ESMFold2 구조예측
         ("yolox", "object-detection"): YoloxModelManager,  # yolox (model_format=yolox 로 framework 분리됨)
     }
 
@@ -179,9 +181,13 @@ class InferenceModel(Model):
 
             device_str = "gpu" if torch.cuda.is_available() else "cpu"
 
-            # 서열 기반 매니저(protein-classification, fill-mask): 이미지가 아니라 dict 페이로드
-            # (protein-classification={epitope,cdr3b} / fill-mask={sequence,top_k})를 그대로 전달
-            if isinstance(self.model_manager, (ProteinClassificationModelManager, FillMaskModelManager)):
+            # 서열 기반 매니저(protein-classification, fill-mask, protein-structure-prediction): 이미지가 아니라
+            # dict 페이로드(protein-classification={epitope,cdr3b} / fill-mask={sequence,top_k} /
+            # protein-structure-prediction={sequence,num_loops,num_sampling_steps})를 그대로 전달
+            if isinstance(
+                self.model_manager,
+                (ProteinClassificationModelManager, FillMaskModelManager, StructurePredictionModelManager),
+            ):
                 result = self.model_manager.predict(data=data, device_str=device_str)
                 return InferResponse(
                     response_id=generate_uuid(),

@@ -1,3 +1,7 @@
+# vendored/ 하위는 외부(Biohub 포크 등) 원본을 충실히 복사한 서드파티 코드다.
+# 원본 바이트를 보존하기 위해 모든 훅(flake8/isort/black/공백 정리 등)에서 제외한다.
+# (Makefile flake8 의 --exclude=*/vendored/* 와 동일 취지)
+exclude: '(^|/)vendored/'
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
