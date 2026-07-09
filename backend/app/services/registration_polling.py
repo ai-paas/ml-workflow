@@ -65,18 +65,14 @@ def poll_registration_status(
 ):
     """모델 등록 파이프라인의 KFP 상태를 폴링하여 experiment DB를 업데이트한다.
 
-    KFP 클라이언트(istio/dex 세션)는 루프 밖에서 1회 생성해 재사용한다.
-    폴링마다 새 KubeflowManager 를 만들면 매 폴링이 dex 로그인을 새로 일으켜
-    세션 churn 으로 KFP API 가 간헐적으로 403 Forbidden 을 반환한다. 인증/세션 오류가
-    나면 그때만 클라이언트를 재생성(재로그인)한다.
+    KubeflowManager 는 프로세스 싱글톤이라 Dex 세션을 TTL 동안 재사용한다(호출마다 재로그인하지 않음).
+    인증/세션 오류가 나면 refresh() 로 강제 재로그인한 뒤 다음 반복에서 재시도한다.
     """
     waited = 0
-    kf = None
+    kf = KubeflowManager()
 
     while waited < REG_POLL_MAX_WAIT:
         try:
-            if kf is None:
-                kf = KubeflowManager()  # 최초 1회 또는 직전 오류 후 재로그인
             run = kf.kfp_client.get_run(registration_run_id)
             kfp_status = _extract_kfp_run_status(run)
 
@@ -104,9 +100,12 @@ def poll_registration_status(
                 return
 
         except Exception as e:
-            # 인증/세션 오류(예: 403) 포함 — 다음 반복에서 클라이언트를 재생성해 재로그인한다.
-            logger.warning(f"Registration polling error for experiment {experiment_id} (세션 재생성 후 재시도): {e}")
-            kf = None
+            # 인증/세션 오류(예: 403) 포함 — 세션을 강제 재로그인한 뒤 다음 반복에서 재시도한다.
+            logger.warning(f"Registration polling error for experiment {experiment_id} (세션 재로그인 후 재시도): {e}")
+            try:
+                kf.refresh()
+            except Exception:
+                pass
 
         time.sleep(REG_POLL_INTERVAL)
         waited += REG_POLL_INTERVAL

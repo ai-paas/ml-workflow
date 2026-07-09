@@ -1069,8 +1069,13 @@ class WorkflowExecutor:
                         kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
                     # Predictor 스펙 생성 (§7: 백엔드에서 확정한 노드 → nodeSelector)
+                    # 대형 모델(ESMC-6B 24GB 등)은 아티팩트 다운로드+로드 콜드스타트가 Knative 기본
+                    # progress-deadline(600s)을 넘겨 "Initial scale was never achieved" 로 revision 이 실패한다.
+                    # 아래 폴링 상한(max_wait 30분)과 맞춰 예약 마감을 늘린다. 진짜 실패(ImagePull/CrashLoop 등)는
+                    # rollout 상태 감지로 여전히 조기 abort 되므로, 이 값을 키워도 정상 실패 감지는 그대로다.
                     pred_kwargs: Dict[str, Any] = {
                         "min_replicas": 1,
+                        "annotations": {"serving.knative.dev/progress-deadline": "1800s"},
                         "containers": [
                             client.V1Container(
                                 name="kserve-container",

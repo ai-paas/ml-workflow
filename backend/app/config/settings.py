@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     KUBEFLOW_PASSWORD: str = Field(..., description="Kubeflow 비밀번호")
     KUBEFLOW_NAMESPACE: str = Field(..., description="Kubeflow 네임스페이스")
     KUBEFLOW_EXPERIMENT_NAME: str = Field(..., description="Kubeflow 실험명")
+    KUBEFLOW_AUTH_SESSION_TTL_SEC: int = Field(
+        900,
+        description="Kubeflow(Dex) 로그인 세션 재사용 TTL(초). 이 시간 동안 세션을 재사용하고 만료·인증오류 시에만 "
+        "재로그인해, 잦은 폴링에서의 Dex 로그인 폭주(세션 churn → 간헐 403/No redirect)를 막는다.",
+    )
 
     TRAIN_IMAGE_URL: str = Field(..., description="학습 이미지 URL")
     INFER_IMAGE_URL: str = Field(..., description="추론 이미지 URL")

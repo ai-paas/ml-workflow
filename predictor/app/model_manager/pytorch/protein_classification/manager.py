@@ -90,6 +90,13 @@ class ProteinClassificationModelManager(BaseModelManager):
         base_model = AutoModelForSequenceClassification.from_pretrained(
             base_source, num_labels=2, device_map=device_map, dtype=load_dtype
         )
+        # ESMC(_bf16_if_esmc 가 bf16 반환): 학습과 동일하게 fused qkv/ffn 을 등가 nn.Linear 로 노출(surgery)해야
+        # 표준 target_modules LoRA 어댑터(layernorm_qkv.linear/ffn.fc1/ffn.fc2)가 이름 매칭돼 로드된다.
+        # 원본 vendored 코드는 불변, forward 수치 동일, 가중치 텐서 재사용. esm2 등 대상 모듈 없는 base 엔 no-op.
+        if load_dtype is not None:
+            from app.esmc_lora_ready import make_esmc_lora_ready
+
+            make_esmc_lora_ready(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
         self.model = PeftModel.from_pretrained(base_model, adapter_dir)
         self.model.eval()

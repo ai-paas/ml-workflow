@@ -43,6 +43,10 @@ DATASET_FILE = (os.environ.get("E2E_TRAINING_DATASET_FILE") or "").strip()
 # dataset_file 업로드 시 필수(데이터의 분류; api-spec §2.1). 데이터 파일과 짝지어 env 로 명시(모델 도출 아님).
 DATASET_KIND = (os.environ.get("E2E_TRAINING_DATASET_KIND") or "").strip()
 EPOCHS = (os.environ.get("E2E_TRAINING_EPOCHS") or "2").strip()
+# 미지정 시 백엔드가 모델별 recommended_hparams(또는 시스템 기본)로 채운다. 대형 모델 메모리 튜닝용.
+BATCH_SIZE = (os.environ.get("E2E_TRAINING_BATCH_SIZE") or "").strip()
+# GPU 개수(멀티GPU 모델 병렬 검증용). 미지정 시 백엔드 기본(recommended 또는 1).
+GPUS = (os.environ.get("E2E_TRAINING_GPUS") or "").strip()
 # 재등록은 모델명/실험명이 유니크해야 통과한다(백엔드가 중복 시 409 거부).
 # 베이스 이름(env 또는 기본 e2e-ft) 뒤에 uuid 를 잘라 붙여 런마다 유니크하게 만든다.
 _BASE_CHILD_MODEL_NAME = (os.environ.get("E2E_TRAINING_CHILD_MODEL_NAME") or "e2e-ft").strip()
@@ -114,6 +118,10 @@ class TestTrainingRegister:
             "description": "e2e training",
             "epochs": EPOCHS,
         }
+        if BATCH_SIZE:
+            data["batch_size"] = BATCH_SIZE
+        if GPUS:
+            data["gpus"] = GPUS
         files = None
         fh = None
         if DATASET_ID:

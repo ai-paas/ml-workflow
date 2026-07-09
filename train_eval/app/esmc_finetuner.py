@@ -6,17 +6,18 @@ ESM2 파인튜너(EsmFineTuner)의 preprocess/데이터셋/Trainer 파이프라�
 base 로드와 LoRA 대상만 ESMC 아키텍처에 맞게 재정의한다. train_eval.main() 의
 `--model_kind esmc` 분기에서만 lazy import 된다.
 
-■ LoRA 대상이 ESMC 공식 예시와 다른 이유
-  공식 예시는 target_modules=["layernorm_qkv.1","out_proj","ffn.1","ffn.3"] 인데, 이는
-  transformer_engine 이 설치돼 layernorm_qkv/ffn 이 nn.Sequential(그래서 .1/.3 이 nn.Linear)일 때의
-  이름이다. 우리 이미지엔 transformer_engine 이 없어 vendored 구현이 순수 PyTorch 로 폴백하며, 이때
-  QKV·FFN 가중치는 nn.Linear 가 아니라 커스텀 모듈 안의 raw nn.Parameter 다:
-    - attn.layernorm_qkv.weight (fused QKV, shape [3*d, d])
-    - ffn.fc1_weight, ffn.fc2_weight
-  그래서 이 셋은 peft target_parameters 로 잡고, 어텐션 출력 투영(attn.out_proj, nn.Linear)만
-  target_modules 로 잡는다. bare "out_proj" 는 분류 헤드의 classifier.out_proj 까지 매칭하므로
-  "attn.out_proj" 로 좁힌다. target_parameters(ParamWrapper)는 lora_dropout!=0 을 지원하지 않아
-  dropout=0 을 쓴다. train 컨테이너와 predictor 가 동일한 순수 PyTorch 폴백 구조라 어댑터가 그대로 호환된다.
+■ LoRA 대상 — fused qkv/ffn 을 nn.Linear 로 노출한 뒤 표준 target_modules 로 잡는다
+  ESMC(swiglu)는 attention 의 layernorm_qkv 와 ffn 이 nn.Linear 가 아니라 커스텀 모듈 안의 raw
+  nn.Parameter(layernorm_qkv.weight[3d,d], ffn.fc1_weight, ffn.fc2_weight)다. 이를 peft
+  target_parameters 로 잡으면 매 forward 마다 full-size 델타(weight_B@weight_A)를 base 에 병합해,
+  대형(6B) 학습에서 그 병합 사본 누적으로 단일 24GB GPU 에서 OOM 난다.
+  그래서 로드 후 esmc_lora_ready.make_esmc_lora_ready 로 이 fused 모듈을 등가 nn.Linear 로 노출하고
+  (원본 vendored 코드는 불변, forward 수치 동일, 가중치 텐서 재사용), 표준 target_modules 로 저랭크
+  LoRA(활성 저랭크 투영, full-size 델타 없음)를 건다:
+    layernorm_qkv.linear / ffn.fc1 / ffn.fc2 (노출된 nn.Linear) + attn.out_proj (원래 nn.Linear).
+  bare "out_proj" 는 분류 헤드의 classifier.out_proj 까지 매칭하므로 "attn.out_proj" 로 좁힌다.
+  표준 target_modules 경로라 lora_dropout!=0 도 지원된다. train 과 predictor 가 동일 surgery 를
+  적용하므로 어댑터 이름(...linear/fc1/fc2)이 양쪽에서 일치한다.
 
   task_type 은 None(generic PeftModel)으로 둔다. SEQ_CLS 래퍼는 base 로 inputs_embeds 를 주입하는데
   vendored ESMC forward 는 이를 받지 않아(표준 transformers 모델과 달리) 학습·추론 양쪽에서 깨진다.
@@ -24,7 +25,9 @@ base 로드와 LoRA 대상만 ESMC 아키텍처에 맞게 재정의한다. train
 """
 import torch
 from app.esm2_finetuner import EsmFineTuner
+from app.esmc_lora_ready import ESMC_LORA_TARGET_MODULES, make_esmc_lora_ready
 from app.vendored.esmc import ESMCForSequenceClassification  # import 부수효과로 esmc 를 Auto 레지스트리에 등록
+from loguru import logger
 from peft import LoraConfig, get_peft_model
 
 MODEL_ID = "biohub/ESMC-300M"
@@ -49,15 +52,18 @@ class EsmcFineTuner(EsmFineTuner):
     def _build_peft_model(self, base_path: str):
         # bf16 로 로드(frozen base 라 master-weight 정밀도 불필요, 서빙과 통일). LoRA 어댑터는 fp32 로 학습된다.
         model = ESMCForSequenceClassification.from_pretrained(base_path, num_labels=2, dtype=torch.bfloat16)
+        # fused qkv/ffn 을 등가 nn.Linear 로 노출(원본 불변, 수치 동일) → 표준 target_modules 저랭크 LoRA 가능.
+        # 이 surgery 로 6B 도 full-size 델타 병합 없이 단일 GPU 에 들어간다.
+        make_esmc_lora_ready(model)
+        logger.info(f"[esmc] LoRA-ready surgery 적용, target_modules={ESMC_LORA_TARGET_MODULES}")
         peft_config = LoraConfig(
             task_type=None,
             inference_mode=False,
             bias="none",
             r=8,
             lora_alpha=16,
-            lora_dropout=0.0,
-            target_modules=["attn.out_proj"],
-            target_parameters=["layernorm_qkv.weight", "ffn.fc1_weight", "ffn.fc2_weight"],
+            lora_dropout=0.05,
+            target_modules=ESMC_LORA_TARGET_MODULES,
             modules_to_save=["classifier"],
         )
         model = get_peft_model(model, peft_config)

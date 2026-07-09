@@ -9,11 +9,6 @@ import argparse
 import os
 import traceback
 
-# 대형 모델(예: ESMC-6B) 학습 시 PyTorch CUDA caching allocator 의 expandable_segments 가 NVML 로 여유
-# 메모리를 조회하다 컨테이너 환경에서 실패("NVML_SUCCESS == r INTERNAL ASSERT")하는 사례가 있어 끈다.
-# torch import(각 분기 lazy) 전에 세팅해야 하므로 진입점 최상단에 둔다.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
-
 from loguru import logger
 
 
@@ -68,7 +63,19 @@ def main():
     # BFM 분기(ESM2/ESMC): transformers/peft 는 이 경로에서만 lazy import 된다.
     if args.model_kind in ("esm2", "esmc"):
         if args.model_kind == "esmc":
+            # 대형 ESMC 는 MIG 슬라이스 등에서 PyTorch 기본 caching allocator 의 NVML 여유메모리 조회가
+            # "NVML_SUCCESS INTERNAL ASSERT" 로 죽는 경우가 있어, NVML 을 안 쓰는 CUDA async allocator 로
+            # 전환한다(torch CUDA 초기화 전이라 여기서 세팅해도 유효). esm2/yolox 경로는 건드리지 않는다.
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+            # allocator 가 실제로 무엇으로 켜졌는지 학습 로그에 남긴다('native' 면 폴백된 것).
+            import torch as _torch
             from app.esmc_finetuner import EsmcFineTuner as FineTuner
+
+            logger.info(
+                f"[esmc] PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF')!r} "
+                f"cuda_allocator_backend={_torch.cuda.get_allocator_backend()!r} "
+                f"cuda_device_count={_torch.cuda.device_count()}"
+            )
         else:
             from app.esm2_finetuner import EsmFineTuner as FineTuner
 

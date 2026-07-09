@@ -22,7 +22,7 @@
     미세한 수치 차이만). 필수 아님.
 
 ■ 출처(provenance)
-  github.com/Biohub/transformers  src/transformers/models/esmc/
+  https://github.com/Biohub/transformers/tree/main/src/transformers/models/esmc
   @ ef32577f55da19a4989cd7b22e004dc43a4998cb
   원본 대비 변경: 상대 import `from ...X` 를 `from transformers.X` 로 치환(패키지 위치 이동에 따른 것)한 것뿐.
   라이선스는 원본(Apache-2.0)을 따른다.
