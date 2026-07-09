@@ -48,6 +48,8 @@ class PredefinedModelKey(str, PyEnum):
     YOLOS_SMALL = "hustvl/yolos-small"
     DETR_RESNET_50 = "facebook/detr-resnet-50"
     DETR_RESNET_101 = "facebook/detr-resnet-101"
+    RF_DETR_LARGE = "Roboflow/rf-detr-large"
+    RF_DETR_MEDIUM = "Roboflow/rf-detr-medium"
     MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
     BGE_M3 = "bge-m3"
     ESM2_T6_8M = "facebook/esm2_t6_8M_UR50D"
@@ -61,6 +63,14 @@ class PredefinedModelKey(str, PyEnum):
     QWEN3_32B = "qwen3:32b"
     QWEN3_30B = "qwen3:30b"
     GPT_OSS_20B = "gpt-oss:20b"
+    # 신규 Ollama LLM(text-generation)
+    DEEPSEEK_R1_32B = "deepseek-r1:32b"
+    GRANITE4_1_30B = "granite4.1:30b"
+    LFM2_24B = "lfm2:24b"
+    # 신규 Ollama VQA/멀티모달(task=vqa, 당분간 text-generation 동일 추론)
+    GEMMA4_27B = "gemma4:27b"
+    QWEN3_6_27B = "qwen3.6:27b"
+    NEMOTRON3_33B = "nemotron3:33b"
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):

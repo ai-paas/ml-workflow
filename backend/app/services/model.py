@@ -728,8 +728,9 @@ class HuggingFaceModelService:
             model = AutoModelForObjectDetection.from_pretrained(repo_id)
 
             # 모델 설정을 확인하여 토크나이저 필요 여부 판단
+            # detr/yolos/rf_detr 는 비전 전용이라 텍스트 토크나이저가 없다(AutoTokenizer 로드 시 실패).
             config = AutoConfig.from_pretrained(repo_id)
-            if hasattr(config, "model_type") and (config.model_type == "detr" or config.model_type == "yolos"):
+            if hasattr(config, "model_type") and config.model_type in ("detr", "yolos", "rf_detr"):
                 tokenizer = None
             else:
                 tokenizer = AutoTokenizer.from_pretrained(repo_id)
@@ -1042,6 +1043,13 @@ class OllamaModelService:
             "ahmgam/medllama3-v20:latest": "7Gi",
             "taozhiyuai/openbiollm-llama-3:70b_q4_k_m": "45Gi",
             "gemma3:1b": "2Gi",
+            # 신규 6종 (다운로드 GB + 여유). text-generation 3 + VQA 3.
+            "deepseek-r1:32b": "22Gi",
+            "granite4.1:30b": "19Gi",
+            "lfm2:24b": "16Gi",
+            "gemma4:27b": "20Gi",
+            "qwen3.6:27b": "19Gi",
+            "nemotron3:33b": "30Gi",
         }
 
         # 정확한 매칭 우선
@@ -1473,6 +1481,37 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 2000,
     },
+    # RF-DETR: transformers 5.x 네이티브(model_type=rf_detr, RfDetrForObjectDetection). 서빙 전용(학습 안 함).
+    # 기존 (pytorch, object-detection) ImageProcessingModelManager 재사용 — 신규 매니저/엔드포인트 없음.
+    # 가중치 실측 ~34M(detr-resnet-50 41.6M 보다 가벼움) → large/medium 모두 2GiB.
+    "Roboflow/rf-detr-large": {
+        "name": "Roboflow/rf-detr-large",
+        "description": "RF-DETR Large (object-detection, 입력 704², 서빙 전용)",
+        "repo_id": "Roboflow/rf-detr-large",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "Roboflow/rf-detr-medium": {
+        "name": "Roboflow/rf-detr-medium",
+        "description": "RF-DETR Medium (object-detection, 입력 576², 서빙 전용)",
+        "repo_id": "Roboflow/rf-detr-medium",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
     "ahmgam/medllama3-v20:latest": {
         "name": "ahmgam-medllama3-v20-latest",
         "description": "ahmgam-medllama3-v20-latest",
@@ -1708,6 +1747,99 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 2000,
         "serving_memory_request_cpu": "15Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    # ── 신규 Ollama 6종 (text-generation 3 + VQA 3) ──
+    # 자원 5키는 크기별 앵커 추정(§7.3), max_context_length 는 Ollama 실측 필요 — 배포 전 재확인.
+    # VQA 3종은 task=vqa 로 저장하되 당분간 text-generation 과 동일 추론(라우팅 alias, §8.4).
+    "deepseek-r1:32b": {
+        "name": "deepseek-r1-32b",
+        "description": "DeepSeek-R1 32B (text-generation)",
+        "repo_id": "deepseek-r1:32b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 26 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "24Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    "granite4.1:30b": {
+        "name": "granite4.1-30b",
+        "description": "Granite 4.1 30B (text-generation)",
+        "repo_id": "granite4.1:30b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 24 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "20Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    "lfm2:24b": {
+        "name": "lfm2-24b",
+        "description": "LFM2 24B (text-generation)",
+        "repo_id": "lfm2:24b",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 18 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "16Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    "gemma4:27b": {
+        "name": "gemma4-27b",
+        "description": "Gemma 4 27B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "repo_id": "gemma4:27b",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 22 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "18Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    "qwen3.6:27b": {
+        "name": "qwen3.6-27b",
+        "description": "Qwen3.6 27B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "repo_id": "qwen3.6:27b",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 22 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "18Gi",
+        "serving_cpu_request_millicores": 4000,
+    },
+    "nemotron3:33b": {
+        "name": "nemotron3-33b",
+        "description": "Nemotron3 33B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "repo_id": "nemotron3:33b",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 30 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        "serving_memory_request_cpu": "26Gi",
         "serving_cpu_request_millicores": 4000,
     },
 }

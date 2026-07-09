@@ -2506,6 +2506,20 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
         return image_bytes
 
 
+# task 라우팅 정규화 단일 지점(§8.4). task 는 DB·응답에는 원본(vqa 등) 그대로 저장하되, 라우팅/디스패치는
+# 정규화된 task 로만 판단한다 — vqa 는 당분간 text-generation 과 동일 추론(엔드포인트 공유)이라 여기서 접는다.
+# 이미지 입력(멀티모달) 추론을 붙일 때 이 맵에서 "vqa" 만 제거하면 vqa 전용 경로로 갈린다.
+# (현재 라우팅/검증은 model_type 축이라 VQA(type=LLM)는 이미 /test/rag 로 통과하며, task 단일축 전환 시 이 맵이 훅이 된다.)
+ROUTING_ALIAS = {"vqa": "text-generation"}
+
+
+def normalize_task(task: str | None) -> str | None:
+    """라우팅용 task 정규화(alias 적용). 원본 task 는 보존하고, 라우팅 판단에만 이 값을 쓴다."""
+    if task is None:
+        return None
+    return ROUTING_ALIAS.get(task, task)
+
+
 def _validate_rag_workflow(db: Session, workflow: Workflow) -> None:
     """
     RAG 워크플로우 검증 (MODEL 컴포넌트나 KNOWLEDGE_BASE 컴포넌트 중 하나라도 있는지 확인)
