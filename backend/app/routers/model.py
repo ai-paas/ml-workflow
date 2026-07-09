@@ -215,14 +215,20 @@ def auto_generate_model(
         - `hustvl/yolos-small`: YOLOS Small (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-50`: DETR ResNet-50 (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-large`: RF-DETR Large (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-medium`: RF-DETR Medium (object-detection, HuggingFace, pytorch)
         - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
         - `bge-m3`: BGE-M3 Embedding (embedding, Ollama, gguf)
         - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `qwq:32b`: QwQ-32B (text-generation, Ollama, gguf)
-        - `qwen3:32b`: Qwen3-32B (text-generation, Ollama, gguf)
-        - `qwen3:30b`: Qwen3-30B (text-generation, Ollama, gguf)
         - `gpt-oss:20b`: GPT-OSS-20B (text-generation, Ollama, gguf)
+        - `deepseek-r1:32b`: DeepSeek-R1 32B (text-generation, Ollama, gguf)
+        - `granite4.1:30b`: Granite 4.1 30B (text-generation, Ollama, gguf)
+        - `lfm2:24b`: LFM2 24B (text-generation, Ollama, gguf)
+        - `gemma4:27b`: Gemma 4 27B (vqa, Ollama, gguf)
+        - `qwen3.6:27b`: Qwen3.6 27B (vqa, Ollama, gguf)
+        - `nemotron3:33b`: Nemotron3 33B (vqa, Ollama, gguf)
 
     ## Response (ModelBriefReadSchema)
     `POST /api/v1/models`와 동일한 응답 형식

@@ -60,8 +60,6 @@ class PredefinedModelKey(str, PyEnum):
     YOLOX_S = "yolox_s"
     YOLOX_M = "yolox_m"
     QWQ_32B = "qwq:32b"
-    QWEN3_32B = "qwen3:32b"
-    QWEN3_30B = "qwen3:30b"
     GPT_OSS_20B = "gpt-oss:20b"
     # 신규 Ollama LLM(text-generation)
     DEEPSEEK_R1_32B = "deepseek-r1:32b"

@@ -1034,23 +1034,19 @@ class OllamaModelService:
         Returns:
             str: Storage 용량 (예: "2Gi", "21Gi")
         """
+        # 용량은 PREDEFINED_MODEL_CONFIGS 각 엔트리의 `ollama_pvc_storage` 를 단일 진실원천으로 쓴다.
+        # 사전정의(PREDEFINED)에 없지만 등록될 수 있는 커스텀 Ollama 모델만 아래 폴백/기본값으로 처리한다.
         storage_map = {
-            "bge-m3": "2Gi",
-            "qwq:32b": "22Gi",
-            "qwen3:32b": "22Gi",
-            "qwen3:30b": "21Gi",
-            "gpt-oss:20b": "16Gi",
-            "ahmgam/medllama3-v20:latest": "7Gi",
-            "taozhiyuai/openbiollm-llama-3:70b_q4_k_m": "45Gi",
-            "gemma3:1b": "2Gi",
-            # 신규 6종 (다운로드 GB + 여유). text-generation 3 + VQA 3.
-            "deepseek-r1:32b": "22Gi",
-            "granite4.1:30b": "19Gi",
-            "lfm2:24b": "16Gi",
-            "gemma4:27b": "20Gi",
-            "qwen3.6:27b": "19Gi",
-            "nemotron3:33b": "30Gi",
+            name: cfg["ollama_pvc_storage"]
+            for name, cfg in PREDEFINED_MODEL_CONFIGS.items()
+            if cfg.get("ollama_pvc_storage")
         }
+        storage_map.update(
+            {
+                "taozhiyuai/openbiollm-llama-3:70b_q4_k_m": "45Gi",
+                "gemma3:1b": "2Gi",
+            }
+        )
 
         # 정확한 매칭 우선
         if ollama_model_name in storage_map:
@@ -1516,6 +1512,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "ahmgam-medllama3-v20-latest",
         "description": "ahmgam-medllama3-v20-latest",
         "repo_id": "ahmgam/medllama3-v20:latest",
+        "ollama_pvc_storage": "7Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
@@ -1531,6 +1528,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "bge-m3",
         "description": "bge-m3",
         "repo_id": "bge-m3",
+        "ollama_pvc_storage": "2Gi",
         "task": "embedding",
         "provider_name": "ollama",
         "type_name": "Embedding",
@@ -1693,6 +1691,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "qwq-32b",
         "description": "qwq-32b",
         "repo_id": "qwq:32b",
+        "ollama_pvc_storage": "22Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
@@ -1702,42 +1701,13 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 2000,
         "serving_memory_request_cpu": "24Gi",
-        "serving_cpu_request_millicores": 4000,
-    },
-    "qwen3:32b": {
-        "name": "qwen3-32b",
-        "description": "qwen3-32b",
-        "repo_id": "qwen3:32b",
-        "task": "text-generation",
-        "provider_name": "ollama",
-        "type_name": "LLM",
-        "format_name": "gguf",
-        "max_context_length": 40_960,
-        "serving_vram_need_bytes": 26 * _GIB,
-        "serving_memory_request_gpu": "4Gi",
-        "serving_gpu_pod_cpu_request_millicores": 2000,
-        "serving_memory_request_cpu": "24Gi",
-        "serving_cpu_request_millicores": 4000,
-    },
-    "qwen3:30b": {
-        "name": "qwen3-30b",
-        "description": "qwen3-30b",
-        "repo_id": "qwen3:30b",
-        "task": "text-generation",
-        "provider_name": "ollama",
-        "type_name": "LLM",
-        "format_name": "gguf",
-        "max_context_length": 262_144,
-        "serving_vram_need_bytes": 24 * _GIB,
-        "serving_memory_request_gpu": "4Gi",
-        "serving_gpu_pod_cpu_request_millicores": 2000,
-        "serving_memory_request_cpu": "20Gi",
         "serving_cpu_request_millicores": 4000,
     },
     "gpt-oss:20b": {
         "name": "gpt-oss-20b",
         "description": "gpt-oss-20b",
         "repo_id": "gpt-oss:20b",
+        "ollama_pvc_storage": "16Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
@@ -1754,8 +1724,9 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     # VQA 3종은 task=vqa 로 저장하되 당분간 text-generation 과 동일 추론(라우팅 alias, §8.4).
     "deepseek-r1:32b": {
         "name": "deepseek-r1-32b",
-        "description": "DeepSeek-R1 32B (text-generation)",
+        "description": "DeepSeek-R1 32B — 오픈 추론 모델(성능 O3/Gemini 2.5 Pro 근접). text-generation.",
         "repo_id": "deepseek-r1:32b",
+        "ollama_pvc_storage": "22Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
@@ -1769,8 +1740,9 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "granite4.1:30b": {
         "name": "granite4.1-30b",
-        "description": "Granite 4.1 30B (text-generation)",
+        "description": "IBM Granite 4.1 30B — 다국어·코딩·RAG·툴사용·JSON 출력(Apache 2.0). text-generation.",
         "repo_id": "granite4.1:30b",
+        "ollama_pvc_storage": "19Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
@@ -1784,13 +1756,14 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "lfm2:24b": {
         "name": "lfm2-24b",
-        "description": "LFM2 24B (text-generation)",
+        "description": "LFM2 24B — 온디바이스용 하이브리드 모델(24B-A2B). text-generation.",
         "repo_id": "lfm2:24b",
+        "ollama_pvc_storage": "16Gi",
         "task": "text-generation",
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
-        "max_context_length": 131_072,
+        "max_context_length": 32_768,
         "serving_vram_need_bytes": 18 * _GIB,
         "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 2000,
@@ -1799,13 +1772,14 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "gemma4:27b": {
         "name": "gemma4-27b",
-        "description": "Gemma 4 27B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "description": "Gemma 4 27B — 추론·에이전트·코딩·멀티모달. VQA(Text+Image), 현재 텍스트 전용 서빙.",
         "repo_id": "gemma4:27b",
+        "ollama_pvc_storage": "20Gi",
         "task": "vqa",
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
-        "max_context_length": 131_072,
+        "max_context_length": 262_144,
         "serving_vram_need_bytes": 22 * _GIB,
         "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 2000,
@@ -1814,13 +1788,14 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "qwen3.6:27b": {
         "name": "qwen3.6-27b",
-        "description": "Qwen3.6 27B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "description": "Qwen3.6 27B — dense/MoE 최신 세대. VQA(Text+Image), 현재 텍스트 전용 서빙.",
         "repo_id": "qwen3.6:27b",
+        "ollama_pvc_storage": "19Gi",
         "task": "vqa",
         "provider_name": "ollama",
         "type_name": "LLM",
         "format_name": "gguf",
-        "max_context_length": 131_072,
+        "max_context_length": 262_144,
         "serving_vram_need_bytes": 22 * _GIB,
         "serving_memory_request_gpu": "4Gi",
         "serving_gpu_pod_cpu_request_millicores": 2000,
@@ -1829,8 +1804,9 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "nemotron3:33b": {
         "name": "nemotron3-33b",
-        "description": "Nemotron3 33B (VQA/멀티모달, 현재 텍스트 전용 서빙)",
+        "description": "NVIDIA Nemotron 3 Nano Omni 33B — video/audio/image/text 멀티모달 Q&A·요약·전사. VQA, 현재 텍스트 전용 서빙.",
         "repo_id": "nemotron3:33b",
+        "ollama_pvc_storage": "30Gi",
         "task": "vqa",
         "provider_name": "ollama",
         "type_name": "LLM",
