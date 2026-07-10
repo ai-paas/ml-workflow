@@ -43,17 +43,6 @@ from schemas.model import (
 )
 from services.model_base_deployment import ModelBaseDeploymentService
 from sqlalchemy.orm import Session, joinedload
-from transformers import (
-    AutoConfig,
-    AutoModelForObjectDetection,
-    AutoProcessor,
-    AutoTokenizer,
-    CLIPTokenizer,
-    Owlv2ForObjectDetection,
-    Owlv2ImageProcessor,
-    Owlv2Processor,
-    Owlv2TextModel,
-)
 from utils.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
@@ -703,71 +692,39 @@ class HuggingFaceModelService:
         """
         HuggingFace 모델을 내려받아 MLflow 등록용 로컬 디렉토리 경로를 반환한다.
 
+        모든 task(object-detection 포함)에서 **원본 HF 스냅샷을 그대로 저장**한다. backend 는 모델을
+        인스턴스화하지 않으므로 backend transformers 버전과 무관하게 등록된다 — 예: rf_detr 처럼 최신
+        아키텍처(transformers 5.8+ 네이티브)도 backend 구버전에 막히지 않고, 서빙 predictor(최신
+        transformers)가 로드한다. vision 전용(detr/yolos/rf_detr)·MaskedLM(esm2/rnafm/molformer)·
+        구조예측(esmfold2) 모두 동일 경로다. HF_TOKEN 은 쓰지 않으며(token=False), 접근 승인(gated)·
+        인증이 필요한 저장소는 클라이언트 오류(400)로 반환한다.
+
         * params
             * repo_id: str — HuggingFace 저장소 id (예: 'facebook/detr-resnet-50')
-            * task: str — 모델 task. 'object-detection' 은 프로세서/모델을 인스턴스화해 저장하고,
-                          그 외(BFM fill-mask: esm2/rnafm/molformer, 구조예측: esmfold2 등)는 원본 스냅샷을
-                          그대로 저장한다(backend 는 인스턴스화하지 않고 서빙 predictor 가 로드).
-
+            * task: str — 모델 task (로깅/메타용. 분기에는 쓰지 않는다).
         * return: 저장된 로컬 디렉토리 경로
         """
-        # object-detection 외 task(BFM fill-mask·protein-structure-prediction 등)는 원본 HF 스냅샷을 받아 저장한다.
-        # backend 는 모델을 인스턴스화하지 않으므로 multimolecule/원격코드 의존이나 MaskedLM head 손실이
-        # 없고, 서빙 predictor 가 로드한다. HF_TOKEN 은 사용하지 않으며(token=False), 접근 승인(gated)·
-        # 인증이 필요한 저장소는 클라이언트 오류(400)로 반환한다.
-        if task != ModelTaskType.OBJECT_DETECTION.value:
-            from huggingface_hub.utils import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+        from huggingface_hub.utils import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-            temp_dir = tempfile.mkdtemp()
-            try:
-                return snapshot_download(repo_id, token=False, local_dir=temp_dir)
-            except (GatedRepoError, RepositoryNotFoundError) as e:
+        temp_dir = tempfile.mkdtemp()
+        try:
+            # local_dir 에 원본 파일을 그대로 받고, 호출부가 MLflow 에 올릴 그 폴더(temp_dir)를 반환한다.
+            # (snapshot_download 의 반환값은 huggingface_hub 버전에 따라 캐시 경로일 수 있어 temp_dir 을 명시 반환.)
+            snapshot_download(repo_id, token=False, local_dir=temp_dir)
+            return temp_dir
+        except (GatedRepoError, RepositoryNotFoundError) as e:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"'{repo_id}' 는 HuggingFace 접근 승인/인증(HF_TOKEN)이 필요한 모델입니다. 토큰 없이 등록할 수 없습니다.",
+            ) from e
+        except HfHubHTTPError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (401, 403):
                 raise HTTPException(
                     status_code=http_status.HTTP_400_BAD_REQUEST,
-                    detail=f"'{repo_id}' 는 HuggingFace 접근 승인/인증(HF_TOKEN)이 필요한 모델입니다. 토큰 없이 등록할 수 없습니다.",
+                    detail=f"'{repo_id}' 접근에 HuggingFace 인증(HF_TOKEN)이 필요합니다. 토큰 없이 등록할 수 없습니다.",
                 ) from e
-            except HfHubHTTPError as e:
-                code = getattr(getattr(e, "response", None), "status_code", None)
-                if code in (401, 403):
-                    raise HTTPException(
-                        status_code=http_status.HTTP_400_BAD_REQUEST,
-                        detail=f"'{repo_id}' 접근에 HuggingFace 인증(HF_TOKEN)이 필요합니다. 토큰 없이 등록할 수 없습니다.",
-                    ) from e
-                raise
-
-        # object-detection: OWLV2 / AutoModelForObjectDetection 로 인스턴스화해 저장.
-        if repo_id.startswith(str(MODEL_NAME.OWLV2)):
-            processor = Owlv2Processor.from_pretrained(repo_id)
-            model = Owlv2ForObjectDetection.from_pretrained(repo_id)
-            tokenizer = CLIPTokenizer.from_pretrained(repo_id)
-        else:
-            processor = AutoProcessor.from_pretrained(repo_id)
-            model = AutoModelForObjectDetection.from_pretrained(repo_id)
-
-            # 모델 설정을 확인하여 토크나이저 필요 여부 판단
-            # detr/yolos/rf_detr 는 비전 전용이라 텍스트 토크나이저가 없다(AutoTokenizer 로드 시 실패).
-            config = AutoConfig.from_pretrained(repo_id)
-            if hasattr(config, "model_type") and config.model_type in ("detr", "yolos", "rf_detr"):
-                tokenizer = None
-            else:
-                tokenizer = AutoTokenizer.from_pretrained(repo_id)
-
-        components = {
-            "model": model,
-            "image_processor": processor,
-        }
-
-        if tokenizer is not None:
-            components["tokenizer"] = tokenizer
-
-        # 임시 디렉토리를 수동으로 생성하여 자동 삭제되지 않도록 함
-        temp_dir = tempfile.mkdtemp()
-        model.save_pretrained(temp_dir)
-        processor.save_pretrained(temp_dir)
-        if tokenizer is not None:
-            tokenizer.save_pretrained(temp_dir)
-
-        return temp_dir
+            raise
 
 
 class CustomModelService:
