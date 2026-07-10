@@ -42,7 +42,7 @@ from schemas.model import (
     ModelTypeReadSchema,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from transformers import (
     AutoConfig,
     AutoModelForObjectDetection,
@@ -666,7 +666,23 @@ class HuggingFaceModelService:
                 ),
             )
             write_db.commit()
-            return model_repository.get(write_db, model_id)
+            # write_db.close()(finally)로 반환 객체가 detach 되면, 응답 직렬화가
+            # provider_info/type_info/format_info/registry 관계를 지연 로드하려다
+            # DetachedInstanceError 로 실패한다(auto-generate 응답 500). 세션 내에서 이 관계들을
+            # 미리 즉시 로드(eager)한 뒤 expunge 해, 닫힌 세션과 무관하게 로드된 값으로 직렬화되게 한다.
+            result = (
+                write_db.query(Model)
+                .options(
+                    joinedload(Model.provider_info),
+                    joinedload(Model.type_info),
+                    joinedload(Model.format_info),
+                    joinedload(Model.registry),
+                )
+                .filter(Model.id == model_id)
+                .one()
+            )
+            write_db.expunge_all()
+            return result
         except Exception:
             write_db.rollback()
             # MLflow run(tracking) 과 S3 아티팩트를 함께 정리한다. delete_run 은 run 레코드만 지우고
@@ -1421,6 +1437,11 @@ class OllamaModelService:
 
 _GIB = 1024**3
 
+# ESMFold2(protein-structure-prediction)의 언어모델 백본. 추론에 필수이며(서열 임베딩=구조 신호의 핵심),
+# 서빙 시 런타임 HF 다운로드 대신 이 이름으로 등록된 MLflow 카탈로그본을 로컬 로드한다.
+# ESMFold2 config.esmc_id 와 동일해야 한다(vendored configuration_esmfold2._DEFAULT_ESMC_HF_REPO).
+ESMFOLD2_BACKBONE_MODEL_NAME = "biohub/ESMC-6B"
+
 PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "hustvl/yolos-tiny": {
         "name": "hustvl/yolos-tiny",
@@ -1642,21 +1663,23 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "biohub/ESMFold2": {
         "name": "biohub/ESMFold2",
-        "description": "ESMFold2 단백질 3D 구조 예측(서열→전원자 좌표+plddt/ptm). 추론 전용, 단일 GPU.",
+        "description": "ESMFold2 단백질 3D 구조 예측(서열→전원자 좌표+plddt/ptm). 백본 ESMC-6B 필요.",
         "repo_id": "biohub/ESMFold2",
         "task": "protein-structure-prediction",
         "provider_name": "huggingface",
         "type_name": "BFM",
         "format_name": "pytorch",
-        # 가중치 ~1.3GB 단일 GPU. 구조예측은 서열 길이 L 에 대해 O(L^2) pairwise 활성이 붙어
-        # 확산 샘플링 중 메모리가 증가하므로 가중치+활성 여유로 vram_need 6Gi 로 잡는다(추정, 배포 전 실측 필요).
-        "serving_vram_need_bytes": 6 * _GIB,
+        # ESMFold2 는 folding trunk(~1.3GB) 단독이 아니라 언어모델 백본 ESMC-6B(~25GB fp32)를 함께
+        # 로드해야 추론이 성립한다(서열 임베딩이 구조 신호의 핵심). 따라서 서빙 풋프린트는 ESMC-6B 급이다.
+        # ESMC-6B 는 bf16 로 GPU 에 올린다(~13GB) + folding trunk + 확산 활성 → VRAM 20GB.
+        "serving_vram_need_bytes": 20 * _GIB,
         "serving_memory_request_gpu": "4Gi",
-        "serving_gpu_pod_cpu_request_millicores": 1000,
+        "serving_gpu_pod_cpu_request_millicores": 2000,
+        # fp32 shard(~25GB)를 로드하는 동안 호스트 메모리 여유가 필요하다.
         "serving_memory_request_cpu": "4Gi",
         "serving_cpu_request_millicores": 2000,
-        # 서빙 시 모델 파일(~1.3GB)을 Pod 로컬로 내려받으므로 기본 1Gi 로는 부족 → 3Gi.
-        "serving_ephemeral_storage_limit": "3Gi",
+        # ESMC-6B(~25GB) + folding trunk(~1.3GB)를 Pod 로컬로 내려받아야 한다 → 30Gi.
+        "serving_ephemeral_storage_limit": "30Gi",
     },
     "yolox_s": {
         "name": "yolox_s",

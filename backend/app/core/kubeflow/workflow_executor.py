@@ -457,6 +457,28 @@ class WorkflowExecutor:
                         except Exception as base_err:
                             logger.warning(f"ESM2 base 위치 해석 실패(HF Hub fallback): {base_err}")
 
+                    # 구조예측(ESMFold2): 백본 ESMC-6B 를 로컬 로드해야 추론이 성립한다(런타임 HF 25GB 다운로드 회피).
+                    # 등록된 ESMC-6B 카탈로그의 MLflow 위치를 base 로 전달 → 서빙이 MLflow 에서 받아 load_esmc.
+                    elif task == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+                        try:
+                            from services.model import ESMFOLD2_BACKBONE_MODEL_NAME
+
+                            backbone = (
+                                db.query(Model)
+                                .options(joinedload(Model.registry))
+                                .filter(Model.name == ESMFOLD2_BACKBONE_MODEL_NAME)
+                                .first()
+                            )
+                            if backbone and backbone.registry:
+                                base_run_id = backbone.registry.run_id or ""
+                                base_model_uri = backbone.registry.uri or ""
+                            else:
+                                logger.warning(
+                                    f"ESMFold2 백본 {ESMFOLD2_BACKBONE_MODEL_NAME} 미등록 → 서빙이 HF Hub fallback"
+                                )
+                        except Exception as base_err:
+                            logger.warning(f"ESMFold2 백본(ESMC-6B) 위치 해석 실패(HF Hub fallback): {base_err}")
+
             from core.serving.serving_workflow_deployment_policy import (
                 parse_remote_serving_model_map,
                 resolve_workflow_serving_deployment_type,

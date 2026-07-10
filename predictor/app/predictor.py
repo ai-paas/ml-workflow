@@ -150,8 +150,10 @@ class InferenceModel(Model):
             mlflow.set_tracking_uri(self.mlflow_tracking_uri)
             mlflow.set_experiment(experiment_name=self.mlflow_experiment_name)
 
-            # protein-classification(ESM2): base 모델(MLflow) 위치를 매니저에 전달 → MLflow base + adapter 로드
-            if isinstance(self.model_manager, ProteinClassificationModelManager):
+            # base 모델(MLflow) 위치를 매니저에 전달:
+            #  - protein-classification(ESM2/ESMC): base = lineage root(카탈로그) → base + adapter 로드
+            #  - protein-structure-prediction(ESMFold2): base = 백본 ESMC-6B → folding trunk + load_esmc
+            if isinstance(self.model_manager, (ProteinClassificationModelManager, StructurePredictionModelManager)):
                 self.model_manager.base_run_id = self.base_run_id
                 self.model_manager.base_model_uri = self.base_model_uri
 

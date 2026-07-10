@@ -41,6 +41,9 @@ from config import (
     WORKFLOW_FILLMASK_TOP_K,
     WORKFLOW_ODM_TEST_IMAGE,
     WORKFLOW_PLM_TEST_SAMPLE,
+    WORKFLOW_STRUCTURE_NUM_LOOPS,
+    WORKFLOW_STRUCTURE_NUM_SAMPLING_STEPS,
+    WORKFLOW_STRUCTURE_TEST_SEQUENCE,
     workflow_primary_target_model_name,
 )
 from workflow.definitions import (
@@ -102,7 +105,7 @@ class TestWorkflowScenarioDeploy:
         model = self._find_model_by_name(api_url, auth_headers, target)
         assert model["id"]
         self.__class__.model = model
-        kind = {10: "ODM", 11: "pLM", 12: "BFM(fill-mask)"}.get(SCENARIO_NUM, "LLM")
+        kind = {10: "ODM", 11: "pLM", 12: "BFM(fill-mask)", 13: "BFM(structure-prediction)"}.get(SCENARIO_NUM, "LLM")
         print(f"\n✔ {kind} 모델 발견: id={model['id']}, name={model['name']}")
 
     def test_02_find_embedding_model(self, api_url: str, auth_headers: dict):
@@ -346,6 +349,18 @@ class TestWorkflowScenarioDeploy:
                 headers=auth_headers,
                 timeout=INFERENCE_TIMEOUT_SEC,
             )
+        elif inference_kind == "structure_prediction":
+            # 구조예측은 콜드스타트+확산 샘플링이라 fill-mask 보다 오래 걸린다 → 타임아웃 상향(5분).
+            resp = requests.post(
+                f"{api_url}/workflows/{wf_id}/test/protein-structure-prediction",
+                json={
+                    "sequence": WORKFLOW_STRUCTURE_TEST_SEQUENCE,
+                    "num_loops": WORKFLOW_STRUCTURE_NUM_LOOPS,
+                    "num_sampling_steps": WORKFLOW_STRUCTURE_NUM_SAMPLING_STEPS,
+                },
+                headers=auth_headers,
+                timeout=300,
+            )
         else:
             resp = requests.post(
                 f"{api_url}/workflows/{wf_id}/test/rag",
@@ -382,6 +397,21 @@ class TestWorkflowScenarioDeploy:
             tok0 = top["predictions"][0]
             assert "token" in tok0 and "score" in tok0, f"토큰 예측 형식 오류: {tok0}"
             print(f"  mask@pos{top.get('position')} top1: token={tok0.get('token')!r}, score={tok0.get('score')}")
+        elif inference_kind == "structure_prediction":
+            # 구조예측 응답: results[].result.predictions[0] 에 pdb 문자열 + plddt/ptm/iptm 신뢰도
+            result = data["results"][0]
+            assert (
+                result.get("task") == "protein-structure-prediction"
+            ), f"task 기대=protein-structure-prediction, 실제={result.get('task')}"
+            preds = (result.get("result") or {}).get("predictions") or []
+            assert preds, f"structure predictions 가 비어 있습니다: {result}"
+            top = preds[0]
+            pdb = top.get("pdb") or ""
+            assert pdb and "ATOM" in pdb, f"PDB 문자열이 비었거나 ATOM 레코드가 없습니다: keys={list(top.keys())}"
+            print(
+                f"  구조예측 성공: pdb_len={len(pdb)}, plddt_mean={top.get('plddt_mean')}, "
+                f"ptm={top.get('ptm')}, iptm={top.get('iptm')}"
+            )
         else:
             fr = data.get("final_result") or ""
             assert len(fr) > 0

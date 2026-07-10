@@ -9,7 +9,12 @@ class StructurePredictionModelManager(BaseModelManager):
 
     fill-mask/protein-classification 과 달리 AutoModel/transformers pipeline 경로가 아니라, vendored
     ESMFold2Model 을 직접 로드하고 model.infer_protein(seq, ...) 로 전원자 구조를 예측한다.
-    (ESMFold2 는 소형(~1.3GB)이라 단일 GPU 로 충분 — device_map/멀티GPU 불필요.)
+
+    ESMFold2 는 folding trunk(~1.3GB) 단독이 아니라 언어모델 백본 ESMC-6B(~25GB fp32)를 함께 로드해야
+    추론이 성립한다(서열 임베딩이 구조 신호의 핵심). ESMFold2 원본 from_pretrained 는 config.esmc_id
+    (=biohub/ESMC-6B)를 HF Hub 에서 런타임 다운로드하는데, 서빙에서는 이를 피하고 MLflow 에 등록된
+    ESMC-6B(base_run_id/base_model_uri)를 로컬로 받아 load_esmc 로 얹는다(HF 무인증 25GB 다운로드 회피).
+    base 위치가 없으면 원본 동작(config.esmc_id, HF)으로 폴백한다.
 
     입력 페이로드: {"sequence": "...", "num_loops": 3, "num_sampling_steps": 50}.
     출력: PDB 문자열 + 신뢰도(plddt 평균/ptm/iptm).
@@ -17,28 +22,52 @@ class StructurePredictionModelManager(BaseModelManager):
 
     DEFAULT_NUM_LOOPS = 3
     DEFAULT_NUM_SAMPLING_STEPS = 50
+    ESMC_PRECISION = "bf16"
 
     def __init__(self):
         super().__init__()
         self.model = None
         self.device = None
+        # 백본 ESMC-6B 의 MLflow 위치(InferenceModel 이 주입). 없으면 config.esmc_id(HF Hub) 폴백.
+        self.base_run_id = None
+        self.base_model_uri = None
 
     def load_model(self, model_name: str, run_id: str):
-        """MLflow run 아티팩트(ESMFold2 가중치)를 내려받아 로드한다."""
+        """MLflow run 아티팩트(ESMFold2 folding trunk)를 받고, 백본 ESMC-6B 를 로컬 로드해 결합한다."""
         import torch
 
-        # ESMFold2 는 upstream transformers 에 없어 vendored 구현을 import 해 Auto 레지스트리에 등록한다.
+        # ESMFold2/ESMC 는 upstream transformers 에 없어 vendored 구현을 import 해 Auto 레지스트리에 등록한다.
+        # (load_esmc 가 ESMCModel 을 사용하므로 esmc 등록도 필요.)
         from app.vendored.esmfold2 import ESMFold2Model
 
-        local_path = self._load_artifacts(run_id, model_name)
-        logging.logger.info(f"ESMFold2 모델 dir: {local_path}")
+        try:
+            import app.vendored.esmc  # noqa: F401
+        except Exception as e:
+            logging.logger.warning(f"vendored esmc 등록 실패: {e}")
 
-        self.model = ESMFold2Model.from_pretrained(local_path)
+        local_path = self._load_artifacts(run_id, model_name)
+        logging.logger.info(f"ESMFold2 folding trunk dir: {local_path}")
+
+        # 백본(ESMC-6B)은 별도로 얹으므로 folding trunk 만 먼저 로드(load_esmc=False → HF 런타임 다운로드 차단).
+        self.model = ESMFold2Model.from_pretrained(local_path, load_esmc=False)
         if torch.cuda.is_available():
             self.model = self.model.cuda()
+
+        # 백본 ESMC-6B: MLflow 등록본(base_run_id/base_model_uri)을 우선 로컬 로드, 없으면 config.esmc_id(HF) 폴백.
+        esmc_source = self.model.config.esmc_id
+        if self.base_run_id and self.base_model_uri:
+            try:
+                esmc_source = self._load_artifacts(self.base_run_id, self.base_model_uri)
+                logging.logger.info(f"ESMC-6B backbone (MLflow) dir: {esmc_source}")
+            except Exception as e:
+                logging.logger.warning(f"MLflow ESMC-6B 다운로드 실패, HF Hub({esmc_source}) 폴백: {e}")
+        else:
+            logging.logger.warning(f"base(ESMC-6B) 위치 미전달 → HF Hub({esmc_source}) 런타임 다운로드로 폴백")
+
+        self.model.load_esmc(esmc_source, precision=self.ESMC_PRECISION)
         self.model.eval()
-        self.device = next(self.model.parameters()).device
-        logging.logger.info("ESMFold2 구조예측 모델 로드 완료")
+        self.device = self.model.device
+        logging.logger.info("ESMFold2 구조예측 모델(+ESMC-6B 백본) 로드 완료")
 
     @staticmethod
     def _scalar(value):

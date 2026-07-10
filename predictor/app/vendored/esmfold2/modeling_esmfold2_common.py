@@ -56,7 +56,12 @@ try:
     )
 
     TRITON_KERNELS_AVAILABLE = True
-except ImportError:
+# [VENDOR PATCH] 원본(Biohub 포크)은 `except ImportError:` 였다. → `except Exception:` 으로 확장.
+#   triton 이 설치돼 있어도 autotune 데코레이터가 import 시점에 CUDA 드라이버를 초기화하는데,
+#   C 컴파일러(CC)가 없는 서빙 이미지에서는 RuntimeError("Failed to find C compiler")를 던진다.
+#   이는 ImportError 가 아니라 원본 가드에 안 걸려 모델 로드 전체가 크래시했다. 폭넓게 잡아,
+#   어떤 이유로든 커널 로드가 실패하면 순수 PyTorch 경로(TRITON_KERNELS_AVAILABLE=False)로 폴백한다.
+except Exception:
     _fused_pair_bias = None  # type: ignore[assignment]
     _fused_trimul_with_residual = None  # type: ignore[assignment]
     _FusedLNLinearSwiGLU = None  # type: ignore[assignment]

@@ -23,6 +23,7 @@ from schemas.model import (
 )
 from schemas.user import UserSchema
 from services.model import (
+    ESMFOLD2_BACKBONE_MODEL_NAME,
     PREDEFINED_MODEL_CONFIGS,
     CustomModelService,
     HuggingFaceModelService,
@@ -252,6 +253,18 @@ def auto_generate_model(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"유효하지 않은 model_key: {model_key}",
         )
+
+    # 구조예측(ESMFold2)은 언어모델 백본 ESMC-6B 가 추론에 필수이며 서빙 시 로컬(MLflow)에서 로드한다.
+    # 백본이 먼저 등록돼 있어야 서빙이 로컬 로드로 붙을 수 있으므로, 미등록이면 등록을 거부한다.
+    if config.get("task") == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+        if not ModelService.get_by_name(db, ESMFOLD2_BACKBONE_MODEL_NAME):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"'{model_key}' 등록에는 백본 모델 '{ESMFOLD2_BACKBONE_MODEL_NAME}' 이 먼저 등록돼 있어야 합니다. "
+                    f"'{ESMFOLD2_BACKBONE_MODEL_NAME}' 을 먼저 등록한 뒤 다시 시도하세요."
+                ),
+            )
 
     # 가중치 다운로드 전 모델명 중복 사전 체크(조기 종료) — 단일 가드 메서드 재사용.
     # (register_model 도 같은 메서드를 호출해 동시성/타 경로까지 최종 보장한다.)

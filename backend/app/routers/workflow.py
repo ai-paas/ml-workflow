@@ -1566,6 +1566,45 @@ async def finalize_workflow_deletion(
 # ============= Workflow Execution =============
 
 
+def _structure_prediction_backbone_error(db: Session, model_ids: List[int]) -> Optional[str]:
+    """구조예측(ESMFold2) 모델이 포함되면 백본 ESMC-6B 등록(+MLflow run) 여부를 검사한다.
+
+    문제가 있으면 오류 메시지, 문제 없음(또는 구조예측 모델 없음)이면 None 을 반환한다.
+    ESMFold2 는 추론에 언어모델 백본 ESMC-6B 가 필수이며, 서빙 시 런타임 HF 다운로드 대신 등록된
+    ESMC-6B 의 MLflow 본을 로컬 로드한다. 백본이 등록(+run)돼 있지 않으면 서빙이 성립하지 않는다.
+    이 헬퍼를 구조 검증(_validate_workflow_definition_checks)과 배포(execute) 양쪽에서 공유한다.
+    """
+    from services.model import ESMFOLD2_BACKBONE_MODEL_NAME
+
+    needs_backbone = False
+    for mid in model_ids:
+        if not mid:
+            continue
+        model = ModelService.get(db, mid)
+        if model and getattr(model, "task", None) == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+            needs_backbone = True
+            break
+    if not needs_backbone:
+        return None
+
+    backbone = ModelService.get_by_name(db, ESMFOLD2_BACKBONE_MODEL_NAME)
+    registry = getattr(backbone, "registry", None) if backbone else None
+    if not backbone or not registry or not registry.run_id:
+        return (
+            f"구조예측(ESMFold2) 서빙에는 백본 모델 '{ESMFOLD2_BACKBONE_MODEL_NAME}' 이 먼저 등록돼 있어야 합니다. "
+            f"'{ESMFOLD2_BACKBONE_MODEL_NAME}' 을 등록한 뒤 다시 배포하세요."
+        )
+    return None
+
+
+def _validate_structure_prediction_backbone(db: Session, workflow: Workflow) -> None:
+    """배포(execute) 시 구조예측(ESMFold2) 백본 ESMC-6B 준비를 강제한다(공유 헬퍼 재사용). 미비 시 400."""
+    model_ids = [c.model_id for c in workflow.components if c.type == ComponentType.MODEL and c.model_id]
+    err = _structure_prediction_backbone_error(db, model_ids)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+
+
 @router.post("/{workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
     *,
@@ -1647,6 +1686,9 @@ async def execute_workflow(
         WorkflowService._validate_knowledge_base_before_model(workflow)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    # 구조예측(ESMFold2) 컴포넌트가 있으면 백본 ESMC-6B 등록·레지스트리 준비를 배포 전에 강제한다.
+    _validate_structure_prediction_backbone(db, workflow)
 
     try:
         from core.serving.serving_model_workflow_pvc import PvcReplicationConflict
@@ -2379,6 +2421,18 @@ def _validate_workflow_definition_checks(
             rule="serving_predefined_meta_complete",
             passed=len(serving_meta_errors) == 0,
             message="; ".join(serving_meta_errors) if serving_meta_errors else None,
+        )
+    )
+
+    # 15c. 구조예측(ESMFold2) 모델이 포함되면 백본 ESMC-6B 가 등록(+MLflow)돼 있어야 서빙 시 로컬 로드가 가능하다.
+    #      배포(execute) 시에도 동일 헬퍼로 재검사한다(서빙 요청 직전 방어).
+    sp_model_ids = [c.model_id for c in definition.components if c.type == ComponentType.MODEL and c.model_id]
+    sp_backbone_err = _structure_prediction_backbone_error(db, sp_model_ids)
+    results.append(
+        ValidationCheckResult(
+            rule="structure_prediction_backbone_registered",
+            passed=sp_backbone_err is None,
+            message=sp_backbone_err,
         )
     )
 

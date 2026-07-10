@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+
+# [VENDOR PATCH] 원본(transformers-root 상대 import): `from ...modeling_utils import PreTrainedModel`
 from transformers.modeling_utils import PreTrainedModel  # type: ignore[import]
 
 from .configuration_esmfold2 import ESMFold2Config

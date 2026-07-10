@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
+# [VENDOR PATCH] 원본(transformers-root 상대 import): `from ...configuration_utils import PretrainedConfig`
 from transformers.configuration_utils import PretrainedConfig  # type: ignore[import]
 
 # ---------------------------------------------------------------------------
