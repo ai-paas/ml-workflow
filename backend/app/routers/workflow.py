@@ -2133,6 +2133,28 @@ def _validate_workflow_definition_checks(
         )
     )
 
+    # 5d. BFM 워크플로우 내 task 동질성 — BFM 모델들은 모두 같은 task 여야 한다.
+    #     task 가 섞이면(예: fill-mask + protein-structure-prediction) 어떤 /test/* 엔드포인트로도 추론이
+    #     안 된다(각 엔드포인트가 task 동질성을 요구하므로). 생성 시점에 조기 차단한다.
+    bfm_tasks = set()
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and comp.model_id:
+            model = ModelService.get(db, comp.model_id)
+            if model and model.type_info and model.type_info.name == ModelTypeEnum.BFM.value:
+                bfm_tasks.add(getattr(model, "task", None))
+    results.append(
+        ValidationCheckResult(
+            rule="bfm_single_task",
+            passed=len(bfm_tasks) <= 1,
+            message=(
+                "BFM 워크플로우의 모델은 모두 같은 task 여야 합니다 (task 혼합 불가): "
+                f"{', '.join(sorted(str(t) for t in bfm_tasks))}"
+                if len(bfm_tasks) > 1
+                else None
+            ),
+        )
+    )
+
     # 6. MODEL 수 제한
     model_count = sum(1 for c in definition.components if c.type == ComponentType.MODEL)
     results.append(
