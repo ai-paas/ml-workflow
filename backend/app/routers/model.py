@@ -110,7 +110,9 @@ def create_model(
         - 모델 사용 예제 코드
         - 생략 가능
     - **file** (UploadFile, optional): 모델 파일
-        - 커스텀 모델인 경우 업로드할 모델 파일
+        - 커스텀 모델 직접 등록 시 **모델 디렉토리를 압축한 .zip** 만 허용
+          (config.json/safetensors/tokenizer 등 멀티파일 모델을 통째로 업로드)
+        - zip 은 최상위 단일 폴더로 감싸거나 파일을 루트에 평탄하게 담은 형태 모두 허용
         - 생략 가능
     - **model_registry_schema** (str, optional): 모델 레지스트리 스키마 (JSON 문자열)
         - 내부 시스템에서만 사용하는 파라미터
@@ -152,7 +154,7 @@ def create_model(
     - **ID 값 조회**: `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API(`/providers`, `/types`, `/formats`)
       를 먼저 호출하여 ID 값을 확인한 후 사용해야 합니다
     - HuggingFace 모델인 경우 provider_id가 huggingface의 ID와 일치해야 합니다
-    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, file이 필요합니다
+    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, **모델 디렉토리를 압축한 .zip** file이 필요합니다
     - YOLOX 모델인 경우에만 자동으로 학습 가능 모델(learning_enable_yn=True)로 설정됩니다
     - **중요**: `parent_model_id`와 `model_registry_schema`는 내부 시스템에서만 사용하는 파라미터입니다. 프론트엔드에서는 이 파라미터들을 전달하지 않아야 합니다.
 

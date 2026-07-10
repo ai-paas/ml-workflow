@@ -771,11 +771,12 @@ class HuggingFaceModelService:
 
 
 class CustomModelService:
-    """
-    Llama.cpp 계열 gguf Model을 등록하는 method
+    """커스텀 업로드 모델을 등록하는 서비스.
 
-    * params
-        * model_path: gguf file path (e.g. "your/model/file/path.gguf")
+    직접 업로드(model_registry_schema 없음)는 **모델 디렉토리를 압축한 .zip 만 허용**한다. 등록 시
+    zip 을 풀어 모델 폴더 전체를 MLflow 아티팩트로 올려, 서빙 predictor 가 from_pretrained(local_path)
+    로 로드할 수 있게 한다(단일 파일 업로드는 config/토크나이저 등 멀티파일 모델을 표현하지 못함).
+    학습/등록 파이프라인이 이미 MLflow 에 올린 산출물은 model_registry_schema 로 링크만 한다.
     """
 
     def create(
@@ -788,11 +789,18 @@ class CustomModelService:
     ):
         # 이미 pipeline에서 등록한 mlflow model_registry가 있다면 mlflow에 등록하지 말것
         if not model_registry_schema:
+            if file is None:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="커스텀 모델 직접 등록에는 모델 디렉토리를 압축한 .zip 파일이 필요합니다.",
+                )
             model_name = model_schema.name
             model_name = model_name.replace("/", "-")
-            # log_artifact 내부에서 file.file.read()를 호출하므로, 파일 포인터를 처음으로 되돌릴 필요 없음
-            # 파일을 그대로 전달하면 됨
-            run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
+            # 커스텀 업로드는 zip 만 허용 → 압축 해제 후 모델 폴더 전체를 MLflow 에 업로드.
+            try:
+                run_id, artifact_uri = ModelRegistry().log_artifact_from_zip(model_name=model_name, file=file)
+            except ValueError as e:
+                raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(e))
             model_uri = model_name
         else:
             # run_id = model_registry_schema.run_id
