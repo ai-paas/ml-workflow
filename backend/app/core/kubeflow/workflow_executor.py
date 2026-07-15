@@ -599,6 +599,7 @@ class WorkflowExecutor:
                 gpu_resource_key: str = "nvidia.com/gpu",
                 node_selector_json: str = "{}",
                 tolerations_json: str = "[]",
+                deploy_readiness_timeout_sec: int = 1800,
             ) -> str:
                 import json
                 import logging
@@ -861,8 +862,8 @@ class WorkflowExecutor:
                         logger.info(f"Service ClusterIP: {service_cluster_ip}, Port: {service_port}")
                         logger.info(f"Internal URL: {internal_url}")
 
-                        # Deployment가 준비될 때까지 대기 (최대 10분)
-                        max_wait = 600  # 10분
+                        # Deployment가 준비될 때까지 대기 (상한은 설정값 deploy_readiness_timeout_sec).
+                        max_wait = deploy_readiness_timeout_sec
                         wait_interval = 15  # 15초 간격
                         elapsed = 0
                         deployment_ready = False
@@ -1150,9 +1151,9 @@ class WorkflowExecutor:
                     kserve_client.create(inference_service, namespace=namespace)
 
                     # 서비스가 준비될 때까지 대기. 대형 모델(예: ESMC-6B 24GB)은 파드가 MLflow 에서 아티팩트를
-                    # 내려받아 로드하는 콜드스타트가 길어 10분으론 부족하다. 치명 실패(ImagePull 등)는 아래에서
-                    # 조기 abort 하므로, 상한만 30분으로 둔다.
-                    max_wait = 1800  # 30분
+                    # 내려받아 로드하는 콜드스타트가 길어 상한을 넉넉히 둔다(설정값 deploy_readiness_timeout_sec).
+                    # 치명 실패(ImagePull 등)는 아래에서 조기 abort 하므로 상한 전에 실패로 빠진다.
+                    max_wait = deploy_readiness_timeout_sec
                     wait_interval = 15  # 15초 간격
                     elapsed = 0
                     service_ready = False
@@ -1529,6 +1530,7 @@ class WorkflowExecutor:
                 gpu_resource_key=(plan.get("gpu_resource_key") or "nvidia.com/gpu"),
                 node_selector_json=(plan.get("node_selector_json") or "{}"),
                 tolerations_json=(plan.get("tolerations_json") or "[]"),
+                deploy_readiness_timeout_sec=settings.WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC,
             )
 
         return None

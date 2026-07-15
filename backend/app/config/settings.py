@@ -196,6 +196,13 @@ class Settings(BaseSettings):
         default=1800,
         description="§12: 데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
     )
+    WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC: int = Field(
+        default=1800,
+        description="워크플로우 모델 서빙 배포가 Ready 될 때까지 대기하는 상한(초). "
+        "ollama Deployment 경로와 KServe InferenceService 경로가 같은 값을 공유해 경로 간 불일치를 방지한다. "
+        "초과하면 배포를 failed 로 기록하고, 실패 메시지에 이 값이 그대로 표기된다. "
+        "대형 모델의 최초 다운로드·PVC 복사 콜드스타트를 감안해 넉넉히 둔다.",
+    )
 
     OPTIMIZATION_SERVER_URL: str = Field(
         ...,
