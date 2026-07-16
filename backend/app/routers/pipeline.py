@@ -327,13 +327,29 @@ def container_train(
         for name, value in hparams.items():
             create_hyperparameter(db, experiment_db_obj.id, name, value)
 
-        # GPU 노드풀 프로파일(MIG taint 등) 정적 배치 — 학습 Job 에 toleration/nodeSelector/자원키 주입.
-        # 학습은 서빙 플래너를 거치지 않으므로 첫 프로파일을 채택(dev: 빈 프로파일 → nvidia.com/gpu 기본).
+        # 학습 Job 노드 배치.
+        # 1) GPU 노드풀 프로파일(MIG taint 등)이 있으면 그 정적 배치를 채택(toleration+nodeSelector+자원키 주입).
+        # 2) 프로파일이 없고 SERVING_NODE_NAMES 화이트리스트가 있으면, 서빙과 동일한 노드 인벤토리에서
+        #    여유 GPU 가 있는 노드를 골라 hostname 으로 고정한다 → 서빙이 화이트리스트로 피하는 비호환 GPU
+        #    노드(예: 학습 이미지의 PyTorch 가 지원하지 않는 구형 GPU)를 학습 Job 도 함께 피한다.
+        # 3) 둘 다 없으면 기존 기본(무 nodeSelector).
         from core.serving.gpu_placement import parse_gpu_pool_profiles, static_training_placement
+        from core.serving.serving_k8s_inventory import choose_training_node_placement
 
-        _train_placement = static_training_placement(
-            parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
-        )
+        _profiles = parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
+        _serving_nodes = (getattr(settings, "SERVING_NODE_NAMES", "") or "").strip()
+        if _profiles:
+            _train_placement = static_training_placement(_profiles)
+        elif _serving_nodes:
+            _train_placement = choose_training_node_placement(
+                requested_gpus=int(hparams["gpus"]),
+                default_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
+                vram_overrides_json=settings.SERVING_NODE_VRAM_OVERRIDES_JSON,
+                serving_node_names_csv=_serving_nodes,
+                exclude_control_plane_nodes=not settings.SERVING_INCLUDE_CONTROL_PLANE_NODES,
+            ) or static_training_placement([])
+        else:
+            _train_placement = static_training_placement([])
 
         client.create_run_from_pipeline_func(
             train_pipeline,

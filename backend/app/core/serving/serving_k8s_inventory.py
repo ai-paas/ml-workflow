@@ -400,3 +400,63 @@ def whitelist_rank(name: str, order: list[str]) -> int:
         return order.index(name)
     except ValueError:
         return len(order) + hash(name) % 1000
+
+
+def choose_training_node_placement(
+    *,
+    requested_gpus: int,
+    default_vram_bytes: int,
+    vram_overrides_json: str,
+    serving_node_names_csv: str,
+    gpu_pool_profiles_json: str = "[]",
+    gpu_resource_key: str = _GPU_RESOURCE_KEY,
+    exclude_control_plane_nodes: bool = True,
+) -> Optional[dict]:
+    """학습 Job 을 서빙과 같은 노드 화이트리스트에 배치하기 위한 노드 선택.
+
+    화이트리스트(serving_node_names_csv) 노드 인벤토리에서 여유 GPU 가 requested_gpus 이상인
+    노드를 고른다. 여유 GPU 가 많은 노드를 우선(스프레드)하고, 같으면 화이트리스트 순서 → 이름 순.
+    고른 노드를 kubernetes.io/hostname 으로 고정하고, 노드 taint 통과용 toleration 을 함께 반환한다.
+    이렇게 하면 서빙이 화이트리스트로 피하는 비호환 GPU 노드를 학습 Job 도 함께 피한다.
+    적합 노드가 없거나 인벤토리 조회 실패면 None 을 반환한다(호출부가 기존 기본 배치로 폴백).
+
+    반환: {"gpu_resource_key", "node_selector"(dict), "tolerations"(list[dict]), "node_name"} 또는 None.
+    """
+    nodes = collect_node_inventory(
+        default_vram_bytes=default_vram_bytes,
+        vram_overrides_json=vram_overrides_json,
+        serving_node_names_csv=serving_node_names_csv,
+        gpu_resource_key=gpu_resource_key,
+        gpu_pool_profiles_json=gpu_pool_profiles_json,
+        exclude_control_plane_nodes=exclude_control_plane_nodes,
+    )
+    whitelist = [n.strip() for n in (serving_node_names_csv or "").split(",") if n.strip()]
+    need = max(1, int(requested_gpus or 1))
+    candidates = [n for n in nodes if n.alloc_gpu > 0 and (n.v_card_bytes or 0) > 0 and n.g_free >= need]
+    if not candidates:
+        logger.info("학습 노드 자동 선택: 여유 GPU %d장 이상인 화이트리스트 노드가 없어 기본 배치로 폴백합니다.", need)
+        return None
+    candidates.sort(key=lambda n: (-n.g_free, whitelist_rank(n.name, whitelist), n.name))
+    chosen = candidates[0]
+    try:
+        node_selector = json.loads(chosen.node_selector_json) or {}
+    except Exception:
+        node_selector = {}
+    node_selector["kubernetes.io/hostname"] = chosen.name
+    try:
+        tolerations = json.loads(chosen.tolerations_json) or []
+    except Exception:
+        tolerations = []
+    logger.info(
+        "학습 노드 자동 선택: '%s' 고정(여유 GPU %d장, 요청 %d장) node_selector=%s",
+        chosen.name,
+        chosen.g_free,
+        need,
+        node_selector,
+    )
+    return {
+        "gpu_resource_key": chosen.gpu_resource_key or gpu_resource_key,
+        "node_selector": node_selector,
+        "tolerations": tolerations,
+        "node_name": chosen.name,
+    }
