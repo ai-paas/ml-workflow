@@ -324,5 +324,8 @@ pyrightconfig.json
 .state.json
 .state.*.json
 
+# Claude Code local config (settings, hooks, etc.)
+.claude/
+
 # AI memory file
 CLAUDE.md
