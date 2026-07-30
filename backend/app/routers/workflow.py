@@ -1298,7 +1298,7 @@ async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_202_ACCEPTED)
-async def delete_workflow(
+def delete_workflow(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
@@ -1381,7 +1381,7 @@ async def delete_workflow(
 
 
 @router.post("/{workflow_id}/finalize-deletion")
-async def finalize_workflow_deletion(
+def finalize_workflow_deletion(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
@@ -1605,7 +1605,7 @@ def _validate_structure_prediction_backbone(db: Session, workflow: Workflow) -> 
 
 
 @router.post("/{workflow_id}/execute", response_model=WorkflowExecuteResponse)
-async def execute_workflow(
+def execute_workflow(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
@@ -1810,7 +1810,7 @@ def get_workflow_execution_status(
 @router.post(
     "/{workflow_id}/components/{component_id}/deployment-status", dependencies=[Depends(verify_internal_api_key)]
 )
-async def update_component_deployment_status(
+def update_component_deployment_status(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
@@ -4268,7 +4268,7 @@ def get_deployed_models(
 
 
 @router.post("/{workflow_id}/cleanup", status_code=status.HTTP_202_ACCEPTED)
-async def cleanup_workflow_resources(
+def cleanup_workflow_resources(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
@@ -4337,7 +4337,7 @@ async def cleanup_workflow_resources(
 
 
 @router.post("/{workflow_id}/finalize-cleanup")
-async def finalize_cleanup(
+def finalize_cleanup(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
