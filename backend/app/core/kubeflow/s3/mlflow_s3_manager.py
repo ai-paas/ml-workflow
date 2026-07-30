@@ -1,4 +1,5 @@
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -142,8 +143,6 @@ class MLFlowS3Manager:
                     except Exception as delete_error:
                         # 개별 객체 삭제 실패는 로깅만 하고 계속 진행
                         # (이미 삭제된 객체일 수 있음)
-                        import warnings
-
                         warnings.warn(f"S3 객체 삭제 실패 (Key: {key_obj['Key']}): {str(delete_error)}")
 
             return True

@@ -1,7 +1,7 @@
 """E2E: 학습 요청 검증 negative 케이스 (POST /pipeline/training → 400).
 
 학습 검증 리팩터로 정합된 거부 케이스. 모두 dataset/experiment 생성 전에 400 으로 막히므로 부작용 없음.
-  · dataset_file 동반 + dataset_kind 생략 → 400 (api-spec §2.1: dataset_file 시 dataset_kind 필수)
+  · dataset_file 동반 + dataset_kind 생략 → 400 (dataset_file 시 dataset_kind 필수)
   · dataset_kind ↔ 모델 요구 분류 불일치 → 400
 
 모델: ESM2 reference(facebook/esm2_t6_8M_UR50D, 학습가능 pLM, 요구 분류=protein-classification).

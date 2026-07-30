@@ -111,15 +111,15 @@ class Settings(BaseSettings):
     DEFAULT_TRY_GPU: bool = Field(
         default=True,
         description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU). "
-        "Ollama·KServe(HF 등) 워크플로 서빙 플래너가 동일하게 참고(§7.4).",
+        "Ollama·KServe(HF 등) 워크플로 서빙 플래너가 동일하게 참고.",
     )
     SERVING_DEFAULT_GPU_VRAM_BYTES: int = Field(
         default=16 * 1024 * 1024 * 1024,
-        description="노드 라벨·오버라이드 없을 때 GPU 1장당 VRAM 바이트 기본값(§7.5). 인벤토리 기반 k 산정에도 사용.",
+        description="노드 라벨·오버라이드 없을 때 GPU 1장당 VRAM 바이트 기본값. 인벤토리 기반 k 산정에도 사용.",
     )
     SERVING_NODE_NAMES: str = Field(
         default="",
-        description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체(§7.3).",
+        description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체.",
     )
     SERVING_INCLUDE_CONTROL_PLANE_NODES: bool = Field(
         default=False,
@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     )
     SERVING_NODE_VRAM_OVERRIDES_JSON: str = Field(
         default="{}",
-        description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8} (§7.10)',
+        description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8}',
     )
     GPU_POOL_PROFILES_JSON: str = Field(
         default="[]",
@@ -144,57 +144,57 @@ class Settings(BaseSettings):
     )
     SERVING_PIN_SELECTED_NODE: bool = Field(
         default=True,
-        description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임(§7.7).",
+        description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임.",
     )
     KSERVE_GATEWAY_URL: str = Field(
         default="",
-        description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공(§2.6).",
+        description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공.",
     )
     REMOTE_SERVING_API_URL: str = Field(
         default="",
-        description="§6: 원격 LLM 단일 추론 베이스 URL. REMOTE 배포 시 remote_api_url에 저장·추론 시 사용(스펙·인증은 §6.5 미정).",
+        description="원격 LLM 단일 추론 베이스 URL. REMOTE 배포 시 remote_api_url에 저장·추론 시 사용(스펙·인증은 미정).",
     )
     REMOTE_SERVING_MODEL_MAP: str = Field(
         default="{}",
-        description='§6: 플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
+        description='플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
     )
 
-    # §12 Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)
+    # Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)
     CINDER_ZONE_MATCH_ENABLED: bool = Field(
         default=False,
-        description="§12: Ollama 워크플로 PVC는 노드 topology zone 과 레지스트리 SC availability 를 맞춤. false면 기존 §3.3만.",
+        description="Ollama 워크플로 PVC는 노드 topology zone 과 레지스트리 SC availability 를 맞춤. false면 기존 동작만.",
     )
     CINDER_ZONE_TO_STORAGE_CLASS_JSON: str = Field(
         default="{}",
-        description='§12: node_zone(키)→StorageClass 이름. \
+        description='node_zone(키)→StorageClass 이름. \
             동일 availability SC가 복수일 때 강제. 예: {"gpu":"csi-cinder-sc-delete-gpu"}',
     )
     CINDER_NODE_TOPOLOGY_KEY: str = Field(
         default="topology.cinder.csi.openstack.org/zone",
-        description="§12: OpenStack/Cinder CSI 노드 topology 라벨 키.",
+        description="OpenStack/Cinder CSI 노드 topology 라벨 키.",
     )
     CINDER_CSI_PROVISIONER: str = Field(
         default="cinder.csi.openstack.org",
-        description="§12: storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
+        description="storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
     )
-    # §12 임시: IDC에 Cinder backend AZ(예: gpu) 미구성 시 zone 매칭 SC 대신 NFS Client SC로 클론
+    # 임시: IDC에 Cinder backend AZ(예: gpu) 미구성 시 zone 매칭 SC 대신 NFS Client SC로 클론
     CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED: bool = Field(
         default=False,
-        description="§12 임시: 노드 zone≠원본 SC availability 로 클론할 때 §12.3.4 Cinder 매칭 대신 "
+        description="임시: 노드 zone≠원본 SC availability 로 클론할 때 Cinder 매칭 대신 "
         "CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS 를 쓴다. GPU AZ 활성화 후 false 권장.",
     )
     CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS: str = Field(
         default="nfs-client",
-        description="§12 임시: CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED 일 때 클론 PVC storageClassName.",
+        description="임시: CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED 일 때 클론 PVC storageClassName.",
     )
-    # §12: NFS fallback 클론은 CSI volume cloning 미지원이라 빈 PVC 가 만들어짐 → 별도 Job 이 원본을 복사.
+    # NFS fallback 클론은 CSI volume cloning 미지원이라 빈 PVC 가 만들어짐 → 별도 Job 이 원본을 복사.
     PVC_DATA_COPY_IMAGE: str = Field(
         default="busybox:1.36",
-        description="§12: NFS fallback 클론 PVC 데이터 복사 Job 컨테이너 이미지 (cp -a 만 사용).",
+        description="NFS fallback 클론 PVC 데이터 복사 Job 컨테이너 이미지 (cp -a 만 사용).",
     )
     PVC_DATA_COPY_TIMEOUT_SEC: int = Field(
         default=1800,
-        description="§12: 데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
+        description="데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
     )
     WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC: int = Field(
         default=1800,

@@ -1,6 +1,6 @@
 """워크플로우 시나리오 정의 모듈
 
-§5.2 개선 후 정상 동작하는 시나리오(1~9: LLM/RAG, 10: ODM 단순)의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
+개선 후 정상 동작하는 시나리오(1~9: LLM/RAG, 10: ODM 단순)의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
 
 CLI 실행 (SCENARIO 필수):
   python workflow/definitions.py 3      # 3번 시나리오 상세

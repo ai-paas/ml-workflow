@@ -12,7 +12,7 @@ E2E: 통합 학습 → 등록 파이프라인 (YOLOX / ESM2 공통).
   E2E_TRAINING_EPOCHS                 빠른 검증용 epoch (기본 2)
   E2E_TRAINING_CHILD_MODEL_NAME       등록할 자식 모델 name 의 베이스 (뒤에 uuid 접미로 유니크화; 기본 e2e-ft)
 
-dataset_kind 는 '업로드 데이터의 분류'라 dataset_file 동반 시 필수다(api-spec §2.1) — 데이터 파일과 짝지어
+dataset_kind 는 '업로드 데이터의 분류'라 dataset_file 동반 시 필수다 — 데이터 파일과 짝지어
 env 로 명시한다(모델에서 도출하면 호환성 검사가 동어반복이 됨). 자식은 reference 의
 type/format/task/parameter/sample_code 를 상속하며, 검증은 자식이 reference 의 type/format 을 상속했는지 확인한다.
 
@@ -40,7 +40,7 @@ from training.state import append_training_run, update_training_run
 REFERENCE_MODEL_NAME = (os.environ.get("E2E_TRAINING_REFERENCE_MODEL_NAME") or "").strip()
 DATASET_ID = (os.environ.get("E2E_TRAINING_DATASET_ID") or "").strip()
 DATASET_FILE = (os.environ.get("E2E_TRAINING_DATASET_FILE") or "").strip()
-# dataset_file 업로드 시 필수(데이터의 분류; api-spec §2.1). 데이터 파일과 짝지어 env 로 명시(모델 도출 아님).
+# dataset_file 업로드 시 필수(데이터의 분류). 데이터 파일과 짝지어 env 로 명시(모델 도출 아님).
 DATASET_KIND = (os.environ.get("E2E_TRAINING_DATASET_KIND") or "").strip()
 EPOCHS = (os.environ.get("E2E_TRAINING_EPOCHS") or "2").strip()
 # 미지정 시 백엔드가 모델별 recommended_hparams(또는 시스템 기본)로 채운다. 대형 모델 메모리 튜닝용.
@@ -133,7 +133,7 @@ class TestTrainingRegister:
             assert DATASET_KIND, "dataset_file 업로드 시 E2E_TRAINING_DATASET_KIND(데이터의 분류)가 필요합니다."
             ds_path = DATASET_DIR / DATASET_FILE
             assert ds_path.is_file(), f"데이터셋 파일이 없습니다: {ds_path}"
-            # dataset_kind 는 '업로드 데이터의 분류' 라 필수(api-spec §2.1). 데이터 파일과 짝지은 env 값을 명시한다.
+            # dataset_kind 는 '업로드 데이터의 분류' 라 필수. 데이터 파일과 짝지은 env 값을 명시한다.
             data["dataset_kind"] = DATASET_KIND
             fh = open(ds_path, "rb")
             files = {"dataset_file": (ds_path.name, fh, "application/zip")}

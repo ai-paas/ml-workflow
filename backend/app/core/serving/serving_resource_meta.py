@@ -1,5 +1,5 @@
 """
-§7.9 / §7.9.1 사전정의 서빙 메타 조회·파생 및 워크플로우 배포용 리소스 계획.
+사전정의 서빙 메타 조회·파생 및 워크플로우 배포용 리소스 계획.
 
 GPU VRAM·호스트 메모리·CPU 밀리코어는 PREDEFINED_MODEL_CONFIGS에만 두고,
 파생 모델은 부모 repo_id 맵 + 고정 계수로 산출한다.
@@ -45,7 +45,7 @@ class ServingResourcePlan:
     fallback_reason: Optional[str]
     serving_node_name: Optional[str] = None
     planner_note: Optional[str] = None
-    #: §7.3.2 가상 점유: 플래너가 잔여를 차감할 때 사용한 노드(핀 해제여도 내부 선정 노드).
+    #: 가상 점유: 플래너가 잔여를 차감할 때 사용한 노드(핀 해제여도 내부 선정 노드).
     reservation_node_name: Optional[str] = None
     #: GPU 노드풀 프로파일 기반 배치(MIG taint 등). 선택 노드의 값(없으면 dev 기본).
     gpu_resource_key: str = "nvidia.com/gpu"
@@ -98,7 +98,7 @@ def k8s_memory_quantity_to_bytes(quantity: str) -> int:
 
 
 def format_k8s_memory_from_bytes(num_bytes: int) -> str:
-    """§7.9.1: Mi/Gi 형태로 반올림 (최소 1Mi)."""
+    """Mi/Gi 형태로 반올림 (최소 1Mi)."""
     mi = 1024 * 1024
     n = max(1, round(num_bytes / mi))
     if n % 1024 == 0:
@@ -112,7 +112,7 @@ def _derive_meta_from_parent(
     learning_enable_yn: bool,
     opt_enable_yn: bool,
 ) -> dict[str, Any]:
-    """§7.9.1 파생 규칙."""
+    """파생 규칙."""
     f_factor = 1.0
     if learning_enable_yn:
         f_factor *= 0.98
@@ -162,7 +162,7 @@ def resolve_normalized_serving_meta(
 
     - 자체 repo_id + PREDEFINED 완전 일치 → direct
     - 그 외(자체 repo 불완전·미매핑, 또는 repo_id 없음=학습/등록 파생 모델로 간주) → parent_model_id로
-      부모의 repo_id를 lookup하여 §7.9.1 파생
+      부모의 repo_id를 lookup하여 파생
     - repo_id도 없고 parent_model_id도 없으면 오류
 
     Returns:
@@ -198,7 +198,7 @@ def resolve_normalized_serving_meta(
             )
         raise ValueError(
             f"model_id={model.id}, repo_id={model.repo_id!r}: PREDEFINED_MODEL_CONFIGS에 "
-            f"필수 5키가 없고 parent_model_id도 없습니다. (§7.9)"
+            f"필수 5키가 없고 parent_model_id도 없습니다."
         )
 
     parent = db.get(Model, model.parent_model_id)
@@ -210,7 +210,7 @@ def resolve_normalized_serving_meta(
     parent_cfg = predefined_configs.get(parent.repo_id)
     if not parent_cfg or not _has_complete_serving_keys(parent_cfg):
         raise ValueError(
-            f"model_id={model.id}: 부모 repo_id={parent.repo_id!r}에 대한 사전정의 서빙 메타(5키)가 없습니다. (§7.9.1)"
+            f"model_id={model.id}: 부모 repo_id={parent.repo_id!r}에 대한 사전정의 서빙 메타(5키)가 없습니다."
         )
 
     parent_slice = {k: parent_cfg[k] for k in SERVING_META_KEYS}
@@ -278,7 +278,7 @@ def build_serving_resource_plan(
     log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
     """
-    인벤토리 없이(또는 K8s 조회 실패 시) §7 단순 경로: decide_try_gpu_path + k는 default_gpu_vram_bytes 기준 ceil.
+    인벤토리 없이(또는 K8s 조회 실패 시) 단순 경로: decide_try_gpu_path + k는 default_gpu_vram_bytes 기준 ceil.
     """
     v_need = int(normalized_meta["serving_vram_need_bytes"])
     mem_gpu = str(normalized_meta["serving_memory_request_gpu"])

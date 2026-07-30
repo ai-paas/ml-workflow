@@ -1,7 +1,7 @@
 """
-§7.3 Kubernetes 노드 인벤토리 (백엔드 전용).
+Kubernetes 노드 인벤토리 (백엔드 전용).
 
-§7.3.1: allocatable에 더해, 전 네임스페이스 Pod의 resources.requests 합산으로
+allocatable에 더해, 전 네임스페이스 Pod의 resources.requests 합산으로
 G_used/M_used/C_used를 구하고 G_free/M_free/C_free를 근사한다.
 Pod 조회 실패 시 allocatable-only 폴백(planner_note 등으로 상위에서 기록 가능).
 """
@@ -36,7 +36,7 @@ class NodeInventory:
     m_free: int
     c_free: int
     pod_requests_applied: bool
-    # GPU 노드풀 프로파일 기반 배치(§ docs/k8s-gpu-allocation). frozen 친화 위해 JSON 문자열로 보관.
+    # 노드 라벨이 GPU 노드풀 프로파일에 매칭될 때 결정되는 배치 정보. frozen 친화 위해 JSON 문자열로 보관.
     gpu_resource_key: str = "nvidia.com/gpu"
     node_selector_json: str = "{}"
     tolerations_json: str = "[]"
@@ -162,7 +162,7 @@ def _sum_container_list(containers: Any, gpu_key: str) -> tuple[int, int, int]:
 
 def _effective_pod_requests(pod: Any, gpu_key: str) -> tuple[int, int, int]:
     """
-    §7.3.1: 스케줄러와 동일하게 max(sum(init), sum(containers)) per resource.
+    스케줄러와 동일하게 max(sum(init), sum(containers)) per resource.
     """
     ig, im, ic = _sum_container_list(getattr(pod.spec, "init_containers", None) or [], gpu_key)
     ag, am, ac = _sum_container_list(getattr(pod.spec, "containers", None) or [], gpu_key)
@@ -268,7 +268,7 @@ def collect_node_inventory(
 ) -> list[NodeInventory]:
     """
     Ready·스케줄 가능 노드 목록. SERVING_NODE_NAMES 비면 클러스터 전체(필터: Ready).
-    §7.3.1: Pod requests 합산으로 g_free / m_free / c_free 채움.
+    Pod requests 합산으로 g_free / m_free / c_free 채움.
     exclude_control_plane_nodes: control-plane/master 역할 노드는 서빙 후보에서 제외(기본 True).
     gpu_pool_profiles_json: GPU 노드풀 프로파일(MIG taint 등). 매칭 노드에 nodeSelector/tolerations/자원키 부여.
     """
@@ -367,7 +367,7 @@ def node_inventories_with_free_overrides(
     frees: dict[str, tuple[int, int, int]],
 ) -> list[NodeInventory]:
     """
-    §7.3.2 연쇄 잔여: 동일 스냅샷 alloc/v_card는 유지하고 g_free/m_free/c_free만 덮어쓴다.
+    연쇄 잔여: 동일 스냅샷 alloc/v_card는 유지하고 g_free/m_free/c_free만 덮어쓴다.
     frees 키는 노드명; 없는 노드는 base 값 유지.
     """
     out: list[NodeInventory] = []

@@ -1,5 +1,5 @@
 """
-§7.4~7.7 서빙 리소스 플래너: K8s 인벤토리 + GPU 슬랙 최소 노드·k, CPU 노드 선정.
+서빙 리소스 플래너: K8s 인벤토리 + GPU 슬랙 최소 노드·k, CPU 노드 선정.
 
 인벤토리 조회 실패 시 serving_resource_meta.build_serving_resource_plan 으로 폴백.
 """
@@ -28,7 +28,7 @@ def apply_chain_reservation_from_plan(
     plan: ServingResourcePlan,
     log_context: Optional[str] = None,
 ) -> None:
-    """§7.3.2: 확정 플랜의 k·memory·cpu 요청을 선택 노드 잔여에서 차감(max(0,·))."""
+    """확정 플랜의 k·memory·cpu 요청을 선택 노드 잔여에서 차감(max(0,·))."""
     rn = plan.reservation_node_name
     if not rn:
         return
@@ -100,7 +100,7 @@ def _try_gpu_policy_korean(
 
 
 def _log_inventory_snapshot(log_context: Optional[str], nodes: Sequence[NodeInventory]) -> None:
-    """§7.3.1: 노드별 잔여를 한국어 한 줄씩만 요약."""
+    """노드별 잔여를 한국어 한 줄씩만 요약."""
     suf = _log_ctx_suffix(log_context)
     for n in nodes:
         v_card_s = format_k8s_memory_from_bytes(int(n.v_card_bytes)) if n.v_card_bytes else "알 수 없음"
@@ -176,7 +176,7 @@ def _log_gpu_placement_summary(
         eligible.append(n.name)
     wl_note = f"노드 화이트리스트 적용 중: {', '.join(wl)}" if wl else "노드 화이트리스트 없음(Ready 노드 전부 검토)"
     logger.info(
-        "%s%s GPU 배치 검토: 모델 VRAM 안내값 %s. %s. " "배치 가능해 보이는 노드: %s. 제외된 노드: %s",
+        "%s%s GPU 배치 검토: 모델 VRAM 안내값 %s. %s. 배치 가능해 보이는 노드: %s. 제외된 노드: %s",
         _LOG_TAG,
         suf,
         v_need_s,
@@ -210,7 +210,7 @@ def _log_cpu_placement_summary(
         else:
             ok_count += 1
     logger.info(
-        "%s%s CPU 배치 검토: Pod에 요청할 메모리 %s, CPU %s. " "조건을 만족하는 노드 %d개, 조건 미달로 제외: %s",
+        "%s%s CPU 배치 검토: Pod에 요청할 메모리 %s, CPU %s. 조건을 만족하는 노드 %d개, 조건 미달로 제외: %s",
         _LOG_TAG,
         suf,
         mem_s,
@@ -243,10 +243,10 @@ def _cap_memory_cpu_to_node(
     cpu_req: str,
     node: NodeInventory,
 ) -> tuple[str, str, str, str]:
-    """§7.6: 노드 allocatable 을 넘지 않도록 request/limit 캡."""
+    """노드 allocatable 을 넘지 않도록 request/limit 캡."""
     req_mem = k8s_memory_quantity_to_bytes(mem_req)
     req_mc = _cpu_string_to_millicores(cpu_req)
-    # §7.6: allocatable 상한 캡 (노드 총량 기준)
+    # allocatable 상한 캡 (노드 총량 기준)
     cap_mem = max(1, min(req_mem, node.alloc_memory_bytes or req_mem))
     cap_mc = max(1, min(req_mc, node.alloc_cpu_millicores or req_mc))
     ms = format_k8s_memory_from_bytes(cap_mem)
@@ -259,7 +259,7 @@ def _choose_gpu_node(
     v_need: int,
     whitelist: list[str],
 ) -> Optional[tuple[str, int, int]]:
-    """§7.5: (node_name, k, slack_bytes). 없으면 None."""
+    """(node_name, k, slack_bytes). 없으면 None."""
     best: Optional[tuple[str, int, int]] = None
     best_key: Optional[tuple] = None
 
@@ -287,7 +287,7 @@ def _choose_cpu_node(
     cpu_req_millicores: int,
     whitelist: list[str],
 ) -> Optional[str]:
-    """§7.7: 노드 이름 하나 또는 None."""
+    """노드 이름 하나 또는 None."""
     tier1: list[tuple[tuple, str]] = []
     tier2: list[tuple[tuple, str]] = []
 
@@ -321,7 +321,7 @@ def _plan_serving_resources_with_inventory_nodes(
     parent_repo_id: Optional[str],
     log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
-    """인벤토리 리스트가 비어 있지 않을 때 §7.4~7.7 플랜(§7.3.2는 호출부에서 잔여 조정)."""
+    """인벤토리 리스트가 비어 있지 않을 때 GPU/CPU 배치 계획을 세우고 ServingResourcePlan 을 반환."""
     v_need = int(normalized_meta["serving_vram_need_bytes"])
     mem_gpu = str(normalized_meta["serving_memory_request_gpu"])
     mem_cpu = str(normalized_meta["serving_memory_request_cpu"])

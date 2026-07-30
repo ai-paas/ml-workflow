@@ -33,7 +33,7 @@ async def create_improvement_task(
     service: ModelImprovementService = Depends(get_improvement_service),
 ):
     """
-    `opt_enable_yn=true` 인 소스 모델에 대해 최적화/경량화 task를 큐에 올린다(§6.1).
+    `opt_enable_yn=true` 인 소스 모델에 대해 최적화/경량화 task를 큐에 올린다.
     """
     return await service.create_task(
         db,
@@ -44,12 +44,12 @@ async def create_improvement_task(
 
 @router.get("/status", response_model=ImprovementStatusResponse)
 async def get_improvement_status(
-    task_id: str = Query(..., description="§6.1 응답의 task_id"),
+    task_id: str = Query(..., description="최적화 요청 응답의 task_id"),
     db: Session = SessionDepends,
     current_user: UserSchema = Depends(get_current_user),
     service: ModelImprovementService = Depends(get_improvement_service),
 ):
-    """task_id로 진행·성공·실패 및 result_model_id를 조회한다(§6.2)."""
+    """task_id로 진행·성공·실패 및 result_model_id를 조회한다."""
     return await service.get_task_status(db, task_id, current_username=current_user.username)
 
 
@@ -64,7 +64,7 @@ async def get_task_types(
     current_user: UserSchema = Depends(get_current_user),
     service: ModelImprovementService = Depends(get_improvement_service),
 ):
-    """최적화 서버에서 조회한 기법 목록(§6.3)."""
+    """최적화 서버에서 조회한 기법 목록."""
     if category is not None and category not in _VALID_CATEGORIES:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

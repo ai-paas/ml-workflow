@@ -127,7 +127,7 @@ class TrainingRequest(BaseModel):
 
     # 데이터셋 입력 — dataset_file(별도 인자)과 XOR
     dataset_id: Optional[int] = None
-    # 데이터셋 분류(업로드 데이터의 사실) — dataset_file 동반 시 필수(api-spec §2.1). 모델이 요구하는
+    # 데이터셋 분류(업로드 데이터의 사실) — dataset_file 동반 시 필수. 모델이 요구하는
     # 분류와 일치해야 한다(불일치 400). dataset_id 케이스에서는 무시(등록된 dataset.kind 사용).
     dataset_kind: Optional[DatasetKindEnum] = None
 

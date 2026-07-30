@@ -24,7 +24,7 @@ class ModelWorkflowDeploymentService:
     def _urls_for(
         deployment: ModelWorkflowDeployment,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """(gateway_url, public_url, backend_api_url) — §2.6."""
+        """(gateway_url, public_url, backend_api_url)."""
         s = get_settings()
         gw_raw = (s.KSERVE_GATEWAY_URL or "").strip()
         gateway_url = gw_raw if gw_raw else None

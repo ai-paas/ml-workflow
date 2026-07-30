@@ -1,9 +1,12 @@
+import io
 import logging
 import os
 import re
 import tempfile
 import traceback
+import urllib.request
 import uuid
+import warnings
 from enum import Enum
 from typing import Any, Optional
 
@@ -387,8 +390,6 @@ class ModelService:
                             # S3 삭제 실패 처리
                             # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
                             if mlflow_deleted:
-                                import warnings
-
                                 warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
                                 # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
                             else:
@@ -606,9 +607,6 @@ class ModelService:
     @staticmethod
     def download_weight_file(url: str, filename: str) -> UploadFile:
         """URL에서 모델 가중치 파일을 다운로드하여 UploadFile로 반환"""
-        import io
-        import urllib.request
-
         try:
             logger.info(f"Downloading weight file from {url}")
             response = urllib.request.urlopen(url, timeout=600)
@@ -1727,8 +1725,8 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_cpu_request_millicores": 4000,
     },
     # ── 신규 Ollama 6종 (text-generation 3 + VQA 3) ──
-    # 자원 5키는 크기별 앵커 추정(§7.3), max_context_length 는 Ollama 실측 필요 — 배포 전 재확인.
-    # VQA 3종은 task=vqa 로 저장하되 당분간 text-generation 과 동일 추론(라우팅 alias, §8.4).
+    # 자원 5키는 크기별 앵커 추정, max_context_length 는 Ollama 실측 필요 — 배포 전 재확인.
+    # VQA 3종은 task=vqa 로 저장하되 당분간 text-generation 과 동일 추론(라우팅 alias).
     "deepseek-r1:32b": {
         "name": "deepseek-r1-32b",
         "description": "DeepSeek-R1 32B — 오픈 추론 모델(성능 O3/Gemini 2.5 Pro 근접). text-generation.",

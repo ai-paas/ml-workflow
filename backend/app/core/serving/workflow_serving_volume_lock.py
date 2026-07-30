@@ -1,5 +1,5 @@
 """
-§3.3.2 WorkflowServingVolumeLock: (model_id, serving_node) 키 단위 직렬화 계약.
+WorkflowServingVolumeLock: (model_id, serving_node) 키 단위 직렬화 계약.
 
 기본 구현은 프로세스 내 threading.Lock(다중 워커·다중 Pod 간 직렬화는 별도 구현체 주입).
 """
@@ -18,7 +18,7 @@ def serving_volume_lock_key(model_id: int, serving_node_name: str) -> str:
 
 @runtime_checkable
 class WorkflowServingVolumeLock(Protocol):
-    """§3.3.2 최소 계약."""
+    """최소 계약."""
 
     def try_acquire_nonblocking(self, key: str) -> bool:
         """즉시 획득 시 True, 불가 시 False."""
@@ -31,7 +31,7 @@ class WorkflowServingVolumeLock(Protocol):
 
 
 class ThreadingWorkflowServingVolumeLock:
-    """단일 API 프로세스·단일 워커 환경용 (§3.3.2 표)."""
+    """단일 API 프로세스·단일 워커 환경용 (표)."""
 
     def __init__(self) -> None:
         self._meta = threading.Lock()

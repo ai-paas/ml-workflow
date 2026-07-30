@@ -206,7 +206,7 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def public_url(self) -> Optional[str]:
-        """§2.6: KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
+        """KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
         if not self.model_deployments:
             return None
 
@@ -219,7 +219,7 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def backend_api_url(self) -> Optional[str]:
-        """§2.6: 배포 레코드의 internal_url 기준."""
+        """배포 레코드의 internal_url 기준."""
         if not self.model_deployments:
             return None
 

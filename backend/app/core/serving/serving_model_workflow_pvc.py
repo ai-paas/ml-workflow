@@ -1,5 +1,5 @@
 """
-§3.3~3.4: Ollama 워크플로 PVC 선택·복제, WorkflowServingVolumeLock 직렬화, 복제본 삭제.
+Ollama 워크플로 PVC 선택·복제, WorkflowServingVolumeLock 직렬화, 복제본 삭제.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from config.settings import get_settings
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class PvcReplicationConflict(Exception):
-    """§3.3.1: 동일 (model_id, serving_node)에서 복제·삭제 직렬화 충돌."""
+    """동일 (model_id, serving_node)에서 복제·삭제 직렬화 충돌."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -144,7 +145,7 @@ def _list_cinder_sc_availability_pairs(provisioner: str) -> List[Tuple[str, str]
 
 
 def _select_storage_class_name_for_cinder_zone(node_zone: str) -> str:
-    """§12.3.4: node_zone 과 parameters.availability 가 일치하는 Cinder SC 이름. 없거나 모호하면 ValueError."""
+    """node_zone 과 parameters.availability 가 일치하는 Cinder SC 이름. 없거나 모호하면 ValueError."""
     from config.settings import get_settings
 
     s = get_settings()
@@ -187,7 +188,7 @@ def _select_storage_class_name_for_cinder_zone(node_zone: str) -> str:
 
 
 def _is_nfs_fallback_sc(sc_name: Optional[str]) -> bool:
-    """§12: 주어진 StorageClass 가 NFS fallback 으로 설정된 SC 인지 판별."""
+    """주어진 StorageClass 가 NFS fallback 으로 설정된 SC 인지 판별."""
     if not sc_name:
         return False
     s = get_settings()
@@ -198,7 +199,7 @@ def _is_nfs_fallback_sc(sc_name: Optional[str]) -> bool:
 
 
 def _resolve_clone_storage_class_when_cinder_zone_mismatch(node_zone: str) -> str:
-    """§12: node_zone≠원본 availability 일 때 클론용 SC. 임시 NFS fallback 또는 Cinder zone 매칭."""
+    """node_zone≠원본 availability 일 때 클론용 SC. 임시 NFS fallback 또는 Cinder zone 매칭."""
     from config.settings import get_settings
 
     s = get_settings()
@@ -277,7 +278,7 @@ def _wait_pvc_bound(
 
 
 def _find_node_attached_to_pvc(core_v1: "CoreV1Api", namespace: str, pvc_name: str) -> Optional[str]:
-    """§12: PVC 를 사용 중인 Pod 의 nodeName. 없으면 None (어느 노드든 스케줄 가능)."""
+    """PVC 를 사용 중인 Pod 의 nodeName. 없으면 None (어느 노드든 스케줄 가능)."""
     try:
         pods = core_v1.list_namespaced_pod(namespace=namespace).items or []
     except Exception as e:
@@ -311,7 +312,7 @@ def _copy_pvc_data_via_job(
     dst_pvc: str,
     target_node: Optional[str],
 ) -> None:
-    """§12: src_pvc → dst_pvc 데이터를 복사하는 일회성 Job. 동기 대기 후 실패 시 raise.
+    """src_pvc → dst_pvc 데이터를 복사하는 일회성 Job. 동기 대기 후 실패 시 raise.
 
     - src 는 RO 마운트 (Longhorn 같은 노드 다중 Pod RO 공유 가능)
     - dst 는 RW 마운트 (NFS PVC, 어디서든 RW 마운트 가능)
@@ -468,7 +469,7 @@ def _create_pvc_clone_from_source(
 
     sc_name = storage_class_name_override if storage_class_name_override else spec.storage_class_name
 
-    # §12: NFS fallback SC 는 CSI volume cloning 미지원 → data_source 를 비우고 빈 PVC 생성 후 별도 Job 으로 복사.
+    # NFS fallback SC 는 CSI volume cloning 미지원 → data_source 를 비우고 빈 PVC 생성 후 별도 Job 으로 복사.
     is_nfs_fallback = _is_nfs_fallback_sc(sc_name)
     ds = (
         None
@@ -615,7 +616,7 @@ def _resolve_ollama_pvc_execute_legacy(
     rollback_clone_pvcs: List[str],
     vol_lock: Optional[WorkflowServingVolumeLock] = None,
 ) -> str:
-    """§3.3: Cinder zone 매칭 비활성 시 동작."""
+    """Cinder zone 매칭 비활성 시 동작."""
     lock = vol_lock or get_workflow_serving_volume_lock()
 
     live_rows = _live_deployments_for_model(db, model_id).all()
@@ -663,7 +664,7 @@ def resolve_ollama_pvc_for_execute(
     rollback_clone_pvcs: List[str],
     vol_lock: Optional[WorkflowServingVolumeLock] = None,
 ) -> str:
-    """§3.3 / §12: 이번 Ollama 배포에 쓸 PVC 이름. 복제 시 vol_lock으로 직렬화."""
+    """이번 Ollama 배포에 쓸 PVC 이름. 복제 시 vol_lock으로 직렬화."""
     lock = vol_lock or get_workflow_serving_volume_lock()
     s = get_settings()
 
@@ -671,9 +672,7 @@ def resolve_ollama_pvc_for_execute(
         return ""
 
     if not serving_node_name:
-        logger.warning(
-            "serving_node_name 비어 있음 — §3.3 노드 분기 생략, 레지스트리 원본 PVC 사용 (model_id=%s)", model_id
-        )
+        logger.warning("serving_node_name 비어 있음 — 노드 분기 생략, 레지스트리 원본 PVC 사용 (model_id=%s)", model_id)
         return registry_pvc
 
     if not s.CINDER_ZONE_MATCH_ENABLED:
@@ -745,7 +744,7 @@ def resolve_ollama_pvc_for_execute(
 
     if not cinder_data_ok:
         logger.info(
-            "Cinder zone: 노드 label 또는 레지스트리 SC availability 미확인 — §3.3 legacy 경로 (model_id=%s)",
+            "Cinder zone: 노드 label 또는 레지스트리 SC availability 미확인 — legacy 경로 (model_id=%s)",
             model_id,
         )
     return _resolve_ollama_pvc_execute_legacy(
@@ -762,7 +761,7 @@ def _cinder_sc_override_for_clone(
     serving_node_name: str,
     registry_pvc: str,
 ) -> Optional[str]:
-    """§12: 존 불일치 시에만 target StorageClass, 일치·비활성·미조회 시 None. 매칭 SC 없으면 ValueError."""
+    """존 불일치 시에만 target StorageClass, 일치·비활성·미조회 시 None. 매칭 SC 없으면 ValueError."""
     s = get_settings()
     if not s.CINDER_ZONE_MATCH_ENABLED:
         return None
@@ -787,7 +786,7 @@ def _clone_registry_pvc_for_node(
     rollback_clone_pvcs: List[str],
     vol_lock: WorkflowServingVolumeLock,
 ) -> str:
-    """레지스트리 원본 PVC를 소스로 해당 노드 전용 클론 PVC 생성(§3.3.1 락)."""
+    """레지스트리 원본 PVC를 소스로 해당 노드 전용 클론 PVC 생성(락)."""
     sc_override = _cinder_sc_override_for_clone(serving_node_name, registry_pvc)
 
     lk = serving_volume_lock_key(model_id, serving_node_name)
@@ -942,12 +941,10 @@ def rollback_new_clone_pvcs(pvc_names: List[str]) -> None:
 
 
 def delete_replica_pvc_if_last_consumer(db: "Session", deployment_id: str) -> None:
-    """§3.4·§3.4.1: Ollama 복제 PVC, 마지막 소비자일 때만 K8s 삭제.
+    """Ollama 복제 PVC, 마지막 소비자일 때만 K8s 삭제.
 
     DEPLOYING/DEPLOYED뿐 아니라 FAILED도 처리한다(실패 전·후에 생성된 복제 PVC 정리).
     """
-    from datetime import datetime
-
     from db.models.model import Model
     from db.models.model_workflow_deployment import (
         DeploymentStatus,

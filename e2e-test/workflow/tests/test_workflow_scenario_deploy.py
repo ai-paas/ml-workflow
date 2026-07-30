@@ -1,7 +1,7 @@
 """
 E2E 시나리오: 워크플로우 시나리오 배포 테스트
 
-§5.2 시나리오 1~10 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
+시나리오 1~10 중 하나를 선택하여 프롬프트 생성 → KB 생성 → 배포 → 추론까지 검증한다.
 삭제는 포함하지 않는다. 별도 삭제: make e2e-wf-scenario-delete SCENARIO=N (저장된 배포 건별 확인)
 같은 SCENARIO 로 재실행 시 이전 배포를 덮어쓰지 않고 상태 파일의 scenario_N_deployments 목록에 추가된다.
 (ENV= 지정 시 e2e-test/.state.{ENV}.json, 미지정 시 .state.json)

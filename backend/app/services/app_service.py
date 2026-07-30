@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import traceback
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -370,8 +371,6 @@ class AppServiceService:
                                         metrics_server_available = False
                                     else:
                                         logger.warning(f"Error getting metrics for pod {pod_name}: {str(e)}")
-                                        import traceback
-
                                         logger.debug(traceback.format_exc())
                             else:
                                 logger.debug(

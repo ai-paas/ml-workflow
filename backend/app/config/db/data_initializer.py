@@ -22,7 +22,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import ColumnElement
 
 
-# settings / rdb_data import 전에 프로파일 적용 (§9.1)
+# settings / rdb_data import 전에 프로파일 적용
 def _apply_env_from_argv() -> None:
     i = 0
     while i < len(sys.argv):
@@ -81,7 +81,7 @@ class _SeedSpec:
         self.transform = transform
 
 
-# §5.3 실행 순서
+# 시드 적용 실행 순서 — 여기 나열된 순서대로 각 spec에 mode가 적용된다.
 SEED_SPECS: tuple[_SeedSpec, ...] = (
     _SeedSpec(UserModel, USER_DATA, "username", "user_usernames", transform=_user_transform),
     _SeedSpec(ModelFormat, MODEL_FORMAT_DATA, "name"),

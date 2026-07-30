@@ -1,3 +1,4 @@
+import warnings
 from typing import Optional
 
 from config.settings import get_settings
@@ -115,8 +116,6 @@ class ExperimentService:
                     # S3 삭제 실패 처리
                     # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
                     if mlflow_deleted:
-                        import warnings
-
                         warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
                         # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
                     else:

@@ -1,5 +1,6 @@
 """Workflow API 라우터"""
 
+import asyncio
 import base64
 import io
 import json
@@ -1066,15 +1067,15 @@ def get_workflow(
         - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
             - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
         - created_at (datetime): 연결 생성 시각
-    - **public_url** (str|None): §2.6 — 요약용 첫 배포가 **KSERVE**이고 `KSERVE_GATEWAY_URL`이 설정된 경우에만
+    - **public_url** (str|None): 요약용 첫 배포가 **KSERVE**이고 `KSERVE_GATEWAY_URL`이 설정된 경우에만
         `{게이트웨이}/v2/models/{model_name}/infer`, 그 외 null
-    - **backend_api_url** (str|None): §2.6 — 요약용 첫 `model_workflow_deployments` 배포의 `internal_url` 기반(없으면 null;
+    - **backend_api_url** (str|None): 요약용 첫 `model_workflow_deployments` 배포의 `internal_url` 기반(없으면 null;
         REMOTE 등은 스키마 계산상 null일 수 있음 — 상세는 `/workflows/{id}/models` 참고)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
     ## Notes
-    - public_url·backend_api_url은 배포 레코드·설정에 따라 §2.6 정책으로 계산됨
+    - public_url·backend_api_url은 배포 레코드·설정에 따라 계산됨
     - 템플릿인 경우 is_template=true (템플릿 조회 API 사용 권장)
     - kubeflow_run_id가 있으면 /workflows/{workflow_id}/status로 실행 상태 확인 가능
     - 배포된 모델 정보는 /workflows/{workflow_id}/models로 확인 가능
@@ -1167,8 +1168,8 @@ def update_workflow(
     - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
     - **components** (List[ComponentReadSchema]): 컴포넌트 목록
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
-    - **public_url** (str|None): §2.6 — 첫 배포가 KSERVE이고 게이트웨이가 설정된 경우에만 공개 추론 URL
-    - **backend_api_url** (str|None): §2.6 — 첫 배포 기준 요약 URL(없으면 null)
+    - **public_url** (str|None): 첫 배포가 KSERVE이고 게이트웨이가 설정된 경우에만 공개 추론 URL
+    - **backend_api_url** (str|None): 첫 배포 기준 요약 URL(없으면 null)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
@@ -1227,8 +1228,6 @@ async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300
     Returns:
         성공 여부
     """
-    import asyncio
-
     kf_manager = KubeflowManager()
     elapsed = 0
     check_interval = 3  # 3초마다 확인
@@ -1759,7 +1758,7 @@ def get_workflow_execution_status(
         - **internal_url** (str, optional): 클러스터 내부 접근 URL (Ollama ClusterIP 등) 또는 REMOTE 베이스 URL
         - **gateway_url** (str|None): 설정된 KServe 게이트웨이 베이스 URL(없으면 null)
         - **public_url** (str|None): KSERVE+게이트웨이 설정 시에만 추론 URL
-        - **backend_api_url** (str|None): §2.6 — `internal_url` 우선, REMOTE는 `remote_api_url` 폴백
+        - **backend_api_url** (str|None): `internal_url` 우선, REMOTE는 `remote_api_url` 폴백
         - **status** (str): 배포 상태
             - 가능한 값:
                 - "DEPLOYING": 배포 중
@@ -2283,7 +2282,7 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 11. 경로당 컴포넌트 수 제한 (§4.2) — MODEL ≤ 2/경로, KB ≤ 1/경로
+    # 11. 경로당 컴포넌트 수 제한 — MODEL ≤ 2/경로, KB ≤ 1/경로
     path_limit_errors = []
     graph_fwd: Dict[str, List[str]] = {}
     for conn in definition.connections:
@@ -2329,7 +2328,7 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 12. KB로 들어오는 MODEL 연결은 최대 1개 (§4.3)
+    # 12. KB로 들어오는 MODEL 연결은 최대 1개
     kb_model_conn_errors = []
     kb_model_incoming: Dict[str, int] = {}
     for conn in definition.connections:
@@ -2426,7 +2425,7 @@ def _validate_workflow_definition_checks(
         )
     )
 
-    # 15b. §7.9 사전정의 서빙 메타(5키) 직접 또는 부모 파생으로 해소 가능한지
+    # 15b. 사전정의 서빙 메타(5키)를 모델에서 직접 또는 부모 모델 파생으로 해소할 수 있는지
     serving_meta_errors: List[str] = []
     for comp in definition.components:
         if comp.type != ComponentType.MODEL or not comp.model_id:
@@ -2584,7 +2583,7 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
         return image_bytes
 
 
-# task 라우팅 정규화 단일 지점(§8.4). task 는 DB·응답에는 원본(vqa 등) 그대로 저장하되, 라우팅/디스패치는
+# task 라우팅 정규화 단일 지점. task 는 DB·응답에는 원본(vqa 등) 그대로 저장하되, 라우팅/디스패치는
 # 정규화된 task 로만 판단한다 — vqa 는 당분간 text-generation 과 동일 추론(엔드포인트 공유)이라 여기서 접는다.
 # 이미지 입력(멀티모달) 추론을 붙일 때 이 맵에서 "vqa" 만 제거하면 vqa 전용 경로로 갈린다.
 # (현재 라우팅/검증은 model_type 축이라 VQA(type=LLM)는 이미 /test/rag 로 통과하며, task 단일축 전환 시 이 맵이 훅이 된다.)
@@ -3136,7 +3135,7 @@ async def _execute_odm_inference(
             component_name=component.name,
             component_type="MODEL",
             model_type=model_type_name,
-            error="REMOTE 배포 유형은 §6 Remote LLM API 연동 전까지 ODM 테스트를 지원하지 않습니다.",
+            error="REMOTE 배포 유형은 Remote LLM API 연동 전까지 ODM 테스트를 지원하지 않습니다.",
         )
 
     # 입력 검증
@@ -4207,14 +4206,14 @@ def get_deployed_models(
     워크플로우에 배포된 모델 목록 조회
 
     워크플로우의 `model_workflow_deployments` 레코드를 조회합니다.
-    KServe·Ollama·REMOTE 유형별 `internal_url`, `public_url`, `backend_api_url`(§2.6) 등을 포함합니다.
+    KServe·Ollama·REMOTE 유형별 `internal_url`, `public_url`, `backend_api_url` 등을 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **backend_api_url** (str|None): 첫 번째 배포 기준 §2.6 요약 URL(없으면 null)
+    - **backend_api_url** (str|None): 첫 번째 배포 기준 요약 URL(없으면 null)
     - **deployed_models** (List[dict]): 배포된 모델 목록
         - workflow_id (str): 소속 워크플로우 ID
         - component_id (str): 컴포넌트 ID
@@ -4228,7 +4227,7 @@ def get_deployed_models(
         - internal_url (str|None): 클러스터 내부 URL 또는 REMOTE 베이스 URL
         - deployment_type (str): KSERVE | OLLAMA | REMOTE
         - public_url (str|None): KSERVE+게이트웨이 설정 시에만
-        - backend_api_url (str|None): §2.6 — REMOTE는 internal·remote_api 폴백
+        - backend_api_url (str|None): REMOTE는 internal·remote_api 폴백
         - gateway_url (str|None): KServe 게이트웨이 베이스 URL(없으면 null)
         - deployed_at (datetime): 배포 시각
         - deleted_at (datetime): 삭제 시각 (삭제된 경우)
@@ -4238,7 +4237,7 @@ def get_deployed_models(
     - **total** (int): 배포된 모델 총 개수
 
     ## Notes
-    - 요약 필드 `backend_api_url`(루트)는 첫 배포 기준 §2.6과 동일
+    - 요약 필드 `backend_api_url`(루트)는 첫 배포 기준과 동일
     - 컴포넌트 테스트·RAG/ML 테스트는 워크플로가 ACTIVE이고 해당 배포가 DEPLOYED일 때 가능
 
     ## Errors
@@ -4254,7 +4253,7 @@ def get_deployed_models(
     # DB에서 배포된 모델 목록 조회
     deployed_models = ModelWorkflowDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
 
-    # backend_api_url — §2.6: 첫 배포의 internal_url 기준
+    # backend_api_url — 첫 배포의 internal_url 기준
     backend_api_url = None
     if deployed_models:
         first_deployment = deployed_models[0]
@@ -4507,7 +4506,7 @@ async def finalize_cleanup(
             )
 
             # KServe 리소스가 모두 삭제됐으므로 워크플로우를 DRAFT 로 되돌린다(재배포 가능 상태).
-            # ACTIVE(정상 배포본) / ERROR 어느 쪽이든 DRAFT 로 전환한다(설계서 §7-2).
+            # ACTIVE(정상 배포본) / ERROR 어느 쪽이든 DRAFT 로 전환한다.
             workflow_updated = False
             if workflow.status != WorkflowStatus.DRAFT:
                 workflow.status = WorkflowStatus.DRAFT

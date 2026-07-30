@@ -192,7 +192,7 @@ async def get_experiment(
     특정 실험의 상세 정보를 조회합니다.
     목록 필드에 더해 학습 메트릭, 등록 상태, 메시지 정보를 통합 제공합니다.
 
-    ## 응답 — status·등록·메시지(문서 §7.2과 정합)
+    ## 응답 — status·등록·메시지
     - **status** (str): `CREATED`, `RUNNING`, `COMPLETED`, `FAILED` 등(완료는 주로 `COMPLETED`)
     - **registration_status** (str): `NOT_REQUESTED` | `PIPELINE_SUBMITTED` | `SUCCESS` | `FAILED`
     - **registered_model_id** (int, 선택): 등록 성공 시에만 값

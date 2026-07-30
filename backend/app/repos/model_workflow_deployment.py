@@ -1,5 +1,6 @@
 """워크플로 모델 배포 Repository."""
 
+from datetime import datetime
 from typing import List, Optional
 
 from db.models.model_workflow_deployment import DeploymentStatus, ModelWorkflowDeployment
@@ -41,8 +42,6 @@ class ModelWorkflowDeploymentRepository(
         status: DeploymentStatus,
         error_message: Optional[str] = None,
     ) -> ModelWorkflowDeployment:
-        from datetime import datetime
-
         deployment.status = status
 
         if status == DeploymentStatus.DEPLOYED:

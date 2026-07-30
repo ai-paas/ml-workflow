@@ -1,4 +1,4 @@
-"""워크플로 서빙: 사전정의 메타(§7.9)·K8s 인벤토리(§7.3)·리소스 플래너(§7.4~7.7)."""
+"""워크플로 서빙: 사전정의 메타·K8s 인벤토리·리소스 플래너."""
 
 from core.serving.serving_k8s_inventory import (
     NodeInventory,

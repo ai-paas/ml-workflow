@@ -1,4 +1,4 @@
-"""워크플로 서빙 배포 정책: §2.5·§2.6 deployment_type·URL, §7.3.2 MODEL 확정 순서."""
+"""워크플로 서빙 배포 정책: deployment_type·URL, MODEL 확정 순서."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from db.models.service import ComponentType, Workflow, WorkflowComponent
 
 
 def parse_remote_serving_model_map(settings: Settings) -> dict[str, str]:
-    """§6: `REMOTE_SERVING_MODEL_MAP` JSON → repo_id → 원격 서버 모델명. 잘못된 JSON은 빈 dict."""
+    """`REMOTE_SERVING_MODEL_MAP` JSON → repo_id → 원격 서버 모델명. 잘못된 JSON은 빈 dict."""
     raw = (settings.REMOTE_SERVING_MODEL_MAP or "").strip()
     if not raw:
         return {}
@@ -36,9 +36,9 @@ def resolve_workflow_serving_deployment_type(
     model: Optional[Model],
     _settings: Settings,
 ) -> WorkflowServingDeploymentType:
-    """MODEL 컴포넌트의 deployment_type (§2.5).
+    """MODEL 컴포넌트의 deployment_type.
 
-    우선순위: §6 REMOTE(`REMOTE_SERVING_MODEL_MAP`에 repo_id 존재) → Ollama → KServe.
+    우선순위: REMOTE(`REMOTE_SERVING_MODEL_MAP`에 repo_id 존재) → Ollama → KServe.
     """
     rid = (model.repo_id or "").strip() if model is not None else ""
     if rid:
@@ -81,7 +81,7 @@ def backend_api_url_from_internal(internal_url: Optional[str]) -> Optional[str]:
 
 def topological_order_model_components(workflow: Workflow) -> list[WorkflowComponent]:
     """
-    §7.3.2: 동일 워크플로 내 MODEL 컴포넌트 확정 순서.
+    동일 워크플로 내 MODEL 컴포넌트 확정 순서.
 
     START/END를 제외한 컴포넌트 그래프로 위상 정렬 후, MODEL만 순서를 추출한다.
     순환 시 설계서대로 MODEL은 component.id 사전순으로 처리한다.

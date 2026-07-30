@@ -1,5 +1,6 @@
 """모델 기본 배포 정보 Repository"""
 
+from datetime import datetime
 from typing import List, Optional
 
 from db.models.model_base_deployment import BaseDeploymentStatus, ModelBaseDeployment
@@ -40,8 +41,6 @@ class ModelBaseDeploymentRepository(
         error_message: Optional[str] = None,
     ) -> ModelBaseDeployment:
         """배포 상태 업데이트"""
-        from datetime import datetime
-
         deployment.status = status
 
         if status == BaseDeploymentStatus.DEPLOYED:
@@ -50,8 +49,6 @@ class ModelBaseDeploymentRepository(
         elif status == BaseDeploymentStatus.FAILED:
             deployment.error_message = error_message
         elif status == BaseDeploymentStatus.DELETED:
-            from datetime import datetime
-
             deployment.deployed_at = None  # deleted_at은 TimestampMixin에서 처리
 
         db.commit()

@@ -26,7 +26,7 @@ class DeploymentStatus(PyEnum):
 
 
 class WorkflowServingDeploymentType(PyEnum):
-    """MODEL 컴포넌트 서빙 배포 유형 (§2.5)."""
+    """MODEL 컴포넌트 서빙 배포 유형."""
 
     KSERVE = "KSERVE"
     OLLAMA = "OLLAMA"
@@ -34,7 +34,7 @@ class WorkflowServingDeploymentType(PyEnum):
 
 
 class ServingDeviceType(PyEnum):
-    """서빙 시 요청된 디바이스 타입 (§2.3)."""
+    """서빙 시 요청된 디바이스 타입."""
 
     GPU = "GPU"
     CPU = "CPU"

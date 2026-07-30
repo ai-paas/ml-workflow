@@ -29,7 +29,7 @@ class WorkflowExecutor:
         self.deployed_services = {}  # component_id -> inference_service_name
 
     def _prepare_serving_plans_for_workflow(self, workflow: Workflow, parameters: Dict[str, Any]) -> None:
-        """§7.9·§7.9.1 사전정의 메타 조회 및 컴포넌트별 동결 리소스 계획을 parameters['serving_plans']에 적재."""
+        """사전정의 메타 조회 및 컴포넌트별 동결 리소스 계획을 parameters['serving_plans']에 적재."""
         from core.serving.serving_k8s_inventory import collect_node_inventory, node_inventories_with_free_overrides
         from core.serving.serving_resource_meta import resolve_normalized_serving_meta
         from core.serving.serving_resource_planner import (
@@ -704,7 +704,7 @@ class WorkflowExecutor:
                                 f"Please ensure model download pipeline completed successfully."
                             )
 
-                        # Ollama용 리소스 설정 (§7.9 사전정의 메타 → 백엔드에서 동결된 request/limit)
+                        # Ollama용 리소스 설정 (사전정의 메타 → 백엔드에서 동결된 request/limit)
                         ollama_resources = client.V1ResourceRequirements(
                             requests={
                                 "memory": memory_request,
@@ -1091,7 +1091,7 @@ class WorkflowExecutor:
                     else:
                         kserve_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
-                    # Predictor 스펙 생성 (§7: 백엔드에서 확정한 노드 → nodeSelector)
+                    # Predictor 스펙 생성 (백엔드에서 확정한 노드 → nodeSelector)
                     # 대형 모델(ESMC-6B 24GB 등)은 아티팩트 다운로드+로드 콜드스타트가 Knative 기본
                     # progress-deadline(600s)을 넘겨 "Initial scale was never achieved" 로 revision 이 실패한다.
                     # 아래 폴링 상한(max_wait 30분)과 맞춰 예약 마감을 늘린다. 진짜 실패(ImagePull/CrashLoop 등)는
@@ -1287,7 +1287,7 @@ class WorkflowExecutor:
                     # 서비스 URL 정보 생성
                     internal_url = f"http://{service_name}.{namespace}.svc.cluster.local"
 
-                    # 외부 접근을 위한 정보 (Istio Gateway 경유) — 파이프라인에 주입된 설정만 사용(§2.6)
+                    # 외부 접근을 위한 정보 (Istio Gateway 경유) — 파이프라인에 주입된 설정만 사용
                     gw = (kserve_gateway_url or "").strip().rstrip("/")
                     gateway_url = gw if gw else ""
                     service_hostname = f"{service_name}.{namespace}.example.com"
@@ -1477,7 +1477,7 @@ class WorkflowExecutor:
             repo_id_value = model.repo_id if model and model.repo_id else ""
 
             plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
-            # §3: prepare 단계에서 확정한 PVC(원본 또는 노드 전용 복제본)
+            # prepare 단계에서 확정한 PVC(원본 또는 노드 전용 복제본)
             pvc_name_value = (plan.get("resolved_ollama_pvc") or "").strip()
             if not pvc_name_value and model and hasattr(model, "registry") and model.registry:
                 pvc_name_value = model.registry.pvc or ""
@@ -1489,7 +1489,7 @@ class WorkflowExecutor:
             eph_lim = plan.get("ephemeral_storage_limit") or "1Gi"
             pin_node = (plan.get("serving_node_name") or parameters.get("node_name") or "").strip()
 
-            # §6 전까지 REMOTE는 deployment_type/파이프라인 분기 모두 미연동(resolve는 KSERVE|OLLAMA만).
+            # 현재 REMOTE는 deployment_type/파이프라인 분기 모두 미연동(resolve는 KSERVE|OLLAMA만).
             if framework == "ollama":
                 deployment_mode = "ollama"
             else:

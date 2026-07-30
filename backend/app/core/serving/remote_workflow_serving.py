@@ -1,4 +1,4 @@
-"""§6 Remote LLM 호출 최소 구현. §6.5 인증·요청 스키마·스트리밍 등은 스텁(고정 OpenAI류 /v1/chat/completions)."""
+"""Remote LLM 호출 최소 구현. 인증·요청 스키마·스트리밍 등은 스텁(고정 OpenAI류 /v1/chat/completions)."""
 
 from __future__ import annotations
 

@@ -241,7 +241,7 @@ def container_train(
 
         # 데이터셋 확보: dataset_file 이면 즉시 등록, dataset_id 면 조회 후 kind 검사
         if has_dataset_file:
-            # dataset_kind 는 '업로드한 데이터의 사실'이라 필수다(api-spec §2.1). 모델에서 도출(자동부여)하면
+            # dataset_kind 는 '업로드한 데이터의 사실'이라 필수다. 모델에서 도출(자동부여)하면
             # 검사가 동어반복이 되어 호환성 검증이 무력화된다 → 클라이언트가 명시한 값을 모델 요구와 대조한다.
             if body.dataset_kind is None:
                 raise HTTPException(status_code=400, detail="dataset_file 동반 시 dataset_kind 는 필수입니다.")

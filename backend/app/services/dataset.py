@@ -76,11 +76,11 @@ class DatasetService:
         """업로드된 데이터셋 ZIP 을 요청 분류(dataset_kind)의 형식 요구사항으로 검증한다.
 
         - object-detection: COCO128 구조 (annotations/instances_{train,val}2017.json + train2017/val2017)
-          (사용자 친화 ZIP 사양은 §11.1 후속 — 현재는 happy-path 스텁)
+          (사용자 친화 ZIP 사양은 후속 — 현재는 happy-path 스텁)
         - protein-classification: TCR-Epitope CSV (필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 비어있지 않음, 행≥16)
 
         출력에는 dataset_kind 가 포함되지 않는다(입력으로 이미 분류가 정해져 있음).
-        ZIP 자체가 깨진 경우는 HTTP 400 으로 거부하고(api-spec §3.1),
+        ZIP 자체가 깨진 경우는 HTTP 400 으로 거부하고,
         분류 형식 요구사항을 충족하지 못한 경우만 200 + is_valid=False 로 응답한다.
         """
         temp_dir = None
@@ -140,7 +140,7 @@ class DatasetService:
 
     @staticmethod
     def _check_object_detection(root_dir: Path) -> tuple[bool, list[str]]:
-        """COCO128 구조 검증 (기존 검증 로직 재사용 — happy-path 스텁, §11.1 후속)."""
+        """COCO128 구조 검증 (기존 검증 로직 재사용 — happy-path 스텁)."""
         errors: list[str] = []
 
         annotations_dir = root_dir / "annotations"
@@ -179,7 +179,7 @@ class DatasetService:
     def _check_protein_classification(root_dir: Path) -> tuple[bool, list[str]]:
         """TCR-Epitope CSV 검증. 필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 비어있지 않음, 행≥16.
 
-        (프로즈의 epitope+cdr3b 길이 1~80 상한은 train_eval 이 max_length=80 으로 truncate 하므로 검사하지 않음 — README §5.2)
+        (프로즈의 epitope+cdr3b 길이 1~80 상한은 train_eval 이 max_length=80 으로 truncate 하므로 검사하지 않음)
         """
         csv_path = DatasetService._find_protein_csv(root_dir)
         if csv_path is None:
