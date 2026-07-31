@@ -206,6 +206,24 @@ class Settings(BaseSettings):
         description="생성 후 이 시간이 지난 복제본만 회수 대상. 방금 만들어져 아직 복사 Job·Pod가 "
         "보이지 않는 복제본을 진행 중인 배포에서 빼앗지 않도록 하는 여유 시간.",
     )
+    # 최적화/경량화 작업 추적. 상태 갱신과 결과 모델 등록을 백그라운드 폴링이 전담하므로,
+    # 조회 API 는 DB 만 읽는다.
+    MODEL_IMPROVEMENT_POLL_INTERVAL_SEC: int = Field(
+        default=5,
+        description="최적화 작업 진행 상태를 최적화 서버에 물어보는 주기(초).",
+    )
+    MODEL_IMPROVEMENT_POLL_TIMEOUT_SEC: int = Field(
+        default=3600,
+        description="최적화 작업 추적 상한(초). 작업 생성 시각 기준으로 재며, 서버가 재시작되어도 "
+        "다시 늘어나지 않는다. 초과하면 마지막으로 한 번 더 확인한 뒤 실패로 종결한다.",
+    )
+    # 학습 메트릭 폴링도 같은 방식으로 종결한다. 상한이 없으면 학습 파드가 사라진 뒤에도
+    # MLflow run 이 RUNNING 으로 남아 폴링이 끝나지 않고, 재기동 때마다 되살아난다.
+    TRAINING_POLL_TIMEOUT_SEC: int = Field(
+        default=86400,
+        description="학습 실험 추적 상한(초). 실험 생성 시각 기준으로 재며, 서버가 재시작되어도 "
+        "다시 늘어나지 않는다. 초과하면 마지막으로 한 번 더 확인한 뒤 실패로 종결한다.",
+    )
     WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC: int = Field(
         default=1800,
         description="워크플로우 모델 서빙 배포가 Ready 될 때까지 대기하는 상한(초). "

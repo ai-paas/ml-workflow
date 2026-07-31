@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from config.db.enums import ModelFormatEnum, ModelProviderEnum
+from config.db.session import SessionLocal
 from config.optimization_sources import optimization_task_allowlist_for_repo
-from core.optimization.optimization_client import OptimizationClient
+from config.settings import get_settings
+from core.optimization.optimization_client import OptimizationClient, get_optimization_client
 from db.models.model import ModelRegistry
 from db.models.model_improvement_task import ModelImprovementTask
 from fastapi import HTTPException, status
@@ -386,13 +389,18 @@ class ModelImprovementService:
             created_at=_isoformat_utc(task_row.created_at),
         )
 
-    async def get_task_status(
+    def get_task_status(
         self,
         db: Session,
         task_id: str,
         *,
         current_username: str,
     ) -> ImprovementStatusResponse:
+        """DB 에 기록된 상태만 돌려준다.
+
+        최적화 서버 조회와 결과 모델 등록은 백그라운드 폴링이 전담한다. 조회 때마다 원격을 부르면
+        아무도 조회하지 않는 동안 작업이 끝나도 결과가 반영되지 않는다.
+        """
         row = db.query(ModelImprovementTask).filter(ModelImprovementTask.task_id == task_id).first()
         if not row:
             raise HTTPException(
@@ -405,33 +413,126 @@ class ModelImprovementService:
                 detail="이 작업을 조회할 권한이 없습니다.",
             )
 
-        raw = await self._client.get_task_detail(task_id)
-        remote = _determine_remote_task_status(raw)
-        api_status = _to_api_status(remote)
-        row.last_known_status = api_status
-        row.updated_at = datetime.now(timezone.utc)
-
-        err: str | None = None
-        result_model_id = row.result_model_id
-
-        if remote == RemoteTaskStatus.SUCCESS:
-            self._maybe_register_on_success(db, row, raw)
-            result_model_id = row.result_model_id
-        elif remote == RemoteTaskStatus.FAILED:
-            err = raw.get("error") if isinstance(raw.get("error"), str) else None
-            if not err:
-                err = "최적화 작업이 실패하였습니다."
-
-        db.commit()
-        db.refresh(row)
-
         return ImprovementStatusResponse(
             task_id=row.task_id,
-            status=api_status,
+            status=row.last_known_status,
             source_model_id=row.source_model_id,
             created_at=_isoformat_utc(row.created_at),
             updated_at=_isoformat_utc(row.updated_at),
-            message=_STATUS_MESSAGES.get(api_status),
-            result_model_id=result_model_id,
-            error=err,
+            message=_STATUS_MESSAGES.get(row.last_known_status),
+            result_model_id=row.result_model_id,
+            error=row.error_message,
         )
+
+
+def _poll_deadline(created_at: datetime) -> datetime:
+    """작업 생성 시각 기준 추적 상한. 재시작해도 늘어나지 않도록 폴링 시작 시각이 아닌 created_at 을 쓴다."""
+    base = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
+    return base + timedelta(seconds=int(get_settings().MODEL_IMPROVEMENT_POLL_TIMEOUT_SEC or 7200))
+
+
+def _finish_task(db: Session, row: ModelImprovementTask, api_status: str, error: str | None) -> None:
+    row.last_known_status = api_status
+    row.error_message = error
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+
+async def poll_improvement_task(task_id: str) -> None:
+    """최적화 작업이 끝날 때까지 서버에 물어보며 DB 를 갱신한다.
+
+    성공 시 결과 모델 등록까지 이 루프가 처리하므로, 사용자가 화면을 보고 있지 않아도 반영된다.
+    어떤 경로로 끝나든 상태를 SUCCEEDED 또는 FAILED 로 확정한다. 활성 상태로 남겨두면 조회 API 가
+    DB 만 읽는 구조에서 영원히 진행 중으로 보이고, 같은 모델에 대한 재시도까지 막힌다.
+    """
+    settings = get_settings()
+    interval = max(1, int(settings.MODEL_IMPROVEMENT_POLL_INTERVAL_SEC or 5))
+    service = ModelImprovementService(get_optimization_client())
+
+    while True:
+        db = SessionLocal()
+        try:
+            row = db.query(ModelImprovementTask).filter(ModelImprovementTask.task_id == task_id).first()
+            if row is None:
+                logger.info("최적화 폴링 종료: task %s 행이 없음", task_id)
+                return
+            if row.last_known_status not in _ACTIVE_STATUSES:
+                return
+
+            expired = datetime.now(timezone.utc) >= _poll_deadline(row.created_at)
+
+            try:
+                raw = await service._client.get_task_detail(task_id)
+            except HTTPException as e:
+                if e.status_code == status.HTTP_404_NOT_FOUND:
+                    _finish_task(db, row, "FAILED", "최적화 서버에서 작업을 찾을 수 없습니다.")
+                    logger.warning("최적화 폴링 종료: task %s 원격에 없음", task_id)
+                    return
+                # 일시적인 연결·게이트웨이 오류는 다음 주기에 다시 시도한다.
+                logger.warning("최적화 폴링 조회 실패(task=%s): %s", task_id, e.detail)
+                if expired:
+                    _finish_task(db, row, "FAILED", "최적화 서버 상태를 확인하지 못한 채 추적 시간이 초과되었습니다.")
+                    return
+                raw = None
+
+            if raw is not None:
+                remote = _determine_remote_task_status(raw)
+                if remote == RemoteTaskStatus.SUCCESS:
+                    row.last_known_status = _to_api_status(remote)
+                    row.updated_at = datetime.now(timezone.utc)
+                    service._maybe_register_on_success(db, row, raw)
+                    row.error_message = None
+                    db.commit()
+                    logger.info("최적화 완료: task=%s result_model_id=%s", task_id, row.result_model_id)
+                    return
+                if remote == RemoteTaskStatus.FAILED:
+                    err = raw.get("error") if isinstance(raw.get("error"), str) else None
+                    _finish_task(db, row, "FAILED", err or "최적화 작업이 실패하였습니다.")
+                    logger.info("최적화 실패: task=%s", task_id)
+                    return
+
+                api_status = _to_api_status(remote)
+                if row.last_known_status != api_status:
+                    row.last_known_status = api_status
+                row.updated_at = datetime.now(timezone.utc)
+                db.commit()
+
+                if expired:
+                    # 상한을 넘겼지만 원격은 아직 진행 중이다. 여기서 종결짓지 않으면 활성 상태로 방치된다.
+                    _finish_task(
+                        db,
+                        row,
+                        "FAILED",
+                        "추적 시간이 초과되었습니다. 최적화 서버에서는 계속 진행 중일 수 있습니다.",
+                    )
+                    logger.warning("최적화 추적 시간 초과: task=%s", task_id)
+                    return
+        except Exception as e:
+            logger.error("최적화 폴링 오류(task=%s): %s", task_id, e)
+        finally:
+            db.close()
+
+        await asyncio.sleep(interval)
+
+
+def resume_open_improvement_polls() -> int:
+    """활성 상태로 남은 최적화 작업의 폴링을 다시 건다. 시작한 개수를 돌려준다.
+
+    백그라운드 폴링은 프로세스와 함께 사라지므로, 재배포·재시작을 건너뛴 작업은 여기서 이어받는다.
+    상한을 이미 넘긴 작업도 그대로 태운다. 폴링이 첫 주기에서 종결 처리한다.
+    """
+    db = SessionLocal()
+    try:
+        rows = db.query(ModelImprovementTask).filter(ModelImprovementTask.last_known_status.in_(_ACTIVE_STATUSES)).all()
+        task_ids = [r.task_id for r in rows]
+    except Exception as e:
+        logger.error("최적화 폴링 재개 대상 조회 실패: %s", e)
+        return 0
+    finally:
+        db.close()
+
+    for tid in task_ids:
+        asyncio.create_task(poll_improvement_task(tid))
+    if task_ids:
+        logger.info("최적화 폴링 재개: %d건 %s", len(task_ids), task_ids)
+    return len(task_ids)

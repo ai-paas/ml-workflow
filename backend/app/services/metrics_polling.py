@@ -1,12 +1,13 @@
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import mlflow
 from config.db.session import SessionLocal
 from config.settings import get_settings
 from db.models.experiment import ExperimentMetricsModel, ExperimentModel
+from mlflow.exceptions import MlflowException
 from services.experiment import ExperimentService
 from sqlalchemy import select
 
@@ -45,10 +46,39 @@ def _extract_max_epoch(experiment) -> int:
     return 0
 
 
-def _wait_for_run_id(experiment_id: int) -> tuple[str | None, int]:
+def _poll_deadline(experiment_id: int) -> float:
+    """실험 생성 시각 + 상한을 epoch 초로. 재시작해도 늘어나지 않도록 폴링 시작 시각을 쓰지 않는다.
+
+    생성 시각을 못 읽으면 지금부터 상한을 잰다. 상한 없음(None)으로 두면 폴링이 영원히 끝나지 않는다.
+    """
+    limit = int(settings.TRAINING_POLL_TIMEOUT_SEC or 86400)
+    db = SessionLocal()
+    try:
+        experiment = ExperimentService.get(db, experiment_id)
+        created = getattr(experiment, "created_at", None) if experiment else None
+    except Exception as e:
+        logger.warning(f"Experiment {experiment_id} 생성 시각 조회 실패 — 지금부터 상한 적용: {e}")
+        return time.time() + limit
+    finally:
+        db.close()
+    if created is None:
+        logger.warning(f"Experiment {experiment_id} 생성 시각 없음 — 지금부터 상한 적용")
+        return time.time() + limit
+    base = created if created.tzinfo is not None else created.replace(tzinfo=timezone.utc)
+    return base.timestamp() + limit
+
+
+def _deadline_passed(deadline: float | None) -> bool:
+    return deadline is not None and time.time() >= deadline
+
+
+def _wait_for_run_id(experiment_id: int, deadline: float | None = None) -> tuple[str | None, int]:
     """DB에서 experiment의 mlflow_run_id가 세팅될 때까지 대기."""
     waited = 0
     while waited < RUN_ID_WAIT_MAX:
+        if _deadline_passed(deadline):
+            logger.warning(f"Experiment {experiment_id} 추적 상한 초과 (run_id 대기 중)")
+            return None, 0
         db = SessionLocal()
         try:
             experiment = ExperimentService.get(db, experiment_id)
@@ -186,16 +216,29 @@ def _fail_experiment(experiment_id: int, train_msg: str):
 FINAL_COLLECT_DELAY = 5
 
 
-def poll_training_metrics(experiment_id: int):
-    """학습 실험의 MLflow 메트릭을 주기적으로 조회하여 DB에 업데이트한다."""
-    client = mlflow.tracking.MlflowClient(tracking_uri=settings.MLFLOW_TRACKING_URI)
+def _timeout_msg() -> str:
+    hours = int(settings.TRAINING_POLL_TIMEOUT_SEC or 86400) // 3600
+    return f"추적 시간({hours}시간)이 초과되었습니다. 학습은 계속 진행 중일 수 있습니다."
 
-    mlflow_run_id, max_epoch = _wait_for_run_id(experiment_id)
+
+def poll_training_metrics(experiment_id: int):
+    """학습 실험의 MLflow 메트릭을 주기적으로 조회하여 DB에 업데이트한다.
+
+    어떤 경로로 끝나든 실험을 COMPLETED 또는 FAILED 로 확정한다. 활성 상태로 남겨두면 학습 파드가
+    사라진 뒤에도 MLflow run 이 RUNNING 으로 남아 폴링이 끝나지 않고, 재기동할 때마다 되살아난다.
+    """
+    client = mlflow.tracking.MlflowClient(tracking_uri=settings.MLFLOW_TRACKING_URI)
+    deadline = _poll_deadline(experiment_id)
+
+    mlflow_run_id, max_epoch = _wait_for_run_id(experiment_id, deadline)
     if mlflow_run_id is None:
-        _fail_experiment(
-            experiment_id,
-            f"학습 시작 전 오류가 발생했습니다. MLflow run이 {RUN_ID_WAIT_MAX}초 내에 생성되지 않았습니다.",
-        )
+        if _deadline_passed(deadline):
+            _fail_experiment(experiment_id, _timeout_msg())
+        else:
+            _fail_experiment(
+                experiment_id,
+                f"학습 시작 전 오류가 발생했습니다. MLflow run이 {RUN_ID_WAIT_MAX}초 내에 생성되지 않았습니다.",
+            )
         return
 
     while True:
@@ -221,7 +264,30 @@ def poll_training_metrics(experiment_id: int):
                 _update_experiment(experiment_id, train_msg=_resolve_train_msg(run, final_metrics["current_epoch"]))
                 break
 
-        except Exception as e:
+            # 상한을 넘겼는데 아직 진행 중이다. 여기서 끝내지 않으면 실험이 활성 상태로 방치된다.
+            if _deadline_passed(deadline):
+                _fail_experiment(experiment_id, _timeout_msg())
+                logger.warning(f"Experiment {experiment_id} 추적 상한 초과 — FAILED 로 종결")
+                break
+
+        except MlflowException as e:
+            # run 이나 experiment 가 MLflow 에서 지워진 경우. 다시 물어봐도 결과가 달라지지 않으므로
+            # 상한까지 기다리지 않고 끝낸다.
+            if getattr(e, "error_code", "") == "RESOURCE_DOES_NOT_EXIST":
+                _fail_experiment(experiment_id, "MLflow 에서 이 학습 기록을 찾을 수 없습니다.")
+                logger.warning(f"Experiment {experiment_id} MLflow run {mlflow_run_id} 없음 — FAILED 로 종결")
+                break
             logger.error(f"Metrics polling error for experiment {experiment_id}: {e}")
+            if _deadline_passed(deadline):
+                _fail_experiment(experiment_id, "학습 상태를 확인하지 못한 채 추적 시간이 초과되었습니다.")
+                break
+
+        except Exception as e:
+            # MLflow 조회, 메트릭 파싱, DB 쓰기 중 어디서든 날 수 있다. 대개 일시적이라 다시 시도하되,
+            # 상한을 넘기면 활성 상태로 남기지 않고 종결한다.
+            logger.error(f"Metrics polling error for experiment {experiment_id}: {e}")
+            if _deadline_passed(deadline):
+                _fail_experiment(experiment_id, "학습 상태를 확인하지 못한 채 추적 시간이 초과되었습니다.")
+                break
 
         time.sleep(POLL_INTERVAL)
