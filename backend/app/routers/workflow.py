@@ -1689,6 +1689,19 @@ def execute_workflow(
     # 구조예측(ESMFold2) 컴포넌트가 있으면 백본 ESMC-6B 등록·레지스트리 준비를 배포 전에 강제한다.
     _validate_structure_prediction_backbone(db, workflow)
 
+    # 배포 행은 서빙 계획·PVC 확보가 끝난 뒤에야 생기므로, 그 사이에 들어온 같은 워크플로의 재요청은
+    # 위의 has_active_deployment 검사를 그냥 통과한다. 실행 구간 자체를 워크플로 단위로 직렬화한다.
+    from core.serving.workflow_serving_volume_lock import get_workflow_serving_volume_lock, workflow_execute_guard_key
+
+    exec_guard = get_workflow_serving_volume_lock()
+    exec_guard_key = workflow_execute_guard_key(workflow_id)
+    if not exec_guard.try_acquire_nonblocking(exec_guard_key):
+        logger.warning(f"Workflow execute already in progress: {workflow_id}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이 워크플로우의 배포가 이미 진행 중입니다. 완료될 때까지 기다려 주세요.",
+        )
+
     try:
         from core.serving.serving_model_workflow_pvc import PvcReplicationConflict
 
@@ -1719,6 +1732,9 @@ def execute_workflow(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to execute workflow: {str(e)}"
         )
+
+    finally:
+        exec_guard.release(exec_guard_key)
 
 
 @router.get("/{workflow_id}/status")

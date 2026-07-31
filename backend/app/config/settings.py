@@ -196,6 +196,16 @@ class Settings(BaseSettings):
         default=1800,
         description="데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
     )
+    # 복사가 끝나지 않은 채 남은 복제본 회수. 배포 행에 한 번도 기록되지 않으면 기존 정리 경로가 못 찾는다.
+    OLLAMA_CLONE_RECLAIM_ENABLED: bool = Field(
+        default=False,
+        description="불완전 복제 PVC를 실제로 삭제한다. false면 삭제 없이 회수 대상만 로그로 남긴다.",
+    )
+    OLLAMA_CLONE_RECLAIM_GRACE_SEC: int = Field(
+        default=3600,
+        description="생성 후 이 시간이 지난 복제본만 회수 대상. 방금 만들어져 아직 복사 Job·Pod가 "
+        "보이지 않는 복제본을 진행 중인 배포에서 빼앗지 않도록 하는 여유 시간.",
+    )
     WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC: int = Field(
         default=1800,
         description="워크플로우 모델 서빙 배포가 Ready 될 때까지 대기하는 상한(초). "

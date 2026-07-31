@@ -16,6 +16,11 @@ def serving_volume_lock_key(model_id: int, serving_node_name: str) -> str:
     return f"serving_pvc:{int(model_id)}:{n}"
 
 
+def workflow_execute_guard_key(workflow_id: str) -> str:
+    """워크플로 배포 실행 구간 직렬화 키. PVC 키와 이름공간이 겹치지 않게 접두사를 나눈다."""
+    return "workflow_execute:" + (workflow_id or "").strip()
+
+
 @runtime_checkable
 class WorkflowServingVolumeLock(Protocol):
     """최소 계약."""

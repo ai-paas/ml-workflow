@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from core.serving.serving_model_workflow_pvc import PVC_COPY_COMPLETE_MARKER
 from db.models.model import Model, ModelTaskType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
@@ -600,6 +601,10 @@ class WorkflowExecutor:
                 node_selector_json: str = "{}",
                 tolerations_json: str = "[]",
                 deploy_readiness_timeout_sec: int = 1800,
+                pvc_copy_job_name: str = "",
+                pvc_copy_marker_required: bool = False,
+                pvc_copy_marker: str = ".mlw-copy-complete",
+                pvc_copy_timeout_sec: int = 1800,
             ) -> str:
                 import json
                 import logging
@@ -691,18 +696,91 @@ class WorkflowExecutor:
                             logger.error(error_msg)
                             raise ValueError(error_msg)
 
-                        # PVC가 존재하는지 확인
-                        try:
-                            existing_pvc = core_v1.read_namespaced_persistent_volume_claim(
-                                name=pvc_name, namespace=namespace
-                            )
-                            logger.info(f"Using existing PVC: {pvc_name}")
-                        except Exception as e:
-                            logger.error(f"PVC {pvc_name} not found: {e}")
+                        # 복제본은 API 응답을 막지 않으려고 Bound·복사 완료를 기다리지 않고 만들어진다.
+                        # 서빙 Pod 이 빈 볼륨을 물고 뜨지 않도록 여기서 볼륨이 준비되기를 기다린다.
+                        pvc_wait_deadline = time.time() + max(1, pvc_copy_timeout_sec)
+                        pvc_bound = False
+                        while time.time() < pvc_wait_deadline:
+                            try:
+                                existing_pvc = core_v1.read_namespaced_persistent_volume_claim(
+                                    name=pvc_name, namespace=namespace
+                                )
+                                phase = (existing_pvc.status.phase or "") if existing_pvc.status else ""
+                                if phase == "Bound":
+                                    logger.info(f"Using existing PVC: {pvc_name}")
+                                    pvc_bound = True
+                                    break
+                                if phase == "Lost":
+                                    raise RuntimeError(f"PVC {pvc_name} phase=Lost, 볼륨 바인딩 실패")
+                                logger.info(f"PVC {pvc_name} waiting for Bound (phase={phase or '?'})")
+                            except RuntimeError:
+                                raise
+                            except Exception as e:
+                                logger.info(f"PVC {pvc_name} not readable yet: {e}")
+                            time.sleep(5)
+
+                        if not pvc_bound:
                             raise RuntimeError(
-                                f"PVC {pvc_name} not found. "
-                                f"Please ensure model download pipeline completed successfully."
+                                f"PVC {pvc_name} 가 {pvc_copy_timeout_sec}s 내에 Bound 되지 않았습니다. "
+                                f"스토리지 용량·StorageClass·소스 PVC 상태를 확인하세요."
                             )
+
+                        # NFS 복제본은 별도 Job 이 원본을 복사한다. 복사가 끝나기 전에 뜨면 모델 파일이 없다.
+                        if pvc_copy_job_name:
+                            batch_v1 = client.BatchV1Api()
+                            copy_deadline = time.time() + max(1, pvc_copy_timeout_sec)
+                            copy_done = False
+                            while time.time() < copy_deadline:
+                                try:
+                                    job = batch_v1.read_namespaced_job(name=pvc_copy_job_name, namespace=namespace)
+                                except Exception as e:
+                                    # Job 이 사라졌다고 복사가 끝난 것은 아니다(실패 후 TTL 정리도 같은 모습).
+                                    # 완료 여부는 아래 마커 확인으로만 판정한다.
+                                    logger.warning(f"PVC copy Job {pvc_copy_job_name} 조회 불가 ({e})")
+                                    break
+
+                                # conditions 우선. DeadlineExceeded 는 failed 수를 backoff_limit 위로
+                                # 올리지 않으므로, 실패 수만 보면 끝난 Job 을 진행 중으로 오인한다.
+                                outcome = "running"
+                                st = job.status
+                                for cond in (getattr(st, "conditions", None) or []) if st else []:
+                                    if str(getattr(cond, "status", "")).lower() != "true":
+                                        continue
+                                    if cond.type == "Failed":
+                                        outcome = "failed"
+                                        break
+                                    if cond.type == "Complete":
+                                        outcome = "succeeded"
+                                        break
+                                if outcome == "running":
+                                    limit = (
+                                        job.spec.backoff_limit if job.spec and job.spec.backoff_limit is not None else 0
+                                    )
+                                    if st and (st.succeeded or 0) >= 1:
+                                        outcome = "succeeded"
+                                    elif st and (st.failed or 0) > limit:
+                                        outcome = "failed"
+
+                                if outcome == "succeeded":
+                                    logger.info(f"PVC copy Job {pvc_copy_job_name} succeeded")
+                                    copy_done = True
+                                    break
+                                if outcome == "failed":
+                                    reason = ""
+                                    for cond in (getattr(st, "conditions", None) or []) if st else []:
+                                        if cond.type == "Failed":
+                                            reason = getattr(cond, "reason", "") or ""
+                                    raise RuntimeError(
+                                        f"PVC copy Job {pvc_copy_job_name} failed (reason={reason or 'unknown'}). "
+                                        f"kubectl logs -l job-name={pvc_copy_job_name} 로 원인 확인."
+                                    )
+                                logger.info(f"PVC copy Job {pvc_copy_job_name} 진행 중…")
+                                time.sleep(5)
+
+                            if not copy_done:
+                                logger.warning(
+                                    f"PVC copy Job {pvc_copy_job_name} 종료를 확인하지 못함 — 완료 마커로 판정"
+                                )
 
                         # Ollama용 리소스 설정 (사전정의 메타 → 백엔드에서 동결된 request/limit)
                         ollama_resources = client.V1ResourceRequirements(
@@ -742,6 +820,33 @@ class WorkflowExecutor:
                             ]
                         except Exception:
                             ollama_tolerations = []
+
+                        # Job 으로 채운 복제본은 복사가 끝나야 완료 마커가 생긴다. 마커가 없으면 모델 파일이
+                        # 아직 다 넘어오지 않은 것이므로, 서빙 컨테이너를 띄우기 전에 여기서 막는다.
+                        ollama_init_containers = []
+                        if pvc_copy_marker_required:
+                            marker_wait_sec = max(1, pvc_copy_timeout_sec)
+                            wait_marker_script = (
+                                'i=0; while [ ! -f "/model-data/%s" ]; do '
+                                "i=$((i+5)); "
+                                'if [ "$i" -ge %d ]; then '
+                                'echo "model copy marker missing after %d s"; exit 1; fi; '
+                                'echo "waiting for model copy to finish ($i s)"; sleep 5; '
+                                'done; echo "model copy complete"'
+                            ) % (pvc_copy_marker, marker_wait_sec, marker_wait_sec)
+                            ollama_init_containers.append(
+                                client.V1Container(
+                                    name="wait-model-copy",
+                                    image="busybox:1.36",
+                                    command=["/bin/sh", "-c"],
+                                    args=[wait_marker_script],
+                                    volume_mounts=[
+                                        client.V1VolumeMount(
+                                            name="model-data", mount_path="/model-data", read_only=True
+                                        )
+                                    ],
+                                )
+                            )
 
                         # 2. Deployment 생성
                         deployment = client.V1Deployment(
@@ -797,6 +902,7 @@ class WorkflowExecutor:
                                                 ),
                                             )
                                         ],
+                                        init_containers=ollama_init_containers or None,
                                         volumes=[
                                             client.V1Volume(
                                                 name="model-data",
@@ -894,6 +1000,21 @@ class WorkflowExecutor:
                         if not deployment_ready:
                             deploy_error_message = f"Deployment {service_name} not ready after {max_wait} seconds"
                             logger.warning(deploy_error_message)
+
+                        # Pod 이 떴다는 것은 wait-model-copy initContainer 가 완료 마커를 확인하고 통과했다는
+                        # 뜻이다. 그 사실을 PVC 에 남겨야 이후 배포가 이 복제본을 안전하게 재사용할 수 있다.
+                        # 복사 Job 은 TTL 로 사라지므로 Job 상태는 완료 근거가 되지 못한다.
+                        if deployment_ready and pvc_copy_marker_required and pvc_name:
+                            try:
+                                core_v1.patch_namespaced_persistent_volume_claim(
+                                    name=pvc_name,
+                                    namespace=namespace,
+                                    body={"metadata": {"annotations": {"ml-workflow/copy-completed": "true"}}},
+                                )
+                                logger.info(f"Marked PVC {pvc_name} as copy-completed")
+                            except Exception as e:
+                                # 표시에 실패해도 이번 배포는 정상이다. 다음 배포가 복제본을 한 번 더 만들 뿐이다.
+                                logger.warning(f"Failed to mark PVC {pvc_name} copy-completed: {e}")
 
                         # Deployment가 준비된 경우 모델을 미리 로드
                         if deployment_ready:
@@ -1481,6 +1602,9 @@ class WorkflowExecutor:
             pvc_name_value = (plan.get("resolved_ollama_pvc") or "").strip()
             if not pvc_name_value and model and hasattr(model, "registry") and model.registry:
                 pvc_name_value = model.registry.pvc or ""
+            # 복제본 데이터 복사는 API 응답을 막지 않도록 기동만 해 두었다. 그 완료 대기는 파이프라인 몫이다.
+            pvc_copy_job_value = (plan.get("ollama_pvc_copy_job") or "").strip()
+            pvc_copy_marker_needed = bool(plan.get("ollama_pvc_copy_marker_required"))
             gpu_n = int(plan.get("gpu_count", parameters.get("gpus", 0)) or 0)
             mem_req = plan.get("memory_request") or "2Gi"
             cpu_req = plan.get("cpu_request") or "500m"
@@ -1531,6 +1655,10 @@ class WorkflowExecutor:
                 node_selector_json=(plan.get("node_selector_json") or "{}"),
                 tolerations_json=(plan.get("tolerations_json") or "[]"),
                 deploy_readiness_timeout_sec=settings.WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC,
+                pvc_copy_job_name=pvc_copy_job_value,
+                pvc_copy_marker_required=pvc_copy_marker_needed,
+                pvc_copy_marker=PVC_COPY_COMPLETE_MARKER,
+                pvc_copy_timeout_sec=settings.PVC_DATA_COPY_TIMEOUT_SEC,
             )
 
         return None
