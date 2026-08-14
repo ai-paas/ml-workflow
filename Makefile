@@ -42,7 +42,7 @@ help:
 	@echo "  make db-seed-test          # 시드 러너 단위 테스트(unittest, ENV 기본 local)"
 	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-sync, db-seed-reset, db-seed-dry"
 	@echo ""
-	@echo "Harbor · Docker (ENV 필수: dev | innogrid)"
+	@echo "Harbor · Docker (ENV 필수: dev | prod)"
 	@echo "  make harbor-login ENV=dev"
 	@echo "  make harbor-build-push-backend ENV=dev [TAG=latest]"
 	@echo "  make harbor-build-push-predictor ENV=dev [TAG=latest]"
@@ -218,7 +218,7 @@ lint-fix: isort black flake8-fix
 
 # ─── E2E Tests ─────────────────────────────────────────────────────────────
 E2E_DIR := e2e-test
-# 선택: ENV=dev / ENV=innogrid → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
+# 선택: ENV=dev / ENV=prod → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
 
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"

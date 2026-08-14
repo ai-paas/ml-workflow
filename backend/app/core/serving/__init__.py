@@ -7,7 +7,9 @@ from core.serving.serving_k8s_inventory import (
     whitelist_rank,
 )
 from core.serving.serving_resource_meta import (
+    SERVING_CPU_LIMIT_KEYS,
     SERVING_META_KEYS,
+    ServingCapacityError,
     ServingMetaSource,
     ServingResourcePlan,
     build_serving_resource_plan,
@@ -21,8 +23,10 @@ from core.serving.serving_resource_meta import (
 from core.serving.serving_resource_planner import plan_serving_resources_with_k8s
 
 __all__ = [
+    "SERVING_CPU_LIMIT_KEYS",
     "SERVING_META_KEYS",
     "NodeInventory",
+    "ServingCapacityError",
     "ServingMetaSource",
     "ServingResourcePlan",
     "build_serving_resource_plan",

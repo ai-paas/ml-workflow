@@ -21,7 +21,7 @@ from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
 from core.serving.remote_workflow_serving import remote_chat_completion_async
-from core.serving.serving_resource_meta import serving_meta_validation_error
+from core.serving.serving_resource_meta import ServingCapacityError, serving_meta_validation_error
 from db.models.model import Model, ModelTaskType
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.prompt import PromptVariableType
@@ -1722,6 +1722,10 @@ def execute_workflow(
             status_code=status.HTTP_409_CONFLICT,
             detail=e.message,
         )
+
+    except ServingCapacityError as e:
+        logger.warning(f"Workflow execute rejected (insufficient node capacity): {e}")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
 
     except ValueError as e:
         logger.warning(f"Workflow execution rejected (serving meta / validation): {e}")

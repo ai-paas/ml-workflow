@@ -146,6 +146,12 @@ class Settings(BaseSettings):
         default=True,
         description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임.",
     )
+    SERVING_NODE_CPU_HEADROOM_MILLICORES: int = Field(
+        default=500,
+        description="노드마다 서빙에 쓰지 않고 남겨둘 CPU 밀리코어. 배치 가능 판정에서 잔여 CPU에서 먼저 뺀다. "
+        "kube-reserved/system-reserved가 설정되지 않은 노드에서 시스템 데몬셋·kubelet 몫을 확보하는 용도. "
+        "0이면 잔여 전부를 서빙에 쓴다.",
+    )
     KSERVE_GATEWAY_URL: str = Field(
         default="",
         description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공.",
