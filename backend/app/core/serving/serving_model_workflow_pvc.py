@@ -283,6 +283,27 @@ def _find_node_attached_to_pvc(core_v1: "CoreV1Api", namespace: str, pvc_name: s
     return None
 
 
+def _pvc_mounted_by_any_pod(core_v1: "CoreV1Api", namespace: str, pvc_name: str) -> Optional[bool]:
+    """PVC 를 마운트한 Pod 가 있는지. 조회에 실패하면 None(알 수 없음)을 돌려준다.
+
+    삭제 판단에 쓰므로 "조회 실패"와 "사용 안 함"을 반드시 구분해야 한다. 둘을 뭉뚱그리면
+    API 가 잠깐 흔들린 순간에 사용 중인 볼륨을 지우게 된다.
+    """
+    try:
+        pods = core_v1.list_namespaced_pod(namespace=namespace).items or []
+    except Exception as e:
+        logger.warning("Pod 목록 조회 실패 (PVC %s 사용 여부 확인 불가): %s", pvc_name, e)
+        return None
+    for pod in pods:
+        if not pod.spec or not pod.spec.volumes:
+            continue
+        for v in pod.spec.volumes:
+            pvc_ref = getattr(v, "persistent_volume_claim", None)
+            if pvc_ref and getattr(pvc_ref, "claim_name", None) == pvc_name:
+                return True
+    return False
+
+
 def _copy_pvc_job_name(dst_pvc: str) -> str:
     suf = uuid.uuid4().hex[:8]
     base = f"pvc-copy-{dst_pvc}-{suf}"
@@ -1162,16 +1183,56 @@ def delete_replica_pvc_if_last_consumer(db: "Session", deployment_id: str) -> No
         if cnt == 0 and is_replica:
             try:
                 core = _load_core_v1()
-                _delete_pvc_if_exists(core, get_settings().KUBEFLOW_NAMESPACE, pvc_used)
+                ns = get_settings().KUBEFLOW_NAMESPACE
+                # 배포 행 기준으로는 마지막 소비자라도, 실제로 그 볼륨을 물고 있는 Pod 가 있으면 지우지 않는다.
+                # 배포 행은 API 프로세스마다 따로 보이고 실행 구간 락도 프로세스 안에서만 유효하므로,
+                # 클러스터의 실제 사용 여부가 마지막 판단 근거다.
+                mounted = _pvc_mounted_by_any_pod(core, ns, pvc_used)
+                if mounted is None:
+                    logger.warning(
+                        "복제 PVC %s 사용 여부를 확인하지 못해 삭제를 보류합니다 "
+                        "(workflow_id=%s, deployment_id=%s). 다음 정리 때 다시 시도됩니다.",
+                        pvc_used,
+                        dep.workflow_id,
+                        deployment_id,
+                    )
+                elif mounted:
+                    logger.warning(
+                        "복제 PVC %s 를 사용 중인 Pod 가 있어 삭제하지 않습니다 " "(workflow_id=%s, deployment_id=%s).",
+                        pvc_used,
+                        dep.workflow_id,
+                        deployment_id,
+                    )
+                else:
+                    _delete_pvc_if_exists(core, ns, pvc_used)
             except Exception as e:
                 logger.warning("replica PVC delete skipped: %s", e)
     finally:
         lock.release(lk)
 
 
-def process_deployments_before_hard_delete(db: "Session", workflow_id: str) -> None:
+def process_deployments_before_hard_delete(
+    db: "Session", workflow_id: str, allowed_deployment_ids: Optional[List[str]] = None
+) -> None:
+    """워크플로의 배포 행을 훑어 복제 PVC 를 정리한다.
+
+    allowed_deployment_ids 를 주면 그 행만 대상으로 한다. 정리가 진행되는 동안 같은 워크플로가
+    다시 실행되면 새 배포 행과 새 복제 PVC 가 생기는데, 그것까지 지우면 실행 중인 파이프라인이
+    참조하는 볼륨이 사라져 PVC not found 로 실패한다. 호출부에서 정리 시작 시점의 행 목록을
+    넘겨 그 시점 이후에 생긴 행을 제외한다.
+    """
     from db.models.model_workflow_deployment import ModelWorkflowDeployment
 
     rows = db.query(ModelWorkflowDeployment).filter(ModelWorkflowDeployment.workflow_id == workflow_id).all()
+    if allowed_deployment_ids is not None:
+        allowed = set(allowed_deployment_ids)
+        skipped = [r.id for r in rows if r.id not in allowed]
+        if skipped:
+            logger.info(
+                "정리 대상에서 제외: 정리 시작 이후 생긴 배포 행 %s (workflow_id=%s) — 새 실행의 볼륨을 보존한다.",
+                skipped,
+                workflow_id,
+            )
+        rows = [r for r in rows if r.id in allowed]
     for dep in sorted(rows, key=lambda r: (r.workflow_id, r.component_id, r.id)):
         delete_replica_pvc_if_last_consumer(db, dep.id)

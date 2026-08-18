@@ -4490,11 +4490,35 @@ def finalize_cleanup(
     - 500: 정리 처리 중 오류 발생
         - Kubernetes 리소스 확인 실패 또는 워크플로우 상태 업데이트 실패
     """
+    from core.serving.workflow_serving_volume_lock import get_workflow_serving_volume_lock, workflow_execute_guard_key
+    from db.models.model_workflow_deployment import ModelWorkflowDeployment
+
+    # 정리와 재실행이 겹치면, 재실행이 방금 만든 복제 PVC 를 정리가 회수해 파이프라인이 볼륨을 잃는다.
+    # execute 와 같은 키로 직렬화하고, 락을 잡은 뒤에 정리 대상 배포 행을 확정한다.
+    cleanup_guard = get_workflow_serving_volume_lock()
+    cleanup_guard_key = workflow_execute_guard_key(workflow_id)
+    if not cleanup_guard.try_acquire_nonblocking(cleanup_guard_key):
+        logger.info(f"finalize-cleanup deferred, workflow execute in progress: {workflow_id}")
+        return {
+            "workflow_id": workflow_id,
+            "status": "in_progress",
+            "workflow_updated": False,
+            "message": "Workflow execute in progress, cleanup deferred",
+        }
+
     try:
         # 워크플로우 존재 여부 확인
         workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+        # 락을 잡은 시점의 배포 행만 정리 대상으로 삼는다(이후 생기는 행은 새 실행의 것).
+        cleanup_target_ids = [
+            row_id
+            for (row_id,) in db.query(ModelWorkflowDeployment.id)
+            .filter(ModelWorkflowDeployment.workflow_id == workflow_id)
+            .all()
+        ]
 
         # Kubernetes 클러스터에서 리소스 직접 조회하여 삭제 여부 확인
         try:
@@ -4591,7 +4615,9 @@ def finalize_cleanup(
                 workflow_updated = True
 
             # 워크플로 서빙 배포 레코드(model_workflow_deployments) 삭제
-            deleted_count = ModelWorkflowDeploymentService.delete_workflow_deployments(db, workflow_id)
+            deleted_count = ModelWorkflowDeploymentService.delete_workflow_deployments(
+                db, workflow_id, cleanup_target_ids
+            )
             logger.info(f"Deleted {deleted_count} deployment records for workflow {workflow_id}")
 
             db.commit()
@@ -4616,3 +4642,6 @@ def finalize_cleanup(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to finalize cleanup: {str(e)}"
         )
+
+    finally:
+        cleanup_guard.release(cleanup_guard_key)

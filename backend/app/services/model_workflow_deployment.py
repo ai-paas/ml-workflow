@@ -238,8 +238,17 @@ class ModelWorkflowDeploymentService:
         return len(deployments)
 
     @staticmethod
-    def delete_workflow_deployments(db: Session, workflow_id: str) -> int:
+    def delete_workflow_deployments(
+        db: Session, workflow_id: str, allowed_deployment_ids: Optional[List[str]] = None
+    ) -> int:
+        """복제 PVC 정리 후 배포 행을 삭제한다.
+
+        allowed_deployment_ids 를 주면 그 행만 대상으로 한다. 정리 도중 같은 워크플로가 다시
+        실행되어 생긴 배포 행·복제 PVC 를 함께 지우지 않기 위한 것이다.
+        """
         from core.serving.serving_model_workflow_pvc import process_deployments_before_hard_delete
 
-        process_deployments_before_hard_delete(db, workflow_id)
-        return model_workflow_deployment_repository.cleanup_workflow_deployments(db, workflow_id)
+        process_deployments_before_hard_delete(db, workflow_id, allowed_deployment_ids)
+        return model_workflow_deployment_repository.cleanup_workflow_deployments(
+            db, workflow_id, allowed_deployment_ids
+        )
