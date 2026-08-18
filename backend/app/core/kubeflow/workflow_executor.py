@@ -15,6 +15,7 @@ from db.models.model import Model, ModelTaskType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from kfp import dsl
 from kfp.compiler import Compiler
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 logger = logging.getLogger(__name__)
@@ -275,7 +276,7 @@ class WorkflowExecutor:
                     dep.service_name = _remote_service_name(component.id)
                     dep.service_hostname = ""
                     dep.status = DeploymentStatus.DEPLOYED
-                    dep.deployed_at = datetime.utcnow()
+                    dep.deployed_at = func.now()
 
             self.db.commit()
         except Exception:

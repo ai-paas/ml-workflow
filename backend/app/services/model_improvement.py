@@ -23,7 +23,9 @@ from schemas.model_improvement import (
     TaskTypeResponse,
 )
 from services.model import ModelProviderService, ModelService
+from sqlalchemy import func
 from sqlalchemy.orm import Session
+from utils.db_clock import db_now, isoformat_utc
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +96,11 @@ def registry_uri_suffix_after_artifacts(artifact_path: str) -> str:
 
 
 def _isoformat_utc(dt: datetime | None) -> str:
-    if dt is None:
-        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    """DB 시각(naive, DB 세션 타임존)을 UTC ISO8601 로 내보낸다.
+
+    naive 값을 UTC 로 단정하면 DB 가 KST 면 9시간 미래로 나간다. DB 기준 오프셋으로 환산한다.
+    """
+    return isoformat_utc(dt)
 
 
 class ModelImprovementService:
@@ -157,12 +159,12 @@ class ModelImprovementService:
             except HTTPException as e:
                 if e.status_code == status.HTTP_404_NOT_FOUND:
                     row.last_known_status = "FAILED"
-                    row.updated_at = datetime.now(timezone.utc)
+                    row.updated_at = func.now()
                     continue
                 raise
             remote = _determine_remote_task_status(remote_raw)
             row.last_known_status = _to_api_status(remote)
-            row.updated_at = datetime.now(timezone.utc)
+            row.updated_at = func.now()
             if remote == RemoteTaskStatus.SUCCESS:
                 self._maybe_register_on_success(db, row, remote_raw)
         db.flush()
@@ -425,16 +427,20 @@ class ModelImprovementService:
         )
 
 
-def _poll_deadline(created_at: datetime) -> datetime:
-    """작업 생성 시각 기준 추적 상한. 재시작해도 늘어나지 않도록 폴링 시작 시각이 아닌 created_at 을 쓴다."""
-    base = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=timezone.utc)
-    return base + timedelta(seconds=int(get_settings().MODEL_IMPROVEMENT_POLL_TIMEOUT_SEC or 7200))
+def _poll_expired(db: Session, created_at: datetime) -> bool:
+    """추적 상한을 넘겼는지. 재시작해도 늘어나지 않도록 폴링 시작 시각이 아닌 created_at 을 쓴다.
+
+    created_at 은 `func.now()` 로 채워진 DB 시각이므로 DB 의 현재 시각과 naive 끼리 비교한다.
+    파이썬의 UTC 현재시각과 비교하면 DB 세션 타임존만큼 상한이 밀린다.
+    """
+    limit = int(get_settings().MODEL_IMPROVEMENT_POLL_TIMEOUT_SEC or 7200)
+    return db_now(db) >= created_at + timedelta(seconds=limit)
 
 
 def _finish_task(db: Session, row: ModelImprovementTask, api_status: str, error: str | None) -> None:
     row.last_known_status = api_status
     row.error_message = error
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = func.now()
     db.commit()
 
 
@@ -459,7 +465,7 @@ async def poll_improvement_task(task_id: str) -> None:
             if row.last_known_status not in _ACTIVE_STATUSES:
                 return
 
-            expired = datetime.now(timezone.utc) >= _poll_deadline(row.created_at)
+            expired = _poll_expired(db, row.created_at)
 
             try:
                 raw = await service._client.get_task_detail(task_id)
@@ -479,7 +485,7 @@ async def poll_improvement_task(task_id: str) -> None:
                 remote = _determine_remote_task_status(raw)
                 if remote == RemoteTaskStatus.SUCCESS:
                     row.last_known_status = _to_api_status(remote)
-                    row.updated_at = datetime.now(timezone.utc)
+                    row.updated_at = func.now()
                     service._maybe_register_on_success(db, row, raw)
                     row.error_message = None
                     db.commit()
@@ -494,7 +500,7 @@ async def poll_improvement_task(task_id: str) -> None:
                 api_status = _to_api_status(remote)
                 if row.last_known_status != api_status:
                     row.last_known_status = api_status
-                row.updated_at = datetime.now(timezone.utc)
+                row.updated_at = func.now()
                 db.commit()
 
                 if expired:

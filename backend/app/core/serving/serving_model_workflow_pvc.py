@@ -21,7 +21,8 @@ from core.serving.workflow_serving_volume_lock import (
 if TYPE_CHECKING:
     from db.models.service import Workflow
     from kubernetes.client import CoreV1Api
-    from sqlalchemy.orm import Session
+    from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -1160,7 +1161,7 @@ def delete_replica_pvc_if_last_consumer(db: "Session", deployment_id: str) -> No
         registry_original_pvc = m.registry.pvc
     if registry_original_pvc and pvc_used == registry_original_pvc:
         dep.status = DeploymentStatus.DELETED
-        dep.deleted_at = datetime.utcnow()
+        dep.deleted_at = func.now()
         db.commit()
         return
 
@@ -1168,13 +1169,13 @@ def delete_replica_pvc_if_last_consumer(db: "Session", deployment_id: str) -> No
     if not lock.acquire_blocking(lk, timeout_sec=30.0):
         logger.warning("delete PVC: could not acquire lock model_id=%s node=%s", mid, node)
         dep.status = DeploymentStatus.DELETED
-        dep.deleted_at = datetime.utcnow()
+        dep.deleted_at = func.now()
         db.commit()
         return
 
     try:
         dep.status = DeploymentStatus.DELETED
-        dep.deleted_at = datetime.utcnow()
+        dep.deleted_at = func.now()
         db.commit()
 
         cnt = _live_deployments_for_model(db, mid).filter(ModelWorkflowDeployment.serving_node_name == node).count()

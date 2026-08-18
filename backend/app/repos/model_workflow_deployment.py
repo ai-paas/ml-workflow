@@ -6,6 +6,7 @@ from typing import List, Optional, Sequence
 from db.models.model_workflow_deployment import DeploymentStatus, ModelWorkflowDeployment
 from repos.base import CRUDBase
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentBaseSchema
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 
@@ -45,12 +46,12 @@ class ModelWorkflowDeploymentRepository(
         deployment.status = status
 
         if status == DeploymentStatus.DEPLOYED:
-            deployment.deployed_at = datetime.utcnow()
+            deployment.deployed_at = func.now()
             deployment.error_message = None
         elif status == DeploymentStatus.FAILED:
             deployment.error_message = error_message
         elif status == DeploymentStatus.DELETED:
-            deployment.deleted_at = datetime.utcnow()
+            deployment.deleted_at = func.now()
 
         db.commit()
         db.refresh(deployment)

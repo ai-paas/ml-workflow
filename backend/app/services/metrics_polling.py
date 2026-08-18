@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import mlflow
 from config.db.session import SessionLocal
@@ -10,6 +10,7 @@ from db.models.experiment import ExperimentMetricsModel, ExperimentModel
 from mlflow.exceptions import MlflowException
 from services.experiment import ExperimentService
 from sqlalchemy import select
+from utils.db_clock import db_now
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -56,16 +57,18 @@ def _poll_deadline(experiment_id: int) -> float:
     try:
         experiment = ExperimentService.get(db, experiment_id)
         created = getattr(experiment, "created_at", None) if experiment else None
+        if created is None:
+            logger.warning(f"Experiment {experiment_id} 생성 시각 없음 — 지금부터 상한 적용")
+            return time.time() + limit
+        # created_at 은 func.now() 로 채워진 DB 시각이다. 파이썬 UTC 로 단정해 환산하면
+        # DB 세션 타임존만큼 상한이 밀리므로, DB 의 현재 시각과 naive 끼리 빼서 남은 시간을 구한다.
+        remaining = (created + timedelta(seconds=limit) - db_now(db)).total_seconds()
     except Exception as e:
         logger.warning(f"Experiment {experiment_id} 생성 시각 조회 실패 — 지금부터 상한 적용: {e}")
         return time.time() + limit
     finally:
         db.close()
-    if created is None:
-        logger.warning(f"Experiment {experiment_id} 생성 시각 없음 — 지금부터 상한 적용")
-        return time.time() + limit
-    base = created if created.tzinfo is not None else created.replace(tzinfo=timezone.utc)
-    return base.timestamp() + limit
+    return time.time() + remaining
 
 
 def _deadline_passed(deadline: float | None) -> bool:

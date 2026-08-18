@@ -14,6 +14,7 @@ from db.models.model_workflow_deployment import (
 from repos.model_workflow_deployment import model_workflow_deployment_repository
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentBaseSchema
 from services.workflow import WorkflowService
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 
@@ -101,21 +102,21 @@ class ModelWorkflowDeploymentService:
 
             if status == "deployed":
                 deployment.status = DeploymentStatus.DEPLOYED
-                deployment.deployed_at = datetime.utcnow()
+                deployment.deployed_at = func.now()
                 deployment.error_message = None
             elif status == "failed":
                 deployment.status = DeploymentStatus.FAILED
                 deployment.error_message = error_message
             elif status == "deleted":
                 deployment.status = DeploymentStatus.DELETED
-                deployment.deleted_at = datetime.utcnow()
+                deployment.deleted_at = func.now()
 
             db.commit()
             db.refresh(deployment)
         else:
             if status == "deployed":
                 dep_status = DeploymentStatus.DEPLOYED
-                deployed_at = datetime.utcnow()
+                deployed_at = func.now()
             elif status == "failed":
                 dep_status = DeploymentStatus.FAILED
                 deployed_at = None
