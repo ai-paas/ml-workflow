@@ -225,10 +225,13 @@ class CustomTrainModel:
                 # zip 파일 내의 모든 파일 경로 가져오기
                 all_files = zip_ref.namelist()
                 # 최상위 폴더 찾기
+                # __MACOSX 는 macOS Finder 로 압축할 때 딸려오는 메타데이터 폴더다.
+                # 이것까지 세면 감싸는 폴더가 하나뿐인 ZIP 도 "여러 개"로 판정돼
+                # 감싼 폴더가 벗겨지지 않고, COCO/<감싼폴더>/annotations 구조가 되어 학습이 실패한다.
                 top_level_dirs = set()
                 for file_path in all_files:
                     parts = file_path.split("/")
-                    if len(parts) > 1:  # 폴더가 있는 경우
+                    if len(parts) > 1 and parts[0] != "__MACOSX":  # 폴더가 있는 경우
                         top_level_dirs.add(parts[0])
 
                 # 최상위 폴더가 하나인지 확인

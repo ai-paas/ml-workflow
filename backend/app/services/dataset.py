@@ -96,7 +96,7 @@ class DatasetService:
                 logger.warning(f"ZIP 파일 형식 검증 실패: {str(e)}")
                 raise HTTPException(status_code=400, detail="파일이 유효한 ZIP 형식이 아닙니다.")
 
-            root_dir = DatasetService._resolve_root_dir(temp_dir, file.filename)
+            root_dir = DatasetService._resolve_root_dir(temp_dir)
 
             if dataset_kind == DatasetKindEnum.OBJECT_DETECTION:
                 ok, errors = DatasetService._check_object_detection(root_dir)
@@ -128,14 +128,22 @@ class DatasetService:
             if temp_dir and temp_dir.exists():
                 shutil.rmtree(temp_dir)
 
+    #: 감싸는 폴더가 아니라 데이터 폴더 자체임을 알리는 이름들. 학습(train_eval)과 동일한 판정 기준.
+    _DATA_DIR_PREFIXES = ("annotations", "train", "val")
+
     @staticmethod
-    def _resolve_root_dir(temp_dir: Path, filename: str | None) -> Path:
-        """ZIP 파일명과 동일한 루트 디렉토리가 있으면 그것을, 없으면 temp_dir 자체를 루트로 사용."""
-        if filename:
-            stem = Path(Path(filename).name).stem
-            candidate = temp_dir / stem
-            if candidate.is_dir():
-                return candidate
+    def _resolve_root_dir(temp_dir: Path) -> Path:
+        """ZIP 을 감싸는 폴더가 하나뿐이면 그 안쪽을 루트로 본다.
+
+        폴더 이름은 보지 않는다. ZIP 파일명과 같은 이름일 때만 벗겨내면
+        `my-dataset.zip` 안이 `coco128/...` 인 흔한 경우를 놓쳐, 내용이 멀쩡한데도
+        annotations·train2017·val2017 이 한꺼번에 없다고 판정된다.
+        다만 감싼 폴더 이름이 데이터 폴더 이름으로 시작하면 그것이 실제 데이터이므로 벗기지 않는다.
+        학습 파이프라인이 같은 규칙으로 압축을 풀므로, 검증만 거부하고 학습은 통과하는 불일치를 막는다.
+        """
+        dirs = [p for p in temp_dir.iterdir() if p.is_dir() and p.name != "__MACOSX"]
+        if len(dirs) == 1 and not dirs[0].name.startswith(DatasetService._DATA_DIR_PREFIXES):
+            return dirs[0]
         return temp_dir
 
     @staticmethod

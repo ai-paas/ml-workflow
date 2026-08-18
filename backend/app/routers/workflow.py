@@ -21,7 +21,9 @@ from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
 from core.serving.remote_workflow_serving import remote_chat_completion_async
+from core.serving.serving_mode import ServingMode
 from core.serving.serving_resource_meta import ServingCapacityError, serving_meta_validation_error
+from core.serving.serving_workflow_deployment_policy import decide_workflow_serving
 from db.models.model import Model, ModelTaskType
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.prompt import PromptVariableType
@@ -1604,6 +1606,21 @@ def _validate_structure_prediction_backbone(db: Session, workflow: Workflow) -> 
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
 
 
+def _validate_workflow_serving_decisions(db: Session, workflow: Workflow) -> None:
+    """MODEL 컴포넌트별 서빙 경로 판정. 배포 불가 사유가 하나라도 있으면 422."""
+    s = get_settings()
+    reasons: List[str] = []
+    for comp in workflow.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        model = db.get(Model, comp.model_id)
+        decision = decide_workflow_serving(model, s)
+        if decision.reject_reason:
+            reasons.append(f"'{comp.name}': {decision.reject_reason}")
+    if reasons:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(reasons))
+
+
 @router.post("/{workflow_id}/execute", response_model=WorkflowExecuteResponse)
 def execute_workflow(
     *,
@@ -1688,6 +1705,10 @@ def execute_workflow(
 
     # 구조예측(ESMFold2) 컴포넌트가 있으면 백본 ESMC-6B 등록·레지스트리 준비를 배포 전에 강제한다.
     _validate_structure_prediction_backbone(db, workflow)
+
+    # 서빙 경로를 먼저 판정해, 배포할 수 없는 조합(원격 전용인데 원격 미설정 등)은
+    # PVC 복제·GPU 예약 같은 부작용이 생기기 전에 막는다.
+    _validate_workflow_serving_decisions(db, workflow)
 
     # 배포 행은 서빙 계획·PVC 확보가 끝난 뒤에야 생기므로, 그 사이에 들어온 같은 워크플로의 재요청은
     # 위의 has_active_deployment 검사를 그냥 통과한다. 실행 구간 자체를 워크플로 단위로 직렬화한다.
@@ -2446,7 +2467,11 @@ def _validate_workflow_definition_checks(
     )
 
     # 15b. 사전정의 서빙 메타(5키)를 모델에서 직접 또는 부모 모델 파생으로 해소할 수 있는지
+    #      원격 서빙 컴포넌트는 클러스터 자원을 잡지 않으므로 서빙 5키를 요구하지 않는다.
+    serving_settings = get_settings()
     serving_meta_errors: List[str] = []
+    remote_only_errors: List[str] = []
+    local_artifact_errors: List[str] = []
     for comp in definition.components:
         if comp.type != ComponentType.MODEL or not comp.model_id:
             continue
@@ -2454,6 +2479,15 @@ def _validate_workflow_definition_checks(
         if not db_model:
             serving_meta_errors.append(f"{comp.ref_id}: model_id={comp.model_id}에 해당하는 모델이 없습니다.")
             continue
+        decision = decide_workflow_serving(db_model, serving_settings)
+        if decision.reject_reason:
+            # 원격 설정이 없어 못 가는 경우와, 로컬 가중치가 없어 못 가는 경우를 구분해 보고한다.
+            if decision.serving_mode is ServingMode.LOCAL:
+                local_artifact_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
+            else:
+                remote_only_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
+        elif decision.deployment_type is WorkflowServingDeploymentType.REMOTE:
+            continue  # 원격 서빙은 GPU·메모리 계획을 세우지 않아 서빙 5키가 필요 없다
         err = serving_meta_validation_error(db, db_model, predefined_configs=PREDEFINED_MODEL_CONFIGS)
         if err:
             serving_meta_errors.append(f"{comp.ref_id}: {err}")
@@ -2462,6 +2496,24 @@ def _validate_workflow_definition_checks(
             rule="serving_predefined_meta_complete",
             passed=len(serving_meta_errors) == 0,
             message="; ".join(serving_meta_errors) if serving_meta_errors else None,
+        )
+    )
+
+    # 15b-1. 원격 전용·원격 우선 모델인데 서버에 원격 엔드포인트가 설정되지 않은 경우(배포 불가)
+    results.append(
+        ValidationCheckResult(
+            rule="remote_only_model_configured",
+            passed=len(remote_only_errors) == 0,
+            message="; ".join(remote_only_errors) if remote_only_errors else None,
+        )
+    )
+
+    # 15b-2. 로컬 서빙 산출물(Ollama PVC·MLflow 아티팩트)이 실제로 있는지
+    results.append(
+        ValidationCheckResult(
+            rule="local_serving_artifacts_present",
+            passed=len(local_artifact_errors) == 0,
+            message="; ".join(local_artifact_errors) if local_artifact_errors else None,
         )
     )
 
@@ -2500,12 +2552,20 @@ def _validate_workflow_definition_checks(
     return results
 
 
+# 워크플로 저장을 막지 않는 규칙. 워크플로 정의 자체의 결함이 아니라 서버 설정(원격 엔드포인트)이나
+# 모델 산출물(PVC·아티팩트) 상태에 달린 조건이며, 배포 시점에 422 로 거부된다. 저장까지 막으면
+# 설정·가중치가 준비되기 전에는 워크플로를 만들 수조차 없어진다.
+_SAVE_NON_BLOCKING_VALIDATION_RULES = {"remote_only_model_configured", "local_serving_artifacts_present"}
+
+
 def _validate_workflow_definition_or_raise(db: Session, definition: WorkflowDefinition) -> None:
     """생성/수정 시 사용. 첫 번째 실패 시 즉시 400 응답."""
     if not definition or not definition.components:
         return
     checks = _validate_workflow_definition_checks(db, definition)
     for check in checks:
+        if check.rule in _SAVE_NON_BLOCKING_VALIDATION_RULES:
+            continue
         if not check.passed:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=check.message)
 
@@ -2967,9 +3027,7 @@ async def _execute_llm_inference(
                     error="REMOTE 배포에 remote_api_url 또는 internal_url이 없습니다.",
                 )
             messages = _build_llm_chat_messages_for_component(db, component, text, search_text)
-            out_text, err = await remote_chat_completion_async(
-                base_url, deployment.model_name, messages, timeout_sec=300.0
-            )
+            out_text, err = await remote_chat_completion_async(base_url, deployment.model_name, messages)
             if err:
                 return ComponentTestErrorResult(
                     component_id=component.id,

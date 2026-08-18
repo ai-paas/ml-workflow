@@ -158,11 +158,23 @@ class Settings(BaseSettings):
     )
     REMOTE_SERVING_API_URL: str = Field(
         default="",
-        description="원격 LLM 단일 추론 베이스 URL. REMOTE 배포 시 remote_api_url에 저장·추론 시 사용(스펙·인증은 미정).",
+        description="원격 LLM 서버 베이스 URL(경로 없이 호스트:포트까지). 비어 있으면 모든 원격 판정이 무효가 되어 "
+        "remote_only 모델은 배포 거부, remote_preferred 모델은 로컬로 폴백한다.",
     )
     REMOTE_SERVING_MODEL_MAP: str = Field(
         default="{}",
-        description='플랫폼 model.repo_id(키) → REMOTE 서버 모델명(값) JSON. 예: {"org/llama3":"gateway-model-a"}',
+        description="플랫폼 model.repo_id(키) → 원격 서버가 아는 모델명(값) JSON. 값은 원격이 요구하는 원문 그대로 "
+        "쓴다(치환 금지). 이 맵에 없는 repo_id 는 remote_only 면 배포 거부, remote_preferred 면 로컬 폴백. "
+        '예: {"deepseek-r1:1.5b":"deepseek-r1:1.5b"}',
+    )
+    REMOTE_SERVING_PROTOCOL: str = Field(
+        default="path_chat",
+        description="원격 LLM 호출 규약. path_chat=GET /model/chat/{model}/{prompt}(응답이 JSON 문자열), "
+        "openai=POST /v1/chat/completions.",
+    )
+    REMOTE_SERVING_TIMEOUT_SEC: float = Field(
+        default=300.0,
+        description="원격 LLM 호출 타임아웃(초). 원격이 요청 시점에 모델을 로드해 첫 응답이 60초를 넘기도 한다.",
     )
 
     # Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)

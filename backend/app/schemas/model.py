@@ -70,6 +70,27 @@ class PredefinedModelKey(str, PyEnum):
     GEMMA4_27B = "gemma4:27b"
     QWEN3_6_27B = "qwen3.6:27b"
     NEMOTRON3_33B = "nemotron3:33b"
+    # 원격 서버 전용(serving_mode=remote_only). 가중치를 내려받지 않고 DB 행만 만든다.
+    REMOTE_DEEPSEEK_R1_1_5B = "deepseek-r1:1.5b"
+    REMOTE_GEMMA3_1B = "gemma3:1b"
+    REMOTE_LLAMA32_1B = "llama3.2:1b"
+    REMOTE_QWEN25_0_5B = "qwen2.5:0.5b"
+    REMOTE_PHI3_3_8B = "phi3:3.8b"
+    REMOTE_QWEN25_CODER_0_5B = "qwen2.5-coder:0.5b"
+    REMOTE_TINYLLAMA_1_1B = "tinyllama:1.1b"
+    REMOTE_STARCODER2_3B = "starcoder2:3b"
+    REMOTE_GRANITE31_MOE_1B = "granite3.1-moe:1b"
+    REMOTE_FALCON3_1B = "falcon3:1b"
+    REMOTE_LFM25_8B = "lfm2.5:8b"
+    REMOTE_NEMOTRON3_NANO_4B = "nemotron-3-nano:4b"
+    REMOTE_RNJ1_8B = "rnj-1:8b"
+    REMOTE_OLMO3_7B = "olmo-3:7b"
+    REMOTE_GRANITE4_3B = "granite4:3b"
+    REMOTE_MEDGEMMA15_4B = "medgemma1.5:4b"
+    REMOTE_MINICPM_V46_1B = "minicpm-v4.6:1b"
+    REMOTE_TRANSLATEGEMMA_4B = "translategemma:4b"
+    REMOTE_QWEN3_VL_2B = "qwen3-vl:2b"
+    REMOTE_GLM_OCR_Q8_0 = "glm-ocr:q8_0"
 
 
 class ModelProviderCreateUpdateSchema(BaseModel):

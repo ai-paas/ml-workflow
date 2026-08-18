@@ -280,7 +280,8 @@ class WorkflowExecuteResponse(BaseModel):
     """워크플로우 실행 응답"""
 
     workflow_id: str
-    kubeflow_run_id: str
+    # 원격 서빙 전용 워크플로는 파이프라인을 제출하지 않으므로 run ID 가 없다.
+    kubeflow_run_id: Optional[str] = None
     status: str
     message: str
 

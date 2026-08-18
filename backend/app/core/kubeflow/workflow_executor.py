@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def _remote_service_name(component_id: str) -> str:
+    """원격 배포 레코드의 서비스 식별자. 클러스터 리소스는 없지만 조회 API 표시에 쓰인다."""
+    safe_cid = component_id.replace("_", "-").lower()[:24]
+    return f"remote-{safe_cid}".strip("-") or "remote-svc"
+
+
 class WorkflowExecutor:
     """워크플로우 실행기"""
 
@@ -37,7 +43,11 @@ class WorkflowExecutor:
             apply_chain_reservation_from_plan,
             plan_serving_resources_with_k8s,
         )
-        from core.serving.serving_workflow_deployment_policy import topological_order_model_components
+        from core.serving.serving_workflow_deployment_policy import (
+            decide_workflow_serving,
+            topological_order_model_components,
+        )
+        from db.models.model_workflow_deployment import WorkflowServingDeploymentType
         from services.model import PREDEFINED_MODEL_CONFIGS
 
         plans: Dict[str, Dict[str, Any]] = {}
@@ -63,6 +73,20 @@ class WorkflowExecutor:
                     f"워크플로우 MODEL 컴포넌트 '{component.name}'(id={component.id}): "
                     f"model_id={component.model_id} 모델을 찾을 수 없습니다."
                 )
+
+            # 원격 서빙은 클러스터 자원을 쓰지 않는다. 서빙 메타(5키) 조회·GPU 예약 전에 걸러야
+            # 자원 키가 없는 원격 전용 모델에서 예외가 나거나 없는 GPU 를 점유 계산에 넣는 일이 없다.
+            decision = decide_workflow_serving(model, s)
+            if decision.reject_reason:
+                raise ValueError(decision.reject_reason)
+            if decision.deployment_type is WorkflowServingDeploymentType.REMOTE:
+                plans[component.id] = {
+                    "deployment_type": WorkflowServingDeploymentType.REMOTE.value,
+                    "planner_note": decision.note,
+                    "chain_step": step,
+                    "chain_model_count": chain_n,
+                }
+                continue
 
             meta, source, parent_repo = resolve_normalized_serving_meta(
                 self.db, model, predefined_configs=PREDEFINED_MODEL_CONFIGS
@@ -181,11 +205,7 @@ class WorkflowExecutor:
             prepare_ollama_pvc_for_workflow_models,
             rollback_new_clone_pvcs,
         )
-        from core.serving.serving_workflow_deployment_policy import (
-            parse_remote_serving_model_map,
-            parse_serving_device_type,
-            resolve_workflow_serving_deployment_type,
-        )
+        from core.serving.serving_workflow_deployment_policy import decide_workflow_serving, parse_serving_device_type
         from db.models.model_workflow_deployment import DeploymentStatus, WorkflowServingDeploymentType
         from services.model_workflow_deployment import ModelWorkflowDeploymentService
 
@@ -199,6 +219,7 @@ class WorkflowExecutor:
             rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
             raise
 
+        model_deployment_types: list[WorkflowServingDeploymentType] = []
         try:
             for component in workflow.components:
                 if component.type != ComponentType.MODEL:
@@ -211,17 +232,15 @@ class WorkflowExecutor:
                         .filter(Model.id == component.model_id)
                         .first()
                     )
-                dtype = resolve_workflow_serving_deployment_type(model, settings)
+                decision = decide_workflow_serving(model, settings)
+                if decision.reject_reason:
+                    raise ValueError(decision.reject_reason)
+                dtype = decision.deployment_type
                 plan = (parameters.get("serving_plans") or {}).get(component.id) or {}
                 device_type = parse_serving_device_type(plan)
                 serving_node = (plan.get("serving_node_name") or "").strip() or None
 
                 if dtype == WorkflowServingDeploymentType.REMOTE:
-                    api_base = (settings.REMOTE_SERVING_API_URL or "").strip()
-                    if not api_base:
-                        raise ValueError(
-                            "REMOTE_SERVING_API_URL이 비어 있으면 REMOTE 모델 워크플로 배포를 실행할 수 없습니다."
-                        )
                     pvc_val = None
                 elif dtype == WorkflowServingDeploymentType.OLLAMA:
                     pvc_val = plan.get("resolved_ollama_pvc") or (
@@ -232,7 +251,7 @@ class WorkflowExecutor:
 
                 remote_api_url: Optional[str] = None
                 if dtype == WorkflowServingDeploymentType.REMOTE:
-                    remote_api_url = api_base.rstrip("/")
+                    remote_api_url = decision.remote_base_url
 
                 dep = ModelWorkflowDeploymentService.create_deployment(
                     db=self.db,
@@ -246,13 +265,15 @@ class WorkflowExecutor:
                     serving_node_name=serving_node,
                 )
 
+                model_deployment_types.append(dtype)
+
                 if dtype == WorkflowServingDeploymentType.REMOTE:
-                    mmap = parse_remote_serving_model_map(settings)
-                    rid = (model.repo_id or "").strip() if model else ""
-                    remote_mn = mmap.get(rid, rid).replace("/", "-")
-                    dep.model_name = remote_mn
+                    # 원격 서버가 아는 이름을 그대로 저장한다(URL 인코딩은 추론 호출 시점에 한다).
+                    dep.model_name = decision.remote_model_name or ""
                     dep.internal_url = remote_api_url
                     dep.remote_api_url = remote_api_url
+                    dep.service_name = _remote_service_name(component.id)
+                    dep.service_hostname = ""
                     dep.status = DeploymentStatus.DEPLOYED
                     dep.deployed_at = datetime.utcnow()
 
@@ -261,6 +282,23 @@ class WorkflowExecutor:
             self.db.rollback()
             rollback_new_clone_pvcs(parameters.get("_ollama_clone_pvcs_rollback") or [])
             raise
+
+        # MODEL 이 전부 원격 서빙이면 클러스터에 만들 리소스가 없다. 파이프라인이 하던 일은
+        # 배포 레코드·워크플로 상태 갱신뿐이므로(원격 알림 컴포넌트), 여기서 직접 끝낸다.
+        # 파드 기동·이미지 pull·콜백 왕복이 사라져 배포가 즉시 완료되고 실패 지점도 줄어든다.
+        if model_deployment_types and all(d == WorkflowServingDeploymentType.REMOTE for d in model_deployment_types):
+            workflow.status = WorkflowStatus.ACTIVE
+            self.db.commit()
+            logger.info(f"Workflow {workflow.id}: 원격 서빙 전용 → Kubeflow 파이프라인 없이 배포 완료 처리")
+            return {
+                "workflow_id": str(workflow.id),
+                "kubeflow_run_id": None,
+                "status": "succeeded",
+                "message": "원격 서빙 전용 워크플로라 파이프라인 없이 즉시 배포 완료되었습니다.",
+                "deployed_models": ModelWorkflowDeploymentService.get_deployed_models(
+                    self.db, workflow.id, include_component_info=True
+                ),
+            }
 
         try:
             # Kubeflow 파이프라인 생성 및 실행 (KServe 배포도 파이프라인 내에서 수행)
@@ -480,18 +518,14 @@ class WorkflowExecutor:
                         except Exception as base_err:
                             logger.warning(f"ESMFold2 백본(ESMC-6B) 위치 해석 실패(HF Hub fallback): {base_err}")
 
-            from core.serving.serving_workflow_deployment_policy import (
-                parse_remote_serving_model_map,
-                resolve_workflow_serving_deployment_type,
-            )
+            from core.serving.serving_workflow_deployment_policy import decide_workflow_serving
             from db.models.model_workflow_deployment import WorkflowServingDeploymentType as WSDType
 
-            dtype_rt = resolve_workflow_serving_deployment_type(model, settings)
-            if dtype_rt == WSDType.REMOTE:
-                mmap_rt = parse_remote_serving_model_map(settings)
-                rid_rt = (model.repo_id or "").strip() if model else ""
-                remote_model_nm = mmap_rt.get(rid_rt, rid_rt).replace("/", "-")
-                remote_base = (settings.REMOTE_SERVING_API_URL or "").strip().rstrip("/")
+            decision_rt = decide_workflow_serving(model, settings)
+            if decision_rt.deployment_type == WSDType.REMOTE:
+                # 원격 서버가 아는 이름 원문. 슬래시를 치환하면 원격이 모델을 찾지 못한다.
+                remote_model_nm = decision_rt.remote_model_name or ""
+                remote_base = decision_rt.remote_base_url or ""
 
                 @dsl.component(base_image="python:3.10", packages_to_install=["requests==2.31.0"])
                 def remote_deployment_notify(

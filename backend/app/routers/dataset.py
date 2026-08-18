@@ -26,6 +26,25 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _enforce_upload_size_limit(file: UploadFile) -> None:
+    """업로드 파일 크기를 DATASET_MAX_UPLOAD_SIZE_MB 로 제한한다.
+
+    검증 경로도 ZIP 전체를 메모리로 읽고 임시 디렉터리에 풀기 때문에, 등록뿐 아니라
+    검증 요청에도 같은 상한을 걸어야 큰 파일이 그대로 서버 메모리·디스크를 잡는 것을 막을 수 있다.
+    """
+    max_size_bytes = settings.DATASET_MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"업로드 파일 크기({file_size / (1024 * 1024):.1f}MB)가 "
+            f"최대 허용 크기({settings.DATASET_MAX_UPLOAD_SIZE_MB}MB)를 초과했습니다.",
+        )
+
+
 @router.get("/kinds", response_model=list[DatasetKindReadSchema])
 def get_dataset_kinds(current_user: UserSchema = Depends(get_current_user)):
     """
@@ -85,9 +104,12 @@ def validate_dataset(
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 413: 업로드 파일 크기가 허용치를 초과
     - 422: 알 수 없는 `dataset_kind` 값
     - 500: 서버 내부 오류
     """
+    _enforce_upload_size_limit(file)
+
     result = DatasetService.validate(file=file, dataset_kind=dataset_kind)
     if not result.is_valid:
         logger.warning(f"데이터셋 검증 실패: {result.message}")
@@ -150,17 +172,7 @@ def create_dataset(
     - 401: 인증되지 않은 사용자
     - 500: 데이터셋 등록 중 서버 내부 오류
     """
-    max_size_bytes = settings.DATASET_MAX_UPLOAD_SIZE_MB * 1024 * 1024
-    file.file.seek(0, 2)
-    file_size = file.file.tell()
-    file.file.seek(0)
-
-    if file_size > max_size_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"업로드 파일 크기({file_size / (1024 * 1024):.1f}MB)가 "
-            f"최대 허용 크기({settings.DATASET_MAX_UPLOAD_SIZE_MB}MB)를 초과했습니다.",
-        )
+    _enforce_upload_size_limit(file)
 
     try:
         dataset_data = DatasetBaseSchema(

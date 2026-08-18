@@ -419,6 +419,17 @@ class ModelService:
             raise RuntimeError(f"모델 삭제 중 오류 발생: {str(e)}")
 
     @staticmethod
+    def _is_remote_only_repo_id(repo_id: Optional[str]) -> bool:
+        """`PREDEFINED_MODEL_CONFIGS` 태그가 remote_only 인지. 순환 import 를 피해 호출 시점에 가져온다."""
+        from core.serving.serving_mode import ServingMode
+        from core.serving.serving_workflow_deployment_policy import resolve_serving_mode_by_repo_id
+
+        rid = (repo_id or "").strip()
+        if not rid:
+            return False
+        return resolve_serving_mode_by_repo_id(rid) is ServingMode.REMOTE_ONLY
+
+    @staticmethod
     def register_model(
         db: Session,
         *,
@@ -490,6 +501,34 @@ class ModelService:
         ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
         gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
         embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
+        llm_type = ModelTypeService.get_by_name(db, ModelTypeEnum.LLM.value)
+
+        # 원격 전용 모델은 가중치가 존재하지 않는다. provider 별 등록 경로(PVC 다운로드·snapshot_download·
+        # 파일 업로드)는 모두 실물 가중치를 전제하므로, 그보다 앞에서 DB 행만 만들고 끝낸다.
+        if ModelService._is_remote_only_repo_id(repo_id):
+            if llm_type is None or type_id != llm_type.id:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"'{repo_id}' 는 원격 서빙 전용 모델이라 LLM 타입으로만 등록할 수 있습니다.",
+                )
+            try:
+                model_obj = model_repository.create(db, obj_in=model)
+                model_registry_repository.create(
+                    db,
+                    obj_in=ModelRegistryBaseSchema(
+                        artifact_path="",
+                        uri=repo_id,
+                        reference_model_id=model_obj.id,
+                        run_id=None,
+                        pvc=None,
+                    ),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            logger.info(f"Registered remote-only model without weights: {repo_id}")
+            return model_repository.get(db, model_obj.id)
 
         try:
             if (
@@ -1503,6 +1542,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "ahmgam-medllama3-v20-latest",
         "description": "ahmgam-medllama3-v20-latest",
         "repo_id": "ahmgam/medllama3-v20:latest",
+        "serving_mode": "local",
         "ollama_pvc_storage": "7Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1712,6 +1752,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "qwq-32b",
         "description": "qwq-32b",
         "repo_id": "qwq:32b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "22Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1729,6 +1770,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "gpt-oss-20b",
         "description": "gpt-oss-20b",
         "repo_id": "gpt-oss:20b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "16Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1749,6 +1791,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "deepseek-r1-32b",
         "description": "DeepSeek-R1 32B — 오픈 추론 모델(성능 O3/Gemini 2.5 Pro 근접). text-generation.",
         "repo_id": "deepseek-r1:32b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "22Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1766,6 +1809,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "granite4.1-30b",
         "description": "IBM Granite 4.1 30B — 다국어·코딩·RAG·툴사용·JSON 출력(Apache 2.0). text-generation.",
         "repo_id": "granite4.1:30b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "19Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1783,6 +1827,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "lfm2-24b",
         "description": "LFM2 24B — 온디바이스용 하이브리드 모델(24B-A2B). text-generation.",
         "repo_id": "lfm2:24b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "16Gi",
         "task": "text-generation",
         "provider_name": "ollama",
@@ -1800,6 +1845,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "gemma4-27b",
         "description": "Gemma 4 27B — 추론·에이전트·코딩·멀티모달. VQA(Text+Image), 현재 텍스트 전용 서빙.",
         "repo_id": "gemma4:27b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "20Gi",
         "task": "vqa",
         "provider_name": "ollama",
@@ -1817,6 +1863,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "qwen3.6-27b",
         "description": "Qwen3.6 27B — dense/MoE 최신 세대. VQA(Text+Image), 현재 텍스트 전용 서빙.",
         "repo_id": "qwen3.6:27b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "19Gi",
         "task": "vqa",
         "provider_name": "ollama",
@@ -1834,6 +1881,7 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "name": "nemotron3-33b",
         "description": "NVIDIA Nemotron 3 Nano Omni 33B — video/audio/image/text 멀티모달 Q&A·요약·전사. VQA, 현재 텍스트 전용 서빙.",
         "repo_id": "nemotron3:33b",
+        "serving_mode": "local",
         "ollama_pvc_storage": "30Gi",
         "task": "vqa",
         "provider_name": "ollama",
@@ -1846,6 +1894,233 @@ PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "serving_gpu_pod_cpu_limit_millicores": 1000,
         "serving_memory_request_cpu": "26Gi",
         "serving_cpu_request_millicores": 2000,
+    },
+    # ── 원격 서버(바이오브레인 ChatModel Web Service) 전용 19종 ──
+    # repo_id 는 원격 GET /model/info/list 의 id_or_path 와 문자 단위로 일치해야 한다.
+    # 서빙 자원 키가 없는 것은 의도된 것이다 — REMOTE 경로는 GPU·PVC 계획을 수립하지 않는다.
+    "deepseek-r1:1.5b": {
+        "name": "deepseek-r1-1.5b",
+        "description": "DeepSeek-R1 1.5B — 오픈 추론 모델(원격 서빙 전용).",
+        "repo_id": "deepseek-r1:1.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "gemma3:1b": {
+        "name": "gemma3-1b",
+        "description": "Google Gemma 3 1B — 경량 다국어 모델(원격 서빙 전용).",
+        "repo_id": "gemma3:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "llama3.2:1b": {
+        "name": "llama3.2-1b",
+        "description": "Meta Llama 3.2 1B — 다국어 instruction 튜닝 모델(원격 서빙 전용).",
+        "repo_id": "llama3.2:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen2.5:0.5b": {
+        "name": "qwen2.5-0.5b",
+        "description": "Qwen2.5 0.5B — 초경량 다국어 모델(원격 서빙 전용).",
+        "repo_id": "qwen2.5:0.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "phi3:3.8b": {
+        "name": "phi3-3.8b",
+        "description": "Microsoft Phi-3 Mini 3.8B — 경량 고성능 모델(원격 서빙 전용).",
+        "repo_id": "phi3:3.8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen2.5-coder:0.5b": {
+        "name": "qwen2.5-coder-0.5b",
+        "description": "Qwen2.5-Coder 0.5B — 코드 생성·수정 특화(원격 서빙 전용).",
+        "repo_id": "qwen2.5-coder:0.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "tinyllama:1.1b": {
+        "name": "tinyllama-1.1b",
+        "description": "TinyLlama 1.1B — 3T 토큰 학습 초경량 모델(원격 서빙 전용).",
+        "repo_id": "tinyllama:1.1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 2_000,
+    },
+    "starcoder2:3b": {
+        "name": "starcoder2-3b",
+        "description": "StarCoder2 3B — 코드 전용 오픈 LLM(원격 서빙 전용).",
+        "repo_id": "starcoder2:3b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 16_000,
+    },
+    "granite3.1-moe:1b": {
+        "name": "granite3.1-moe-1b",
+        "description": "IBM Granite 3.1 MoE 1B — 저지연 long-context MoE(원격 서빙 전용).",
+        "repo_id": "granite3.1-moe:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "falcon3:1b": {
+        "name": "falcon3-1b",
+        "description": "Falcon3 1B — 과학·수학·코딩 지향 경량 모델(원격 서빙 전용).",
+        "repo_id": "falcon3:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 8_000,
+    },
+    "lfm2.5:8b": {
+        "name": "lfm2.5-8b",
+        "description": "LFM2.5 8B-A1B — 툴 호출에 강한 엣지 모델(원격 서빙 전용).",
+        "repo_id": "lfm2.5:8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 125_000,
+    },
+    "nemotron-3-nano:4b": {
+        "name": "nemotron-3-nano-4b",
+        "description": "NVIDIA Nemotron-3-Nano 4B — 에이전트 지향 효율 모델(원격 서빙 전용).",
+        "repo_id": "nemotron-3-nano:4b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    "rnj-1:8b": {
+        "name": "rnj-1-8b",
+        "description": "Essential AI Rnj-1 8B — 코드·STEM 특화 dense 모델(원격 서빙 전용).",
+        "repo_id": "rnj-1:8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "olmo-3:7b": {
+        "name": "olmo-3-7b",
+        "description": "AI2 Olmo 3 7B — 완전 공개 학습 파이프라인 모델(원격 서빙 전용).",
+        "repo_id": "olmo-3:7b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 64_000,
+    },
+    "granite4:3b": {
+        "name": "granite4-3b",
+        "description": "IBM Granite 4 3B — instruction·툴호출 개선판(원격 서빙 전용).",
+        "repo_id": "granite4:3b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    # ── 멀티모달(Image-Text to Text) — 원격 API 에 이미지 입력 경로가 없어 텍스트 전용으로 서빙된다 ──
+    "medgemma1.5:4b": {
+        "name": "medgemma1.5-4b",
+        "description": "MedGemma 1.5 4B — 의료 특화 멀티모달. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "medgemma1.5:4b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "minicpm-v4.6:1b": {
+        "name": "minicpm-v4.6-1b",
+        "description": "MiniCPM-V 4.6 1B — 이미지·비디오 이해 경량 MLLM. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "minicpm-v4.6:1b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    "translategemma:4b": {
+        "name": "translategemma-4b",
+        "description": "TranslateGemma 4B — 55개 언어 번역 특화. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "translategemma:4b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen3-vl:2b": {
+        "name": "qwen3-vl-2b",
+        "description": "Qwen3-VL 2B — Qwen 계열 비전·언어 모델. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "qwen3-vl:2b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    # 원격에서 텍스트 추론이 아직 실패한다(500 no_available_chat_model 또는 무응답).
+    # 원격 수정 여부를 플랫폼에서 그대로 확인할 수 있도록 등록해 둔다 — 배포는 되고 추론만 실패하며,
+    # 실패 시 사용자에게는 "원격 서버가 현재 서빙할 수 없습니다" 로 안내된다.
+    "glm-ocr:q8_0": {
+        "name": "glm-ocr-q8-0",
+        "description": "GLM-OCR (문서 OCR 특화 멀티모달). 원격 추론 미동작 상태 — 원격 수정 확인용으로 등록.",
+        "repo_id": "glm-ocr:q8_0",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
     },
 }
 
