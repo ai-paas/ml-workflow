@@ -2482,11 +2482,15 @@ def _validate_workflow_definition_checks(
         decision = decide_workflow_serving(db_model, serving_settings)
         if decision.reject_reason:
             # 원격 설정이 없어 못 가는 경우와, 로컬 가중치가 없어 못 가는 경우를 구분해 보고한다.
+            # 배치 경로 자체가 막힌 상태라 서빙 5키는 따지지 않는다. 여기서 5키까지 검사하면
+            # 원격 전용 모델(5키를 두지 않는다)이 "5키 없음" 으로 보고돼 진짜 사유가 가려지고,
+            # 저장을 막지 않기로 한 규칙(_SAVE_NON_BLOCKING_VALIDATION_RULES)이 무력해진다.
             if decision.serving_mode is ServingMode.LOCAL:
                 local_artifact_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
             else:
                 remote_only_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
-        elif decision.deployment_type is WorkflowServingDeploymentType.REMOTE:
+            continue
+        if decision.deployment_type is WorkflowServingDeploymentType.REMOTE:
             continue  # 원격 서빙은 GPU·메모리 계획을 세우지 않아 서빙 5키가 필요 없다
         err = serving_meta_validation_error(db, db_model, predefined_configs=PREDEFINED_MODEL_CONFIGS)
         if err:
@@ -2555,19 +2559,32 @@ def _validate_workflow_definition_checks(
 # 워크플로 저장을 막지 않는 규칙. 워크플로 정의 자체의 결함이 아니라 서버 설정(원격 엔드포인트)이나
 # 모델 산출물(PVC·아티팩트) 상태에 달린 조건이며, 배포 시점에 422 로 거부된다. 저장까지 막으면
 # 설정·가중치가 준비되기 전에는 워크플로를 만들 수조차 없어진다.
-_SAVE_NON_BLOCKING_VALIDATION_RULES = {"remote_only_model_configured", "local_serving_artifacts_present"}
+# 저장 단계에서 막지 않는 검사. 나중에 채울 수 있는 것만 둔다.
+# - local_serving_artifacts_present: 학습·업로드로 아티팩트를 뒤에 채우는 흐름이 정상이다.
+# 원격 전용 모델의 원격 엔드포인트 미설정(remote_only_model_configured)은 여기 두지 않는다.
+# 서버 설정이 없으면 그 모델은 어떤 경로로도 배포할 수 없어, 저장을 허용하면 배포 시점까지
+# 문제를 미루기만 한다.
+_SAVE_NON_BLOCKING_VALIDATION_RULES = {"local_serving_artifacts_present"}
 
 
 def _validate_workflow_definition_or_raise(db: Session, definition: WorkflowDefinition) -> None:
-    """생성/수정 시 사용. 첫 번째 실패 시 즉시 400 응답."""
+    """생성/수정 시 사용. 검증 API 와 같은 검사 결과를 쓰고, 차단 대상 실패를 모두 모아 400 으로 낸다.
+
+    실패를 하나만 돌려주면 검증 API 로 본 결과와 어긋나 보이고, 남은 문제를 한 번에 알 수 없다.
+    저장을 막지 않기로 한 규칙(_SAVE_NON_BLOCKING_VALIDATION_RULES)은 검증 API 에서는 그대로
+    보고되고 저장 경로에서만 통과시킨다 — 이 차이가 두 경로의 유일한 차이다.
+    """
     if not definition or not definition.components:
         return
     checks = _validate_workflow_definition_checks(db, definition)
-    for check in checks:
-        if check.rule in _SAVE_NON_BLOCKING_VALIDATION_RULES:
-            continue
-        if not check.passed:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=check.message)
+    failures = [c for c in checks if not c.passed and c.rule not in _SAVE_NON_BLOCKING_VALIDATION_RULES]
+    if not failures:
+        return
+    detail = "; ".join(f"[{c.rule}] {c.message}" for c in failures if c.message)
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=detail or "워크플로우 정의 검증에 실패했습니다.",
+    )
 
 
 # ============= Workflow Test Helper Functions =============

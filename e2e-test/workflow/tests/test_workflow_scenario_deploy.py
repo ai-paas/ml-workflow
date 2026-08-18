@@ -263,8 +263,14 @@ class TestWorkflowScenarioDeploy:
             headers=auth_headers,
         )
         assert resp.status_code == 200, f"실행 실패: {resp.status_code} {resp.text}"
-        assert resp.json()["status"] == "running"
-        print("\n✔ 워크플로우 실행 시작")
+        # MODEL 이 전부 원격 서빙이면 백엔드가 Kubeflow 파이프라인을 만들지 않고 즉시 배포를 끝내고
+        # "succeeded" 를 돌려준다(클러스터에 만들 리소스가 없다). 실물 가중치를 올리는 경로만 "running".
+        exec_status = resp.json()["status"]
+        assert exec_status in ("running", "succeeded"), f"예상 밖 실행 상태: {exec_status} ({resp.text})"
+        if exec_status == "succeeded":
+            print("\n✔ 워크플로우 실행 완료 (원격 서빙 전용 — 파이프라인 없이 즉시 배포)")
+        else:
+            print("\n✔ 워크플로우 실행 시작")
 
     def test_08_wait_for_deployment(self, api_url: str, auth_headers: dict):
         """배포가 완료될 때까지 폴링한다."""
