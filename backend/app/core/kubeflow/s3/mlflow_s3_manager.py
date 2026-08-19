@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 import boto3
+from botocore.config import Config
 from config.settings import get_settings
 from fastapi import UploadFile
 
@@ -28,6 +29,10 @@ class MLFlowS3Manager:
                 endpoint_url=self.endpoint,
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
+                # 서명 방식을 명시하지 않으면 presigned URL 이 구식 SigV2 로 만들어진다.
+                # (client.meta.config 조회값은 s3v4 로 보여도 서명은 기본 signer 를 탄다.)
+                # AWS 는 신규 리전에서 SigV2 를 받지 않고, 데이터셋용 S3 클라이언트도 s3v4 를 쓴다.
+                config=Config(signature_version="s3v4"),
                 # verify=False,
             )
             self.initialized = True

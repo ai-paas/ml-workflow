@@ -140,7 +140,7 @@ class TestModelFiles:
         assert first["download_url"].startswith(
             f"/api/v1/models/{target['id']}/files/download-url"
         ), f"download_url 은 발급 API 경로여야 한다: {first['download_url']}"
-        assert "X-Amz-Signature" not in first["download_url"], "목록에 서명 URL 이 들어가면 안 된다"
+        assert "Signature" not in first["download_url"], "목록에 서명 URL 이 들어가면 안 된다"
 
         print(f"✔ 파일 {len(body['files'])}건, 정렬·필드·.cache 제외 확인")
         for f in body["files"][:3]:
@@ -191,7 +191,8 @@ class TestModelFiles:
         assert body["expires_at"].endswith("Z")
         url = body["download_url"]
         url_head = url[:80]
-        assert "X-Amz-Signature" in url, f"서명 URL 이 아니다: {url_head}"
+        # SigV4 는 X-Amz-Signature, SigV2 는 Signature 파라미터를 쓴다. 서명이 붙었는지만 본다.
+        assert ("X-Amz-Signature" in url) or ("Signature=" in url), f"서명 URL 이 아니다: {url_head}"
         size = format(entry["size_bytes"], ",")
         print(f"\n  발급: {entry['name']} ({size} bytes), 만료 {body['expires_at']}")
 
@@ -211,7 +212,7 @@ class TestModelFiles:
         for name in bad_names:
             r = _get(api_url, auth_headers, f"/models/{target['id']}/files/download-url", params={"name": name})
             assert r.status_code == 404, f"차단되지 않음({r.status_code}): {name}"
-            assert "X-Amz-Signature" not in r.text, "차단해야 할 요청에 서명 URL 이 나갔다"
+            assert "Signature" not in r.text, "차단해야 할 요청에 서명 URL 이 나갔다"
         print(f"\n✔ 경로 이탈·미존재 {len(bad_names)}건 모두 404")
 
     @pytest.mark.parametrize("storage", ["OLLAMA", "NONE"])
