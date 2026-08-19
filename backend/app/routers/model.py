@@ -21,6 +21,7 @@ from schemas.model import (
     ModelTypeReadSchema,
     PredefinedModelKey,
 )
+from schemas.model_file import ModelFileDownloadUrlResponse, ModelFileListResponse
 from schemas.user import UserSchema
 from services.model import (
     ESMFOLD2_BACKBONE_MODEL_NAME,
@@ -35,6 +36,7 @@ from services.model import (
     resolve_recommended_hparams,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
+from services.model_file import ModelFileService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user, verify_internal_api_key
 
@@ -490,6 +492,96 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
         raise HTTPException(status_code=404, detail="Model not found")
     db_model.recommended_hparams = resolve_recommended_hparams(db, db_model)
     return db_model
+
+
+@router.get("/{model_id}/files", response_model=ModelFileListResponse)
+def list_model_files(
+    model_id: int,
+    cursor: Optional[str] = Query(None, description="이어받기 토큰. 첫 요청에는 넣지 않는다"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 목록 조회
+
+    모델이 실제로 보관하는 파일을 조회합니다.
+    파일 목록과 다운로드를 제공하는 것은 MLflow 아티팩트를 쓰는 모델(huggingface, custom 등)뿐이며,
+    Ollama·원격 서빙 전용 모델은 빈 목록에 사유만 담아 응답합니다.
+
+    ## Path Parameters
+    - **model_id** (int): 조회할 모델 ID
+
+    ## Query Parameters
+    - **cursor** (str, optional): 이어받기 토큰
+        - 첫 요청에는 넣지 않습니다
+        - 응답의 `next_cursor` 를 그대로 넣어 다음 쪽을 받습니다
+        - 서버가 준 값을 그대로 돌려보내는 불투명한 문자열이며, 형식을 해석하지 않습니다
+
+    ## Response (ModelFileListResponse)
+    - **model_id** (int): 모델 ID
+    - **model_name** (str): 모델 이름
+    - **storage_type** (str): `MLFLOW`(파일 제공) | `OLLAMA`(미제공) | `NONE`(파일 없음)
+    - **location** (str, optional): MLFLOW 는 S3 prefix, OLLAMA 는 볼륨 이름, NONE 은 null
+    - **files** (list): 파일 목록. 없으면 빈 배열이며 null 이 되지 않습니다
+        - name (str): location 기준 상대 경로
+        - size_bytes (int): 파일 크기(바이트)
+        - last_modified (str): 마지막 수정 시각 (ISO8601, UTC)
+        - download_url (str): 다운로드 URL 을 발급받을 API 경로. 파일을 바로 주는 링크가 아닙니다
+    - **next_cursor** (str, optional): 다음 쪽이 있으면 토큰, 없으면 null
+    - **message** (str, optional): files 가 빈 사유. 목록이 있으면 null
+
+    ## Notes
+    - `files` 가 비어 있으면 `message` 를 그대로 화면에 노출하면 됩니다
+    - `.cache` 디렉터리 아래 파일(모델 다운로드 과정의 캐시 부산물)은 목록에서 제외됩니다
+    - 폴더는 항목으로 나오지 않습니다. 계층이 필요하면 `name` 을 `/` 로 나눠 구성합니다
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델을 찾을 수 없음
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.list_files(db, model_id, cursor)
+
+
+@router.get("/{model_id}/files/download-url", response_model=ModelFileDownloadUrlResponse)
+def issue_model_file_download_url(
+    model_id: int,
+    name: str = Query(..., description="목록 응답의 files[].name"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 다운로드 URL 발급
+
+    파일 하나에 대한 스토리지 서명 URL 을 그 시점에 발급합니다.
+    목록 응답에 서명 URL 을 미리 담지 않는 이유는, 목록을 열어 둔 채 시간이 지나면 URL 이 만료되어
+    사용자가 스토리지의 오류 문서를 보게 되기 때문입니다.
+
+    ## Path Parameters
+    - **model_id** (int): 모델 ID
+
+    ## Query Parameters
+    - **name** (str, required): 목록 응답의 `files[].name` (location 기준 상대 경로)
+
+    ## Response (ModelFileDownloadUrlResponse)
+    - **model_id** (int): 모델 ID
+    - **name** (str): 파일 상대 경로
+    - **size_bytes** (int): 파일 크기(바이트)
+    - **download_url** (str): 스토리지 서명 URL
+    - **expires_at** (str): 만료 시각 (ISO8601, UTC). 유효기간 5분
+
+    ## Notes
+    - 발급된 URL 은 인증 없이 접근 가능하므로 공유에 주의합니다
+    - 브라우저에서는 이 API 를 `fetch` 로 호출해 `download_url` 을 받은 뒤 이동시킵니다
+      (링크 이동으로는 인증 헤더가 실리지 않습니다)
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델이 없거나 해당 파일이 없음
+    - 409: 파일 다운로드를 제공하지 않는 모델(Ollama·원격 서빙 전용)
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.issue_download_url(db, model_id, name)
 
 
 @router.get("", response_model=list[ModelBriefReadSchema])

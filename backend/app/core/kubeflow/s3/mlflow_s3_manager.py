@@ -1,7 +1,7 @@
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 import boto3
@@ -148,6 +148,42 @@ class MLFlowS3Manager:
             return True
         except Exception as e:
             raise Exception(f"폴더 삭제 중 오류 발생: {str(e)}")
+
+    def list_objects(
+        self, prefix: str, limit: int = 1000, cursor: Optional[str] = None
+    ) -> Tuple[List[dict], Optional[str]]:
+        """prefix 아래 오브젝트를 한 쪽 나열한다. 반환 (목록, next_cursor).
+
+        목록 항목: {"key", "size", "last_modified"}. last_modified 는 boto3 가 주는 tz-aware UTC 그대로다.
+        키는 사전순으로 오므로 쪽을 넘어가도 순서가 유지되고 중복·누락이 없다.
+        """
+        kwargs: dict = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": max(1, limit)}
+        if cursor:
+            kwargs["ContinuationToken"] = cursor
+        resp = self.s3_client.list_objects_v2(**kwargs)
+        items = [
+            {"key": o["Key"], "size": o["Size"], "last_modified": o["LastModified"]}
+            for o in (resp.get("Contents") or [])
+            # 디렉터리 표시용 키가 섞여 들어오면 파일이 아니므로 뺀다.
+            if not o["Key"].endswith("/")
+        ]
+        return items, resp.get("NextContinuationToken")
+
+    def object_exists(self, key: str) -> Optional[dict]:
+        """오브젝트가 있으면 {"size", "last_modified"}, 없으면 None."""
+        try:
+            head = self.s3_client.head_object(Bucket=self.bucket, Key=key)
+        except Exception:
+            return None
+        return {"size": head["ContentLength"], "last_modified": head["LastModified"]}
+
+    def presigned_get_url(self, key: str, expires_in: int = 300) -> str:
+        """다운로드용 서명 URL. 인증 없이 접근 가능하므로 로그에 남기지 않는다."""
+        return self.s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=max(1, int(expires_in)),
+        )
 
     def get_full_url(self, file_url: str):
         url = f"{self.endpoint}/{self.bucket}/{file_url}"
