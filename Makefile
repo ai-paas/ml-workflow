@@ -13,6 +13,7 @@
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario \
+        e2e-model-files \
         e2e-training e2e-training-clean e2e-training-validation \
         e2e-service-metric
 
@@ -219,6 +220,13 @@ lint-fix: isort black flake8-fix
 # ─── E2E Tests ─────────────────────────────────────────────────────────────
 E2E_DIR := e2e-test
 # 선택: ENV=dev / ENV=prod → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
+
+# ─── E2E: 모델 파일 목록·다운로드 ────────────────────────────────────────────
+# 대상 모델은 /models 를 훑어 저장 유형별로 자동 선택한다.
+# 고정하려면: E2E_MODEL_FILES_MLFLOW_MODEL / _OLLAMA_MODEL / _REMOTE_MODEL 에 모델 name 지정
+e2e-model-files:
+	@echo "▶ E2E: 모델 파일 목록·다운로드 URL"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_file/test_model_files.py -v -s
 
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"

@@ -94,6 +94,9 @@ def _collect_page(prefix: str, cursor: Optional[str]) -> Tuple[List[dict], Optio
 
     제외 때문에 쪽이 통째로 비면 다음 쪽을 이어 읽는다. 빈 목록과 next_cursor 를 함께 내보내면
     클라이언트가 "파일 없음" 으로 오해한다. 필터는 서버 사정이지 클라이언트가 알 일이 아니다.
+
+    쪽 크기(1000)가 아티팩트 하나의 파일 수보다 훨씬 커서 평소에는 반복하지 않는다.
+    파일이 1000건을 넘고 그 앞부분이 전부 제외 대상인 모델이 들어왔을 때를 위한 것이다.
     """
     s3 = MLFlowS3Manager.get_instance()
     collected: List[dict] = []

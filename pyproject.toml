@@ -33,6 +33,7 @@ markers = [
     "model_improvement_scenario: 최적화/경량화 E2E(작업 생성~성공 폴링)",
     "training: 통합 학습→등록 파이프라인 E2E(YOLOX/ESM2 공통)",
     "training_clean: 학습→등록 e2e 산출물(experiment/child model/dataset) 일괄 정리",
+    "model_files: 모델 파일 목록·다운로드 URL API",
 ]
 
 [tool.black]
