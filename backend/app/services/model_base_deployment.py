@@ -1,5 +1,6 @@
 """모델 기본 배포 관리 Service"""
 
+import json
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ from typing import Any
 
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from core.serving.gpu_placement import parse_gpu_pool_profiles, static_training_placement
 from db.models.model_base_deployment import BaseDeploymentStatus, ModelBaseDeployment
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -255,6 +257,9 @@ class ModelBaseDeploymentService:
             namespace: str,
             rest_api_url: str,
             internal_api_key: str,
+            gpu_resource_key: str = "nvidia.com/gpu",
+            node_selector_json: str = "{}",
+            tolerations_json: str = "[]",
         ) -> str:
             import json  # noqa: F811
             import logging
@@ -334,9 +339,21 @@ class ModelBaseDeploymentService:
                     client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
                 ]
 
+                base_node_selector: dict = {}
+                base_tolerations: list = []
                 if gpu_enabled:
-                    ollama_resources.requests["nvidia.com/gpu"] = "1"
-                    ollama_resources.limits["nvidia.com/gpu"] = "1"
+                    # GPU 노드풀 프로파일은 백엔드에서 계산해 파라미터(JSON 문자열)로 전달받는다.
+                    # (컴포넌트는 격리 컨테이너라 모듈 헬퍼/settings 를 못 본다 — free-variable NameError 방지.)
+                    ollama_resources.requests[gpu_resource_key] = "1"
+                    ollama_resources.limits[gpu_resource_key] = "1"
+                    try:
+                        base_node_selector = json.loads(node_selector_json) or {}
+                    except Exception:
+                        base_node_selector = {}
+                    try:
+                        base_tolerations = [client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])]
+                    except Exception:
+                        base_tolerations = []
                 else:
                     ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
@@ -401,6 +418,8 @@ class ModelBaseDeploymentService:
                                         ),
                                     )
                                 ],
+                                node_selector=(base_node_selector or None),
+                                tolerations=(base_tolerations or None),
                             ),
                         ),
                     ),
@@ -558,6 +577,10 @@ class ModelBaseDeploymentService:
                     }
                 )
 
+        # GPU 노드풀 프로파일(정적)을 백엔드에서 계산해 컴포넌트에 문자열 파라미터로 전달.
+        _placement = static_training_placement(
+            parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
+        )
         return deploy_ollama_embedding(
             model_id=model_id,
             model_name=model_name,
@@ -568,6 +591,9 @@ class ModelBaseDeploymentService:
             namespace=settings.KUBEFLOW_NAMESPACE,
             rest_api_url=settings.REST_API_URL,
             internal_api_key=settings.INTERNAL_API_KEY,
+            gpu_resource_key=_placement["gpu_resource_key"],
+            node_selector_json=json.dumps(_placement["node_selector"]),
+            tolerations_json=json.dumps(_placement["tolerations"]),
         )
 
     @staticmethod

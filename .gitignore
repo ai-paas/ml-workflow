@@ -323,3 +323,9 @@ pyrightconfig.json
 # E2E 테스트 상태 파일 (ENV 미지정 / ENV별)
 .state.json
 .state.*.json
+
+# Claude Code local config (settings, hooks, etc.)
+.claude/
+
+# AI memory file
+CLAUDE.md

@@ -158,16 +158,11 @@ async def update_experiment(
             - updated_at (datetime): 수정 시각
         - created_at (datetime): 데이터셋 생성 시각
         - updated_at (datetime): 데이터셋 수정 시각
-    - **hyperparameters** (List[HyperparameterReadSchema]): 하이퍼파라미터 목록
+    - **hyperparameters** (List[HyperparameterReadSchema]): 하이퍼파라미터 목록 (평탄 KV 구조)
         - id (int): 하이퍼파라미터 ID
-        - value (str): 하이퍼파라미터 값
         - experiment_id (int): 소속 실험 ID
-        - hyperparameter_type_id (int): 하이퍼파라미터 타입 ID
-        - hyperparameter_type (HyperparameterTypeReadSchema): 하이퍼파라미터 타입 정보
-            - id (int): 타입 ID
-            - param_name (str): 파라미터 이름
-            - param_type (str): 파라미터 타입
-            - default_value (str): 기본값
+        - param_name (str): 파라미터 이름 (예: learning_rate, batch_size, epochs)
+        - value (str): 파라미터 값
     - **created_at** (datetime): 실험 생성 시각
     - **updated_at** (datetime): 실험 수정 시각
 
@@ -197,7 +192,7 @@ async def get_experiment(
     특정 실험의 상세 정보를 조회합니다.
     목록 필드에 더해 학습 메트릭, 등록 상태, 메시지 정보를 통합 제공합니다.
 
-    ## 응답 — status·등록·메시지(문서 §7.2과 정합)
+    ## 응답 — status·등록·메시지
     - **status** (str): `CREATED`, `RUNNING`, `COMPLETED`, `FAILED` 등(완료는 주로 `COMPLETED`)
     - **registration_status** (str): `NOT_REQUESTED` | `PIPELINE_SUBMITTED` | `SUCCESS` | `FAILED`
     - **registered_model_id** (int, 선택): 등록 성공 시에만 값

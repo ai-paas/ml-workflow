@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from datetime import datetime
@@ -5,13 +6,15 @@ from typing import Optional
 
 import mlflow
 from config.db.connect import SessionDepends
-from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum
 from config.settings import get_settings
 from core.kubeflow.component.train_eval.register_model import register_model_component
 from core.kubeflow.component.train_eval.train_eval import container_train_eval_component
 from core.kubeflow.kubeflow_manager import KubeflowManager
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
+from core.training.families import resolve_family
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, UploadFile
 from kfp import dsl
+from schemas.dataset import DatasetBaseSchema
 from schemas.experiment import (
     ExperimentBaseSchema,
     HyperparameterBaseSchema,
@@ -22,9 +25,9 @@ from schemas.experiment import (
 )
 from schemas.user import UserSchema
 from services.dataset import DatasetService
-from services.experiment import ExperimentService, HyperparameterService, HyperparameterTypeService
+from services.experiment import ExperimentService, HyperparameterService
 from services.metrics_polling import poll_training_metrics
-from services.model import ModelService
+from services.model import ModelService, resolve_recommended_hparams
 from services.registration_polling import poll_registration_status
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user
@@ -35,8 +38,50 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+# ── 학습 하이퍼파라미터 백필 (user input → 모델별 recommended → 시스템 fallback) ──
+SYSTEM_HPARAM_DEFAULTS: dict[str, str] = {
+    "learning_rate": "0.001",
+    "batch_size": "16",
+    "epochs": "10",
+    "weight_decay": "0.0005",
+    "save_period": "1",
+    "gpus": "1",
+}
+HPARAM_KEYS = tuple(SYSTEM_HPARAM_DEFAULTS.keys())
+
+
+def backfill_hparams(body: TrainingRequest, recommended: dict[str, str]) -> dict[str, str]:
+    """user input → 모델별 recommended_hparams → SYSTEM_HPARAM_DEFAULTS 순으로 채운다."""
+    resolved: dict[str, str] = {}
+    for key in HPARAM_KEYS:
+        user_val = getattr(body, key, None)
+        if user_val is not None and user_val != "":
+            resolved[key] = user_val
+        elif key in recommended:
+            resolved[key] = recommended[key]
+        else:
+            resolved[key] = SYSTEM_HPARAM_DEFAULTS[key]
+    return resolved
+
+
+def _resolve_root_family(db: Session, db_model):
+    """lineage root 를 1회 조회하고 학습 가능 모델군(family)을 함께 반환. (root, family|None).
+
+    재학습 자식은 repo_id 가 비어 있을 수 있으므로 lineage root 의 (format, repo_id) 로 군을 판정한다.
+    판별 기준은 core.training.families.TRAINABLE_FAMILIES 단일 레지스트리(yolox 는 format, esm2 는 repo_id).
+    root 가 None(삭제 등)이면 (None, None).
+    """
+    root_id = ModelService.resolve_lineage_root_model_id(db, db_model.id)
+    root = ModelService.get(db, root_id)
+    if root is None:
+        return None, None
+    fmt = root.format_info.name if root.format_info else ""
+    fam = resolve_family(format_name=fmt, repo_id=(root.repo_id or ""))
+    return root, fam
+
+
 # ──────────────────────────────────────────────
-# POST /training — 전체 Body(JSON) 통일 + 백그라운드 메트릭 폴링
+# POST /training — multipart/form-data (dataset_id XOR dataset_file) + 백그라운드 메트릭 폴링
 # ──────────────────────────────────────────────
 
 
@@ -44,7 +89,8 @@ settings = get_settings()
 def container_train(
     *,
     db: Session = SessionDepends,
-    body: TrainingRequest,
+    body: TrainingRequest = Depends(TrainingRequest.as_form),
+    dataset_file: Optional[UploadFile] = File(None),
     background_tasks: BackgroundTasks,
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -52,10 +98,12 @@ def container_train(
     학습 파이프라인 생성 및 실행
 
     모델과 데이터셋을 사용하여 Kubeflow Pipeline 기반의 학습 파이프라인을 생성하고 실행합니다.
-    요청은 전체 Body(JSON)로 통일되며, 학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+    요청은 multipart/form-data 로 통일되며 (dataset_id XOR dataset_file),
+    학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+    YOLOX/ESM2 양쪽을 지원하며, 모델군에 맞지 않는 데이터셋 분류는 400 으로 거부합니다.
 
     ## Response (200, dict)
-    - **experiment_id** (int | null): 생성된 실험 ID. 파이프라인 생성/실행 실패 등으로 실험을 만들지 못한 경우 `null`일 수 있음.
+    - **experiment_id** (int): 생성된 실험 ID. (내부 오류 시 null 로 격하하지 않고 500 으로 응답)
 
     ## Status (DB `experiment`와의 관계, 참고)
     - 성공 시 새 실험 행은 **status = `CREATED`** 로 생성된 뒤,
@@ -66,31 +114,24 @@ def container_train(
     - **400**: GPU 0 이하, 유효하지 않은 인자
     - **401**: 미인증
     - **404**: 모델/데이터셋 없음
-    - **500** 또는 `experiment_id: null`: 내부 오류(파이프라인 제출 실패 등)
+    - **500**: 내부 오류(파이프라인 생성/제출 실패 등). 이전엔 200 `{experiment_id: null}` 로 격하됐으나 이제 500 으로 명확히 응답.
     """
     model_id = body.model_id
-    dataset_id = body.dataset_id
     train_name = body.train_name
     description = body.description
-    gpus = body.gpus
-    batch_size = body.batch_size
-    epochs = body.epochs
-    save_period = body.save_period
-    weight_decay = body.weight_decay
-    lr0 = body.lr0
-    lrf = body.lrf
 
-    try:
-        gpu_count = int(gpus)
-        if gpu_count <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="GPU 개수는 필수적으로 1개 이상으로 설정해야 합니다. 현재 설정된 값: " + str(gpu_count),
-            )
-    except ValueError:
+    # 실험명 중복 거부 — 같은 이름이 이미 있으면 학습(실험) 생성을 막는다.
+    # (요청 측에서 실험명 뒤에 uuid 등을 붙여 유니크하게 보내야 통과한다.)
+    if train_name and ExperimentService.get_by_name(db, train_name) is not None:
+        raise HTTPException(status_code=409, detail=f"이미 존재하는 실험명입니다: '{train_name}'")
+
+    # 데이터셋 입력: dataset_id XOR dataset_file (정확히 하나)
+    has_dataset_id = body.dataset_id is not None
+    has_dataset_file = dataset_file is not None
+    if has_dataset_id == has_dataset_file:
         raise HTTPException(
             status_code=400,
-            detail=f"GPU 개수 값 '{gpus}'이 유효하지 않습니다. 숫자로 입력해주세요.",
+            detail="dataset_id 와 dataset_file 중 정확히 하나만 제공해야 합니다.",
         )
 
     @dsl.pipeline
@@ -118,16 +159,20 @@ def container_train(
         restapi_url: str,
         restapi_username: str,
         restapi_password: str,
+        internal_api_key: str,
         gpu_limit: str,
         batch_size: str,
         epochs: str,
         save_period: str,
         weight_decay: str,
-        lr0: str,
-        lrf: str,
+        learning_rate: str,
+        model_kind: str,
         namespace: str,
         train_image_url: str,
         image_pull_secret_name: str,
+        gpu_resource_key: str,
+        node_selector_json: str,
+        tolerations_json: str,
     ):
         container_train_eval_component(
             model_id=model_id,
@@ -153,16 +198,20 @@ def container_train(
             restapi_url=restapi_url,
             restapi_username=restapi_username,
             restapi_password=restapi_password,
+            internal_api_key=internal_api_key,
             gpu_limit=gpu_limit,
             batch_size=batch_size,
             epochs=epochs,
             save_period=save_period,
             weight_decay=weight_decay,
-            lr0=lr0,
-            lrf=lrf,
+            learning_rate=learning_rate,
+            model_kind=model_kind,
             namespace=namespace,
             train_image_url=train_image_url,
             image_pull_secret_name=image_pull_secret_name,
+            gpu_resource_key=gpu_resource_key,
+            node_selector_json=node_selector_json,
+            tolerations_json=tolerations_json,
         )
 
     try:
@@ -176,10 +225,85 @@ def container_train(
                 detail=f"모델 ID '{model_id}'는 학습이 불가능한 모델입니다. 학습 가능한 모델만 사용할 수 있습니다.",
             )
 
+        # 모델군 ↔ 데이터셋 호환성 판정 (lineage root 1회 조회 → family)
+        root, fam = _resolve_root_family(db, db_model)
+        if fam is None:
+            raise HTTPException(status_code=400, detail=f"학습 가능한 모델이 아닙니다: {db_model.name}")
+        # 모델군 ↔ type_info 교차검증 — 손상된 타입(예: 자식 등록 ODM 오저장)을 학습 진입에서 차단(backstop).
+        if db_model.type_info and db_model.type_info.name != fam.model_type.value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"모델 '{db_model.name}' 타입 정보가 계보와 불일치합니다 "
+                f"(계보상 {fam.model_type.value}, 등록 타입 {db_model.type_info.name}). 모델 메타 재등록·정정이 필요합니다.",
+            )
+        expected_kind = fam.dataset_kind.value
+        model_kind = fam.key
+
+        # 데이터셋 확보: dataset_file 이면 즉시 등록, dataset_id 면 조회 후 kind 검사
+        if has_dataset_file:
+            # dataset_kind 는 '업로드한 데이터의 사실'이라 필수다. 모델에서 도출(자동부여)하면
+            # 검사가 동어반복이 되어 호환성 검증이 무력화된다 → 클라이언트가 명시한 값을 모델 요구와 대조한다.
+            if body.dataset_kind is None:
+                raise HTTPException(status_code=400, detail="dataset_file 동반 시 dataset_kind 는 필수입니다.")
+            if body.dataset_kind.value != expected_kind:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"데이터셋 분류 '{body.dataset_kind.value}' 가 "
+                    f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
+                )
+            resolved_kind = body.dataset_kind
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            auto_name = f"auto-{train_name or 'dataset'}-{ts}"
+            auto_desc = f"학습 요청 시 자동 등록된 데이터셋 kind={resolved_kind.value}"
+            dataset_obj = DatasetService.create(
+                db,
+                obj_in=DatasetBaseSchema(
+                    name=auto_name,
+                    description=auto_desc,
+                    version=1,
+                    subversion=1,
+                    kind=resolved_kind,
+                ),
+                file=dataset_file,
+            )
+            dataset_id = dataset_obj.id
+        else:
+            dataset_id = body.dataset_id
+            dataset_obj = DatasetService().get(db, dataset_id)
+            if dataset_obj is None:
+                raise HTTPException(status_code=404, detail=f"데이터셋 ID '{dataset_id}'를 찾을 수 없습니다.")
+            if (dataset_obj.kind or "") != expected_kind:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"데이터셋 분류 '{dataset_obj.kind}' 가 "
+                    f"모델이 요구하는 분류 '{expected_kind}' 와 일치하지 않습니다.",
+                )
+
+        # 하이퍼파라미터 백필 (user → recommended → system)
+        recommended = resolve_recommended_hparams(db, db_model)
+        hparams = backfill_hparams(body, recommended)
+        try:
+            if int(hparams["gpus"]) <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="GPU 개수는 1 이상으로 설정해야 합니다. 현재 값: " + hparams["gpus"],
+                )
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"GPU 개수 값 '{hparams['gpus']}'이 유효하지 않습니다. 숫자로 입력해주세요.",
+            )
+
         model_uri = db_model.registry.uri
         model_artifact_path = db_model.registry.artifact_path
-        dataset_model = DatasetService().get(db, dataset_id)
-        dataset_download_ref = dataset_model.dataset_registry.uri
+        # BFM(ESM2/ESMC)은 (최초/재학습 모두) 항상 lineage root 카탈로그의 base 를 LoRA 의 기반으로 쓴다.
+        # 자식 모델의 registry 는 adapter 를 가리키므로, base 는 lineage root 의 registry 에서 가져온다.
+        if model_kind in ("esm2", "esmc"):
+            # lineage root 는 위 _resolve_root_family 에서 이미 1회 조회했으므로 재사용(M3 중복조회 제거).
+            if root is not None and root.registry:
+                model_uri = root.registry.uri
+                model_artifact_path = root.registry.artifact_path
+        dataset_download_ref = dataset_obj.dataset_registry.uri
         dataset_storage_type = settings.DATASET_STORAGE_TYPE
         kf = KubeflowManager()
         client = kf.get_kfp_client()
@@ -199,13 +323,33 @@ def container_train(
             ),
         )
 
-        create_hyperparameter(db, experiment_db_obj.id, "epochs", epochs)
-        create_hyperparameter(db, experiment_db_obj.id, "batch_size", batch_size)
-        create_hyperparameter(db, experiment_db_obj.id, "weight_decay", weight_decay)
-        create_hyperparameter(db, experiment_db_obj.id, "lr0", lr0)
-        create_hyperparameter(db, experiment_db_obj.id, "lrf", lrf)
-        create_hyperparameter(db, experiment_db_obj.id, "gpus", gpus)
-        create_hyperparameter(db, experiment_db_obj.id, "save_period", save_period)
+        # 실제 적용된 하이퍼파라미터만 평탄 KV 로 기록 (재현·감사 가능)
+        for name, value in hparams.items():
+            create_hyperparameter(db, experiment_db_obj.id, name, value)
+
+        # 학습 Job 노드 배치.
+        # 1) GPU 노드풀 프로파일(MIG taint 등)이 있으면 그 정적 배치를 채택(toleration+nodeSelector+자원키 주입).
+        # 2) 프로파일이 없고 SERVING_NODE_NAMES 화이트리스트가 있으면, 서빙과 동일한 노드 인벤토리에서
+        #    여유 GPU 가 있는 노드를 골라 hostname 으로 고정한다 → 서빙이 화이트리스트로 피하는 비호환 GPU
+        #    노드(예: 학습 이미지의 PyTorch 가 지원하지 않는 구형 GPU)를 학습 Job 도 함께 피한다.
+        # 3) 둘 다 없으면 기존 기본(무 nodeSelector).
+        from core.serving.gpu_placement import parse_gpu_pool_profiles, static_training_placement
+        from core.serving.serving_k8s_inventory import choose_training_node_placement
+
+        _profiles = parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
+        _serving_nodes = (getattr(settings, "SERVING_NODE_NAMES", "") or "").strip()
+        if _profiles:
+            _train_placement = static_training_placement(_profiles)
+        elif _serving_nodes:
+            _train_placement = choose_training_node_placement(
+                requested_gpus=int(hparams["gpus"]),
+                default_vram_bytes=settings.SERVING_DEFAULT_GPU_VRAM_BYTES,
+                vram_overrides_json=settings.SERVING_NODE_VRAM_OVERRIDES_JSON,
+                serving_node_names_csv=_serving_nodes,
+                exclude_control_plane_nodes=not settings.SERVING_INCLUDE_CONTROL_PLANE_NODES,
+            ) or static_training_placement([])
+        else:
+            _train_placement = static_training_placement([])
 
         client.create_run_from_pipeline_func(
             train_pipeline,
@@ -235,16 +379,20 @@ def container_train(
                 "restapi_url": settings.REST_API_URL,
                 "restapi_username": "surromind",
                 "restapi_password": settings.DEMO_PASSWORD,
-                "gpu_limit": gpus,
-                "batch_size": batch_size,
-                "epochs": epochs,
-                "save_period": save_period,
-                "weight_decay": weight_decay,
-                "lr0": lr0,
-                "lrf": lrf,
+                "internal_api_key": settings.INTERNAL_API_KEY,
+                "gpu_limit": hparams["gpus"],
+                "batch_size": hparams["batch_size"],
+                "epochs": hparams["epochs"],
+                "save_period": hparams["save_period"],
+                "weight_decay": hparams["weight_decay"],
+                "learning_rate": hparams["learning_rate"],
+                "model_kind": model_kind,
                 "namespace": settings.KUBEFLOW_NAMESPACE,
                 "train_image_url": settings.TRAIN_IMAGE_URL,
                 "image_pull_secret_name": settings.KUBEFLOW_IMAGE_PULL_SECRET,
+                "gpu_resource_key": _train_placement["gpu_resource_key"],
+                "node_selector_json": json.dumps(_train_placement["node_selector"]),
+                "tolerations_json": json.dumps(_train_placement["tolerations"]),
             },
         )
 
@@ -259,10 +407,12 @@ def container_train(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"error occured when register pipeline : {e}")
-        return {
-            "experiment_id": None,
-        }
+        # 침묵 실패 방지: 내부 오류를 200 {experiment_id: null} 로 격하하지 않고 500 으로 명확히 알린다.
+        logger.exception("학습 파이프라인 생성/제출 중 오류")
+        raise HTTPException(
+            status_code=500,
+            detail=f"학습 파이프라인 생성 중 오류가 발생했습니다: {e}",
+        ) from e
 
 
 # ──────────────────────────────────────────────
@@ -310,7 +460,7 @@ async def get_training_status(
         run_id = experiment_db_model.mlflow_run_id
         max_epoch = 0
         for hp in experiment_db_model.hyperparameters:
-            if hp.hyperparameter_type.param_name == "epochs":
+            if hp.param_name == "epochs":
                 max_epoch = int(hp.value)
                 break
 
@@ -368,6 +518,10 @@ def register_model(
     description = body.description
     experiment_id = body.experiment_id
 
+    # 모델명 중복 사전 거부(조기 종료) — KFP 제출 전에 막는다. 단일 가드 메서드 재사용.
+    # (재등록 요청 측에서 모델명 뒤에 uuid 등을 붙여 유니크하게 보내야 통과한다.)
+    ModelService.assert_model_name_available(db, model_name)
+
     @dsl.pipeline
     def register_model_pipeline(
         reference_model_id: int,
@@ -387,6 +541,7 @@ def register_model(
         type_name: str,
         yolox_format_name: str,
         pytorch_format_name: str,
+        output_task: str = "",
         mlflow_run_id: str = "",
     ):
         register_model_component(
@@ -407,6 +562,7 @@ def register_model(
             type_name=type_name,
             yolox_format_name=yolox_format_name,
             pytorch_format_name=pytorch_format_name,
+            output_task=output_task,
             mlflow_run_id=mlflow_run_id,
         )
 
@@ -431,8 +587,25 @@ def register_model(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
+        # 파인튜닝 자식은 MLflow registry(LoRA adapter/가중치) 기반이므로 provider 는 항상 CUSTOM 으로 등록한다.
+        # (huggingface 로 상속하면 create_model 이 repo_id 필수 + HF Hub 다운로드 경로로 가서 실패한다.)
+        # model_type(coarse)은 reference 에서 상속(ESM2 → BFM, YOLOX → ODM). task(fine)는 전이한다:
+        #   base(fill-mask 등) → 자식은 family.output_task(protein-classification). 부모 task 상속이 아님.
+        reference_model = ModelService().get(db, reference_model_id)
         provider_name = ModelProviderEnum.CUSTOM.value
-        type_name = ModelTypeEnum.ODM.value
+        _ref_root, _ref_fam = _resolve_root_family(db, reference_model) if reference_model is not None else (None, None)
+        # KFP 격리: families 를 백엔드에서 resolve 해 output_task 를 컴포넌트 파라미터로 전달(컴포넌트 body 에선 import 불가).
+        output_task = _ref_fam.output_task if _ref_fam is not None else ""
+        if reference_model is not None and reference_model.type_info:
+            type_name = reference_model.type_info.name
+        else:
+            # type 미해결 시 ODM 조용한 오저장 대신 모델군 레지스트리로 재판정, 그래도 없으면 400.
+            if _ref_fam is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reference 모델의 타입을 확정할 수 없어 자식 모델을 등록할 수 없습니다. 모델 메타를 정정해 주세요.",
+                )
+            type_name = _ref_fam.model_type.value
         yolox_format_name = ModelFormatEnum.YOLOX.value
         pytorch_format_name = ModelFormatEnum.PYTORCH.value
 
@@ -458,6 +631,7 @@ def register_model(
                 "type_name": type_name,
                 "yolox_format_name": yolox_format_name,
                 "pytorch_format_name": pytorch_format_name,
+                "output_task": output_task,
                 "mlflow_run_id": experiment_db_obj.mlflow_run_id or "",
             },
         )
@@ -579,12 +753,11 @@ class PipelineTrainingMonitor:
 
 
 def create_hyperparameter(db: Session, experiment_id: int, param_name: str, value: str):
-    hp_type_obj = HyperparameterTypeService().get_by_param_name(db, param_name)
     return HyperparameterService().create(
         db,
         obj_in=HyperparameterBaseSchema(
             experiment_id=experiment_id,
-            hyperparameter_type_id=hp_type_obj.id,
+            param_name=param_name,
             value=value,
         ),
     )

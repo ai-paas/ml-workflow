@@ -13,13 +13,20 @@ validate API와 create/update API는 동일한 _validate_workflow_definition_che
   5. connection_type_rules  — END→*, *→START, KB→KB 연결
   6. required_fields        — MODEL에 model_id 누락
   7. config_validation      — temperature 범위 초과, 허용되지 않는 키 등
+  8. no_incompatible_model_type_mix — OD/LLM/pLM 모델 혼합 (상호 배타)
+  9. no_plm_with_kb         — pLM 모델 + KNOWLEDGE_BASE 공존
+ 10. no_plm_with_prompt     — pLM 모델 + prompt_id 공존
 """
 
+import os
 import uuid
 
 import pytest
 import requests
-from config import WORKFLOW_TARGET_LLM_MODEL
+from config import WORKFLOW_TARGET_LLM_MODEL, WORKFLOW_TARGET_ODM_MODEL
+
+# pLM 모델 — 카탈로그 reference(항상 존재, type=pLM). 모델타입 가드 케이스용.
+PLM_MODEL_NAME = (os.environ.get("E2E_TRAINING_REFERENCE_MODEL_NAME") or "facebook/esm2_t6_8M_UR50D").strip()
 
 
 @pytest.mark.workflow_validation
@@ -27,6 +34,8 @@ class TestWorkflowValidation:
     """잘못된 워크플로우 정의가 올바르게 거부되는지 검증"""
 
     model: dict | None = None
+    odm: dict | None = None
+    plm: dict | None = None
 
     # ── helpers ──────────────────────────────────────────────
 
@@ -83,10 +92,13 @@ class TestWorkflowValidation:
     # ── 사전 준비 ────────────────────────────────────────────
 
     def test_00_find_model(self, api_url: str, auth_headers: dict):
-        """테스트에 사용할 모델을 조회한다."""
-        model = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_LLM_MODEL)
-        self.__class__.model = model
-        print(f"\n✔ 모델 발견: id={model['id']}, name={model['name']}")
+        """테스트에 사용할 모델(LLM/ODM/pLM)을 조회한다."""
+        cls = self.__class__
+        cls.model = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_LLM_MODEL)
+        cls.odm = self._find_model_by_name(api_url, auth_headers, WORKFLOW_TARGET_ODM_MODEL)
+        cls.plm = self._find_model_by_name(api_url, auth_headers, PLM_MODEL_NAME)
+        assert (cls.plm.get("type_info") or {}).get("name") == "BFM", f"BFM 타입 아님: {cls.plm.get('type_info')}"
+        print(f"\n✔ 모델: LLM={cls.model['id']} ODM={cls.odm['id']} pLM={cls.plm['id']}")
 
     # ── 정상 케이스 (baseline) ───────────────────────────────
 
@@ -282,3 +294,63 @@ class TestWorkflowValidation:
         data = self._validate(api_url, auth_headers, defn)
         self._assert_rule_failed(data, "config_validation")
         print("\n✔ config_validation (START에 config 지정) 검증 통과")
+
+    # ── 모델 타입 호환성 규칙 (학습 검증 리팩터로 추가) ──────────
+
+    def _assert_mix_rejected(self, api_url, auth_headers, model_a_id: int, model_b_id: int):
+        s, a, b, e = (f"{p}-{uuid.uuid4().hex[:6]}" for p in ("start", "ma", "mb", "end"))
+        defn = {
+            "components": [
+                {"ref_id": s, "name": "시작", "type": "START"},
+                {"ref_id": a, "name": "A", "type": "MODEL", "model_id": model_a_id},
+                {"ref_id": b, "name": "B", "type": "MODEL", "model_id": model_b_id},
+                {"ref_id": e, "name": "끝", "type": "END"},
+            ],
+            "connections": [
+                {"source_ref_id": s, "target_ref_id": a},
+                {"source_ref_id": a, "target_ref_id": b},
+                {"source_ref_id": b, "target_ref_id": e},
+            ],
+        }
+        data = self._validate(api_url, auth_headers, defn)
+        self._assert_rule_failed(data, "no_incompatible_model_type_mix")
+
+    def test_14_plm_with_kb(self, api_url: str, auth_headers: dict):
+        """pLM 모델 + KNOWLEDGE_BASE 공존 → no_plm_with_kb"""
+        s, kb, m, e = (f"{p}-{uuid.uuid4().hex[:6]}" for p in ("start", "kb", "model", "end"))
+        defn = {
+            "components": [
+                {"ref_id": s, "name": "시작", "type": "START"},
+                {"ref_id": kb, "name": "KB", "type": "KNOWLEDGE_BASE", "knowledge_base_id": 1},
+                {"ref_id": m, "name": "pLM", "type": "MODEL", "model_id": self.__class__.plm["id"]},
+                {"ref_id": e, "name": "끝", "type": "END"},
+            ],
+            "connections": [
+                {"source_ref_id": s, "target_ref_id": kb},
+                {"source_ref_id": kb, "target_ref_id": m},
+                {"source_ref_id": m, "target_ref_id": e},
+            ],
+        }
+        data = self._validate(api_url, auth_headers, defn)
+        self._assert_rule_failed(data, "no_bfm_with_kb")
+        print("\n✔ no_bfm_with_kb (BFM+KB) 검증 통과")
+
+    def test_15_plm_with_prompt(self, api_url: str, auth_headers: dict):
+        """pLM 모델 + prompt_id 공존 → no_plm_with_prompt"""
+        defn, s, m, e = self._base_definition(self.__class__.plm["id"])
+        for comp in defn["components"]:
+            if comp["type"] == "MODEL":
+                comp["prompt_id"] = 1
+        data = self._validate(api_url, auth_headers, defn)
+        self._assert_rule_failed(data, "no_bfm_with_prompt")
+        print("\n✔ no_bfm_with_prompt (BFM+prompt) 검증 통과")
+
+    def test_16_od_plm_mix(self, api_url: str, auth_headers: dict):
+        """OD + pLM 혼합 → no_incompatible_model_type_mix"""
+        self._assert_mix_rejected(api_url, auth_headers, self.__class__.odm["id"], self.__class__.plm["id"])
+        print("\n✔ no_incompatible_model_type_mix (OD+pLM) 검증 통과")
+
+    def test_17_od_llm_mix(self, api_url: str, auth_headers: dict):
+        """OD + LLM 혼합 → no_incompatible_model_type_mix"""
+        self._assert_mix_rejected(api_url, auth_headers, self.__class__.odm["id"], self.__class__.model["id"])
+        print("\n✔ no_incompatible_model_type_mix (OD+LLM) 검증 통과")

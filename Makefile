@@ -13,6 +13,8 @@
         e2e-wf-scenario-info e2e-wf-scenario-deploy e2e-wf-scenario-delete e2e-wf-scenario-lifecycle \
         e2e-wf-template-clone \
         e2e-model-improvement e2e-model-improvement-scenario \
+        e2e-model-files \
+        e2e-training e2e-training-clean e2e-training-validation \
         e2e-service-metric
 
 APP_DIR := backend/app
@@ -41,7 +43,7 @@ help:
 	@echo "  make db-seed-test          # 시드 러너 단위 테스트(unittest, ENV 기본 local)"
 	@echo "별칭: db-seed-ensure, db-seed-upsert, db-seed-sync, db-seed-reset, db-seed-dry"
 	@echo ""
-	@echo "Harbor · Docker (ENV 필수: dev | innogrid)"
+	@echo "Harbor · Docker (ENV 필수: dev | prod)"
 	@echo "  make harbor-login ENV=dev"
 	@echo "  make harbor-build-push-backend ENV=dev [TAG=latest]"
 	@echo "  make harbor-build-push-predictor ENV=dev [TAG=latest]"
@@ -197,7 +199,7 @@ harbor-build-push-all-nc:
 
 # ─── Lint / Format (.pre-commit-config.yaml 규칙과 동일) ──────────────────
 FLAKE8_IGNORE := E203,W503,W605,E712,E266,F401,E402,F821,E711,F403
-FLAKE8_EXCLUDE := .venv,*/.venv
+FLAKE8_EXCLUDE := .venv,*/.venv,*/vendored/*
 
 flake8:
 	uv run --group dev flake8 --max-line-length=120 --ignore=$(FLAKE8_IGNORE) --exclude=$(FLAKE8_EXCLUDE) .
@@ -217,7 +219,14 @@ lint-fix: isort black flake8-fix
 
 # ─── E2E Tests ─────────────────────────────────────────────────────────────
 E2E_DIR := e2e-test
-# 선택: ENV=dev / ENV=innogrid → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
+# 선택: ENV=dev / ENV=prod → e2e-test/.env 를 읽은 뒤 e2e-test/.env.{ENV} 로 덮어씀 (config.py)
+
+# ─── E2E: 모델 파일 목록·다운로드 ────────────────────────────────────────────
+# 대상 모델은 /models 를 훑어 저장 유형별로 자동 선택한다.
+# 고정하려면: E2E_MODEL_FILES_MLFLOW_MODEL / _OLLAMA_MODEL / _REMOTE_MODEL 에 모델 name 지정
+e2e-model-files:
+	@echo "▶ E2E: 모델 파일 목록·다운로드 URL"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_file/test_model_files.py -v -s
 
 e2e-workflow-validation:
 	@echo "▶ E2E: 워크플로우 정의 검증 오류 케이스 테스트"
@@ -276,3 +285,26 @@ e2e-model-improvement-scenario:
 	@echo "▶ E2E: 최적화/경량화 시나리오 — 작업 생성 후 SUCCEEDED까지 폴링"
 	@echo "    소스: E2E_OPTIMIZATION_SOURCE_MODEL_NAME (E2E_WORKFLOW_TARGET_LLM_MODEL 과 동일 패턴), 선택 E2E_OPTIMIZATION_TASK_TYPE"
 	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/model_improvement/test_model_improvement.py -v -s -m model_improvement_scenario
+
+# ─── E2E: 통합 학습→등록 (YOLOX/ESM2 공통, 모델 무관) ─────────────────────────────
+# .env.{ENV} 또는 인라인 환경변수로 모델군 선택. 자식 모델 id/name 을 .state.{ENV}.json 에 저장.
+#   make e2e-training ENV=dev \
+#     E2E_TRAINING_REFERENCE_MODEL_NAME=facebook/esm2_t6_8M_UR50D \
+#     E2E_TRAINING_DATASET_FILE=protein_sample.zip E2E_TRAINING_DATASET_KIND=protein-classification \
+#     E2E_TRAINING_EXPECT_TYPE=pLM E2E_TRAINING_EXPECT_FORMAT=pytorch
+e2e-training:
+	@echo "▶ E2E: 통합 학습→등록 (reference=$(if $(strip $(E2E_TRAINING_REFERENCE_MODEL_NAME)),$(E2E_TRAINING_REFERENCE_MODEL_NAME),.env))"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_register.py -v -s -m training
+
+# 학습→등록 e2e 산출물(experiment/child model/auto dataset) 일괄 삭제 (.state.{ENV}.json 의 training_runs)
+#   make e2e-training-clean ENV=dev
+e2e-training-clean:
+	@echo "▶ E2E: 학습 산출물 정리 (training_runs)"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_cleanup.py -v -s -m training_clean
+
+# 학습 요청 검증 negative 케이스 — dataset_kind 필수/불일치 (POST /pipeline/training 400, 부작용 없음)
+#   make e2e-training-validation ENV=dev
+#   (워크플로우 정의 검증 negative — pLM+KB/prompt·OD/LLM/pLM 혼합 등 — 은 make e2e-workflow-validation)
+e2e-training-validation:
+	@echo "▶ E2E: 학습 요청 검증 negative 케이스"
+	$(if $(strip $(ENV)),ENV=$(ENV) )uv run --group e2e pytest $(E2E_DIR)/training/test_training_validation.py -v -s -m training_validation

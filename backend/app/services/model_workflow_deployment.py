@@ -14,6 +14,7 @@ from db.models.model_workflow_deployment import (
 from repos.model_workflow_deployment import model_workflow_deployment_repository
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentBaseSchema
 from services.workflow import WorkflowService
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 
@@ -24,7 +25,7 @@ class ModelWorkflowDeploymentService:
     def _urls_for(
         deployment: ModelWorkflowDeployment,
     ) -> tuple[Optional[str], Optional[str], Optional[str]]:
-        """(gateway_url, public_url, backend_api_url) — §2.6."""
+        """(gateway_url, public_url, backend_api_url)."""
         s = get_settings()
         gw_raw = (s.KSERVE_GATEWAY_URL or "").strip()
         gateway_url = gw_raw if gw_raw else None
@@ -101,21 +102,21 @@ class ModelWorkflowDeploymentService:
 
             if status == "deployed":
                 deployment.status = DeploymentStatus.DEPLOYED
-                deployment.deployed_at = datetime.utcnow()
+                deployment.deployed_at = func.now()
                 deployment.error_message = None
             elif status == "failed":
                 deployment.status = DeploymentStatus.FAILED
                 deployment.error_message = error_message
             elif status == "deleted":
                 deployment.status = DeploymentStatus.DELETED
-                deployment.deleted_at = datetime.utcnow()
+                deployment.deleted_at = func.now()
 
             db.commit()
             db.refresh(deployment)
         else:
             if status == "deployed":
                 dep_status = DeploymentStatus.DEPLOYED
-                deployed_at = datetime.utcnow()
+                deployed_at = func.now()
             elif status == "failed":
                 dep_status = DeploymentStatus.FAILED
                 deployed_at = None
@@ -238,8 +239,17 @@ class ModelWorkflowDeploymentService:
         return len(deployments)
 
     @staticmethod
-    def delete_workflow_deployments(db: Session, workflow_id: str) -> int:
+    def delete_workflow_deployments(
+        db: Session, workflow_id: str, allowed_deployment_ids: Optional[List[str]] = None
+    ) -> int:
+        """복제 PVC 정리 후 배포 행을 삭제한다.
+
+        allowed_deployment_ids 를 주면 그 행만 대상으로 한다. 정리 도중 같은 워크플로가 다시
+        실행되어 생긴 배포 행·복제 PVC 를 함께 지우지 않기 위한 것이다.
+        """
         from core.serving.serving_model_workflow_pvc import process_deployments_before_hard_delete
 
-        process_deployments_before_hard_delete(db, workflow_id)
-        return model_workflow_deployment_repository.cleanup_workflow_deployments(db, workflow_id)
+        process_deployments_before_hard_delete(db, workflow_id, allowed_deployment_ids)
+        return model_workflow_deployment_repository.cleanup_workflow_deployments(
+            db, workflow_id, allowed_deployment_ids
+        )

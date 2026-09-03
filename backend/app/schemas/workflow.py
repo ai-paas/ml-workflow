@@ -8,7 +8,7 @@ from config.settings import get_settings
 from core.serving.serving_workflow_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
 from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.service import ComponentType
-from pydantic import BaseModel, Field, computed_field, model_serializer, model_validator
+from pydantic import BaseModel, Field, computed_field, model_serializer
 from schemas.base import TimeStampSchemaMixin
 from schemas.model import ModelBriefReadSchema
 from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
@@ -51,45 +51,6 @@ class ComponentCreateRequest(BaseModel):
     config: Optional[Dict[str, Any]] = Field(None, description="컴포넌트별 세부 설정")
     x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
     y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
-
-    @model_validator(mode="after")
-    def validate_config(self):
-        if self.config is None:
-            return self
-
-        if self.type == ComponentType.MODEL:
-            allowed = {"temperature", "top_p", "max_tokens"}
-            for key in self.config:
-                if key not in allowed:
-                    raise ValueError(f"MODEL config에 허용되지 않는 키: {key}")
-            if "temperature" in self.config:
-                v = self.config["temperature"]
-                if not (0.0 <= float(v) <= 1.0):
-                    raise ValueError("temperature: 0.0~1.0")
-            if "top_p" in self.config:
-                v = self.config["top_p"]
-                if not (0.0 <= float(v) <= 1.0):
-                    raise ValueError("top_p: 0.0~1.0")
-            if "max_tokens" in self.config:
-                v = self.config["max_tokens"]
-                if not (1 <= int(v) <= 4096):
-                    raise ValueError("max_tokens: 1~4096")
-
-        elif self.type == ComponentType.KNOWLEDGE_BASE:
-            allowed = {"top_k"}
-            for key in self.config:
-                if key not in allowed:
-                    raise ValueError(f"KNOWLEDGE_BASE config에 허용되지 않는 키: {key}")
-            if "top_k" in self.config:
-                v = self.config["top_k"]
-                if not (1 <= int(v) <= 10):
-                    raise ValueError("top_k: 1~10")
-
-        elif self.type in (ComponentType.START, ComponentType.END):
-            if self.config:
-                raise ValueError("START/END 컴포넌트는 config를 사용하지 않음")
-
-        return self
 
 
 class ComponentReadSchema(TimeStampSchemaMixin):
@@ -245,7 +206,7 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def public_url(self) -> Optional[str]:
-        """§2.6: KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
+        """KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
         if not self.model_deployments:
             return None
 
@@ -258,7 +219,7 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def backend_api_url(self) -> Optional[str]:
-        """§2.6: 배포 레코드의 internal_url 기준."""
+        """배포 레코드의 internal_url 기준."""
         if not self.model_deployments:
             return None
 
@@ -319,7 +280,8 @@ class WorkflowExecuteResponse(BaseModel):
     """워크플로우 실행 응답"""
 
     workflow_id: str
-    kubeflow_run_id: str
+    # 원격 서빙 전용 워크플로는 파이프라인을 제출하지 않으므로 run ID 가 없다.
+    kubeflow_run_id: Optional[str] = None
     status: str
     message: str
 
@@ -347,13 +309,35 @@ class ModelLLMTestResult(BaseModel):
     full_response: Optional[Dict[str, Any]] = Field(None, description="전체 응답 (Ollama API 응답)")
 
 
+class ModelProteinClassificationTestResult(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="추론 결과 목록 (label/score/probabilities)")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (epitope/cdr3b)")
+
+
+class ModelFillMaskTestResult(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="마스크 위치별 top-k 토큰 예측 목록")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (sequence/top_k)")
+
+
+class ModelStructurePredictionTestResult(BaseModel):
+    """protein-structure-prediction(ESMFold2) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="예측 구조 목록 (pdb/plddt_mean/ptm/iptm)")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (sequence/num_loops/num_sampling_steps)")
+
+
 class ComponentTestResultBase(BaseModel):
     """컴포넌트 테스트 결과 기본"""
 
     component_id: str
     component_name: str
     component_type: str  # KNOWLEDGE_BASE 또는 MODEL
-    model_type: str  # embedding, ODM, LLM
+    model_type: str  # coarse: embedding, ODM, LLM, BFM
+    task: Optional[str] = None  # fine: object-detection/text-generation/protein-classification 등 (라우팅 키)
 
 
 class KnowledgeBaseComponentTestResult(ComponentTestResultBase):
@@ -368,8 +352,14 @@ class ModelComponentTestResult(ComponentTestResultBase):
     """모델 컴포넌트 테스트 결과"""
 
     component_type: str = Field(default="MODEL", description="컴포넌트 타입")
-    model_type: str  # ODM 또는 LLM
-    result: Union[ModelODMTestResult, ModelLLMTestResult]
+    model_type: str  # ODM, LLM, 또는 BFM
+    result: Union[
+        ModelODMTestResult,
+        ModelLLMTestResult,
+        ModelProteinClassificationTestResult,
+        ModelFillMaskTestResult,
+        ModelStructurePredictionTestResult,
+    ]
 
 
 class ComponentTestErrorResult(BaseModel):
@@ -403,6 +393,30 @@ class WorkflowMLTestResponse(BaseModel):
     final_result: Optional[str] = Field(
         None, description="최종 결과 이미지 (bbox와 label이 그려진 이미지를 base64로 인코딩한 문자열)"
     )
+
+
+class WorkflowProteinClassificationTestResponse(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+class WorkflowFillMaskTestResponse(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+class WorkflowProteinStructurePredictionTestResponse(BaseModel):
+    """protein-structure-prediction(ESMFold2) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
 
 
 # ============= Workflow Validation 스키마 =============

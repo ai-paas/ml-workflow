@@ -19,7 +19,6 @@ USER_DATA = [
 ]
 
 MODEL_FORMAT_DATA = [
-    {"name": ModelFormatEnum.TRANSFORMERS.value, "description": "Huggingface transformers"},
     {"name": ModelFormatEnum.PYTORCH.value, "description": "Pytorch"},
     {"name": ModelFormatEnum.KERAS.value, "description": "Keras"},
     {"name": ModelFormatEnum.ONNX.value, "description": "ONNX"},
@@ -41,45 +40,7 @@ MODEL_TYPE_DATA = [
     {"name": ModelTypeEnum.ODM.value, "description": "Object Detection Model"},
     {"name": ModelTypeEnum.LLM.value, "description": "Large Language Model"},
     {"name": ModelTypeEnum.EMBEDDING.value, "description": "Embedding Model"},
-    {"name": ModelTypeEnum.PLM.value, "description": "Protein Language Model"},
-]
-
-HYPERPARAMETER_TYPE_DATA = [
-    {
-        "param_name": "epochs",
-        "param_type": "int",
-        "default_value": "10",
-    },
-    {
-        "param_name": "batch_size",
-        "param_type": "int",
-        "default_value": "16",
-    },
-    {
-        "param_name": "weight_decay",
-        "param_type": "float",
-        "default_value": "0.0001",
-    },
-    {
-        "param_name": "save_period",
-        "param_type": "int",
-        "default_value": "1",
-    },
-    {
-        "param_name": "lr0",
-        "param_type": "float",
-        "default_value": "0.01",
-    },
-    {
-        "param_name": "lrf",
-        "param_type": "float",
-        "default_value": "0.05",
-    },
-    {
-        "param_name": "gpus",
-        "param_type": "int",
-        "default_value": "1",
-    },
+    {"name": ModelTypeEnum.BFM.value, "description": "Biomolecular Foundation Model"},
 ]
 
 CHUNK_TYPE_DATA = [

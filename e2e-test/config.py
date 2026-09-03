@@ -75,6 +75,12 @@ WORKFLOW_TARGET_LLM_MODEL: str = (
     (os.environ.get("E2E_WORKFLOW_TARGET_LLM_MODEL") or os.environ.get("E2E_TARGET_MODEL_NAME") or "gpt-oss-20b")
 ).strip()
 WORKFLOW_TARGET_ODM_MODEL: str = (os.environ.get("E2E_WORKFLOW_TARGET_ODM_MODEL") or "facebook/detr-resnet-50").strip()
+# 시나리오 #11(pLM) 타깃: 파인튜닝된 ESM2 자식 모델 name (학습→등록 e2e 산출물)
+WORKFLOW_TARGET_PLM_MODEL: str = (os.environ.get("E2E_WORKFLOW_TARGET_PLM_MODEL") or "").strip()
+# 시나리오 #12(BFM fill-mask) 타깃: base BFM 모델 name (parent 없는 원본, 어댑터 없이 직접 서빙)
+WORKFLOW_TARGET_FILLMASK_MODEL: str = (
+    os.environ.get("E2E_WORKFLOW_TARGET_FILLMASK_MODEL") or "facebook/esm2_t6_8M_UR50D"
+).strip()
 
 TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NAME", "bge-m3")
 
@@ -82,6 +88,28 @@ TARGET_EMBEDDING_MODEL_NAME: str = os.environ.get("E2E_TARGET_EMBEDDING_MODEL_NA
 WORKFLOW_ODM_TEST_IMAGE: Path = Path(
     os.environ.get("E2E_WORKFLOW_ODM_TEST_IMAGE") or str(_E2E_ROOT / "workflow" / "fixtures" / "odm_sample.jpg")
 ).expanduser()
+
+# 시나리오 #11(pLM) 추론 입력 단백질 서열 샘플 (JSON: {"epitope": ..., "cdr3b": ...})
+WORKFLOW_PLM_TEST_SAMPLE: Path = Path(
+    os.environ.get("E2E_WORKFLOW_PLM_TEST_SAMPLE") or str(_E2E_ROOT / "workflow" / "fixtures" / "plm_sample.json")
+).expanduser()
+
+# 시나리오 #12(BFM fill-mask) 추론 입력: 마스크 토큰(<mask>) 포함 단백질 서열 + 마스크 위치별 top-k
+WORKFLOW_FILLMASK_TEST_SEQUENCE: str = (
+    os.environ.get("E2E_WORKFLOW_FILLMASK_TEST_SEQUENCE") or "MKTAYIAKQR<mask>ISFVKSHFSRQLEE"
+).strip()
+WORKFLOW_FILLMASK_TOP_K: int = int(os.environ.get("E2E_WORKFLOW_FILLMASK_TOP_K", "5"))
+
+# 시나리오 #13(BFM structure-prediction) 타깃: ESMFold2 구조예측 모델 name
+WORKFLOW_TARGET_STRUCTURE_MODEL: str = (
+    os.environ.get("E2E_WORKFLOW_TARGET_STRUCTURE_MODEL") or "biohub/ESMFold2"
+).strip()
+# 시나리오 #13 추론 입력: 구조를 예측할 단백질 서열(스모크용 짧은 서열) + recycling loop/샘플링 스텝
+WORKFLOW_STRUCTURE_TEST_SEQUENCE: str = (
+    os.environ.get("E2E_WORKFLOW_STRUCTURE_TEST_SEQUENCE") or "GSHMTEYKLVVVGAGGVGKSALTIQLIQNHFVDEYDPTIEDSYRKQVVID"
+).strip()
+WORKFLOW_STRUCTURE_NUM_LOOPS: int = int(os.environ.get("E2E_WORKFLOW_STRUCTURE_NUM_LOOPS", "3"))
+WORKFLOW_STRUCTURE_NUM_SAMPLING_STEPS: int = int(os.environ.get("E2E_WORKFLOW_STRUCTURE_NUM_SAMPLING_STEPS", "50"))
 
 # ── 최적화/경량화 E2E (model-improvements 시나리오) ─────────────────────────
 # 소스 모델: E2E_WORKFLOW_TARGET_LLM_MODEL 과 동일하게 등록된 name 으로만 지정
@@ -102,9 +130,16 @@ else:
 
 
 def workflow_primary_target_model_name() -> str:
-    """워크플로 시나리오 배포/생명주기: #10 은 ODM, 그 외는 LLM."""
+    """워크플로 시나리오 배포/생명주기: #10 은 ODM, #11 은 pLM, #12 는 BFM fill-mask,
+    #13 은 BFM structure-prediction, 그 외는 LLM."""
     if SCENARIO_NUM == 10:
         return WORKFLOW_TARGET_ODM_MODEL
+    if SCENARIO_NUM == 11:
+        return WORKFLOW_TARGET_PLM_MODEL
+    if SCENARIO_NUM == 12:
+        return WORKFLOW_TARGET_FILLMASK_MODEL
+    if SCENARIO_NUM == 13:
+        return WORKFLOW_TARGET_STRUCTURE_MODEL
     return WORKFLOW_TARGET_LLM_MODEL
 
 

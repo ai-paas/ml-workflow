@@ -1,3 +1,4 @@
+import csv
 import io
 import json
 import logging
@@ -7,9 +8,10 @@ import uuid
 import zipfile
 from pathlib import Path
 
+from config.db.enums import DatasetKindEnum
 from config.settings import get_settings
 from core.storage.factory import get_storage_client
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 from repos.dataset import dataset_registry_repository, dataset_repository
 from schemas.dataset import (
     DatasetBaseSchema,
@@ -17,6 +19,7 @@ from schemas.dataset import (
     DatasetRegistryBaseSchema,
     DatasetRegistryReadSchema,
     DatasetUpdateSchema,
+    DatasetValidationResponse,
 )
 from sqlalchemy.orm import Session
 
@@ -69,125 +72,156 @@ class DatasetService:
         return dataset_repository.get(db, dataset_id)
 
     @staticmethod
-    def validate_dataset_file(file: UploadFile) -> dict:
-        """데이터셋 파일 검증
+    def validate(file: UploadFile, dataset_kind: DatasetKindEnum) -> DatasetValidationResponse:
+        """업로드된 데이터셋 ZIP 을 요청 분류(dataset_kind)의 형식 요구사항으로 검증한다.
 
-        Args:
-            file: 업로드된 파일
+        - object-detection: COCO128 구조 (annotations/instances_{train,val}2017.json + train2017/val2017)
+          (사용자 친화 ZIP 사양은 후속 — 현재는 happy-path 스텁)
+        - protein-classification: TCR-Epitope CSV (필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 비어있지 않음, 행≥16)
 
-        Returns:
-            검증 결과 딕셔너리
-            - is_valid: 검증 성공 여부
-            - message: 검증 메시지
-            - root_dir: 루트 디렉토리 경로 (성공 시)
-            - details: 상세 정보 (실패 시)
+        출력에는 dataset_kind 가 포함되지 않는다(입력으로 이미 분류가 정해져 있음).
+        ZIP 자체가 깨진 경우는 HTTP 400 으로 거부하고,
+        분류 형식 요구사항을 충족하지 못한 경우만 200 + is_valid=False 로 응답한다.
         """
         temp_dir = None
         try:
-            # 업로드된 파일 내용 읽기
             file_content = file.file.read()
-            # 파일 포인터 리셋 (다른 곳에서 재사용 가능하도록)
             file.file.seek(0)
 
-            # ZIP 파일 형식 검증 및 압축 해제
             temp_dir = Path(tempfile.mkdtemp())
             try:
                 with zipfile.ZipFile(io.BytesIO(file_content)) as zip_ref:
                     zip_ref.extractall(temp_dir)
             except zipfile.BadZipFile as e:
                 logger.warning(f"ZIP 파일 형식 검증 실패: {str(e)}")
-                return {
-                    "is_valid": False,
-                    "message": "파일이 유효한 ZIP 형식이 아닙니다.",
-                    "root_dir": None,
-                    "details": None,
-                }
+                raise HTTPException(status_code=400, detail="파일이 유효한 ZIP 형식이 아닙니다.")
 
-            # 업로드된 파일명 추출
-            file_name = Path(file.filename).name
-            dataset_name = Path(file_name).stem
+            root_dir = DatasetService._resolve_root_dir(temp_dir)
 
-            # 압축 해제 후 ZIP 파일명과 동일한 루트 디렉토리 찾기
-            root_dir = temp_dir / dataset_name
-            if not root_dir.is_dir():
-                root_dir = temp_dir  # 동일 이름의 디렉토리가 없으면 temp_dir 자체를 루트로 사용
-
-            # COCO128 데이터셋 구조 검증
-            validation_errors = []
-
-            # 1. annotations 폴더 존재 확인
-            annotations_dir = root_dir / "annotations"
-            if not annotations_dir.is_dir():
-                validation_errors.append("annotations 폴더가 존재하지 않습니다.")
+            if dataset_kind == DatasetKindEnum.OBJECT_DETECTION:
+                ok, errors = DatasetService._check_object_detection(root_dir)
+            elif dataset_kind == DatasetKindEnum.PROTEIN_CLASSIFICATION:
+                ok, errors = DatasetService._check_protein_classification(root_dir)
             else:
-                # 2. instances_train2017.json 파일 존재 확인
-                train_json = annotations_dir / "instances_train2017.json"
-                if not train_json.is_file():
-                    validation_errors.append("annotations/instances_train2017.json 파일이 존재하지 않습니다.")
-                else:
-                    # JSON 파일 유효성 검증
-                    try:
-                        with open(train_json, "r", encoding="utf-8") as f:
-                            json.load(f)
-                    except json.JSONDecodeError:
-                        validation_errors.append(
-                            "annotations/instances_train2017.json 파일이 유효한 JSON 형식이 아닙니다."
-                        )
+                return DatasetValidationResponse(
+                    is_valid=False, message=f"지원하지 않는 데이터셋 분류입니다: {dataset_kind}", details=None
+                )
 
-                # 3. instances_val2017.json 파일 존재 확인
-                val_json = annotations_dir / "instances_val2017.json"
-                if not val_json.is_file():
-                    validation_errors.append("annotations/instances_val2017.json 파일이 존재하지 않습니다.")
-                else:
-                    # JSON 파일 유효성 검증
-                    try:
-                        with open(val_json, "r", encoding="utf-8") as f:
-                            json.load(f)
-                    except json.JSONDecodeError:
-                        validation_errors.append(
-                            "annotations/instances_val2017.json 파일이 유효한 JSON 형식이 아닙니다."
-                        )
+            if ok:
+                logger.info(f"데이터셋 파일 검증 성공: {file.filename} (kind={dataset_kind})")
+                return DatasetValidationResponse(is_valid=True, message="데이터셋 파일이 유효합니다.", details=None)
 
-            # 4. train 폴더 존재 확인
-            train_dir = root_dir / "train2017"
-            if not train_dir.is_dir():
-                validation_errors.append("train 폴더가 존재하지 않습니다.")
+            logger.warning(f"데이터셋 구조 검증 실패: {errors}")
+            return DatasetValidationResponse(
+                is_valid=False, message="데이터셋 구조 검증 실패", details={"errors": errors}
+            )
 
-            # 5. val 폴더 존재 확인
-            val_dir = root_dir / "val2017"
-            if not val_dir.is_dir():
-                validation_errors.append("val 폴더가 존재하지 않습니다.")
-
-            # 검증 실패 시 에러 반환
-            if validation_errors:
-                logger.warning(f"데이터셋 구조 검증 실패: {validation_errors}")
-                return {
-                    "is_valid": False,
-                    "message": "데이터셋 구조 검증 실패",
-                    "root_dir": None,
-                    "details": {"errors": validation_errors},
-                }
-
-            logger.info(f"데이터셋 파일 검증 성공: {file.filename}")
-            return {
-                "is_valid": True,
-                "message": "데이터셋 파일이 유효합니다.",
-                "root_dir": str(root_dir),
-                "details": None,
-            }
-
+        except HTTPException:
+            # 깨진 ZIP(400) 등 명시적 HTTP 오류는 그대로 전달
+            raise
         except Exception as e:
             logger.error(f"데이터셋 검증 중 예외 발생: {str(e)}", exc_info=True)
-            return {
-                "is_valid": False,
-                "message": f"데이터셋 검증 중 오류 발생: {str(e)}",
-                "root_dir": None,
-                "details": {"error": str(e)},
-            }
+            return DatasetValidationResponse(
+                is_valid=False, message=f"데이터셋 검증 중 오류 발생: {str(e)}", details={"error": str(e)}
+            )
         finally:
-            # 임시 디렉토리 정리
             if temp_dir and temp_dir.exists():
                 shutil.rmtree(temp_dir)
+
+    #: 감싸는 폴더가 아니라 데이터 폴더 자체임을 알리는 이름들. 학습(train_eval)과 동일한 판정 기준.
+    _DATA_DIR_PREFIXES = ("annotations", "train", "val")
+
+    @staticmethod
+    def _resolve_root_dir(temp_dir: Path) -> Path:
+        """ZIP 을 감싸는 폴더가 하나뿐이면 그 안쪽을 루트로 본다.
+
+        폴더 이름은 보지 않는다. ZIP 파일명과 같은 이름일 때만 벗겨내면
+        `my-dataset.zip` 안이 `coco128/...` 인 흔한 경우를 놓쳐, 내용이 멀쩡한데도
+        annotations·train2017·val2017 이 한꺼번에 없다고 판정된다.
+        다만 감싼 폴더 이름이 데이터 폴더 이름으로 시작하면 그것이 실제 데이터이므로 벗기지 않는다.
+        학습 파이프라인이 같은 규칙으로 압축을 풀므로, 검증만 거부하고 학습은 통과하는 불일치를 막는다.
+        """
+        dirs = [p for p in temp_dir.iterdir() if p.is_dir() and p.name != "__MACOSX"]
+        if len(dirs) == 1 and not dirs[0].name.startswith(DatasetService._DATA_DIR_PREFIXES):
+            return dirs[0]
+        return temp_dir
+
+    @staticmethod
+    def _check_object_detection(root_dir: Path) -> tuple[bool, list[str]]:
+        """COCO128 구조 검증 (기존 검증 로직 재사용 — happy-path 스텁)."""
+        errors: list[str] = []
+
+        annotations_dir = root_dir / "annotations"
+        if not annotations_dir.is_dir():
+            errors.append("annotations 폴더가 존재하지 않습니다.")
+        else:
+            for split in ("train", "val"):
+                json_path = annotations_dir / f"instances_{split}2017.json"
+                if not json_path.is_file():
+                    errors.append(f"annotations/instances_{split}2017.json 파일이 존재하지 않습니다.")
+                    continue
+                try:
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        json.load(f)
+                except json.JSONDecodeError:
+                    errors.append(f"annotations/instances_{split}2017.json 파일이 유효한 JSON 형식이 아닙니다.")
+
+        if not (root_dir / "train2017").is_dir():
+            errors.append("train2017 폴더가 존재하지 않습니다.")
+        if not (root_dir / "val2017").is_dir():
+            errors.append("val2017 폴더가 존재하지 않습니다.")
+
+        return (len(errors) == 0, errors)
+
+    @staticmethod
+    def _find_protein_csv(root_dir: Path) -> Path | None:
+        """root 또는 1-depth 하위에서 train.csv / train.sample.csv 우선, 없으면 임의 CSV."""
+        for name in ("train.csv", "train.sample.csv"):
+            preferred = root_dir / name
+            if preferred.is_file():
+                return preferred
+        candidates = sorted(root_dir.glob("*.csv")) + sorted(root_dir.glob("*/*.csv"))
+        return candidates[0] if candidates else None
+
+    @staticmethod
+    def _check_protein_classification(root_dir: Path) -> tuple[bool, list[str]]:
+        """TCR-Epitope CSV 검증. 필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 비어있지 않음, 행≥16.
+
+        (프로즈의 epitope+cdr3b 길이 1~80 상한은 train_eval 이 max_length=80 으로 truncate 하므로 검사하지 않음)
+        """
+        csv_path = DatasetService._find_protein_csv(root_dir)
+        if csv_path is None:
+            return (False, ["CSV 파일(train.csv / train.sample.csv 등)을 찾을 수 없습니다."])
+
+        errors: list[str] = []
+        try:
+            with open(csv_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fields = set(reader.fieldnames or [])
+                missing = {"epitope", "cdr3b", "label"} - fields
+                if missing:
+                    return (False, [f"필수 컬럼 누락: {', '.join(sorted(missing))}"])
+
+                row_count = 0
+                for row in reader:
+                    row_count += 1
+                    epitope = (row.get("epitope") or "").strip()
+                    cdr3b = (row.get("cdr3b") or "").strip()
+                    label = (row.get("label") or "").strip()
+                    if not epitope or not cdr3b:
+                        errors.append(f"{row_count}행: epitope/cdr3b 가 비어 있습니다.")
+                    if label not in {"0", "1"}:
+                        errors.append(f"{row_count}행: label 은 0 또는 1 이어야 합니다 (현재 값: '{label}').")
+                    if len(errors) >= 10:
+                        errors.append("... (이하 생략)")
+                        break
+
+                if row_count < 16:
+                    errors.append(f"학습에 필요한 최소 행 수(16)를 만족하지 않습니다 (현재: {row_count}행).")
+        except Exception as e:
+            return (False, [f"CSV 파싱 실패: {str(e)}"])
+
+        return (len(errors) == 0, errors)
 
     @staticmethod
     def create(db: Session, *, obj_in: DatasetBaseSchema, file: UploadFile) -> DatasetReadSchema:

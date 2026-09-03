@@ -1,6 +1,6 @@
 """워크플로우 시나리오 정의 모듈
 
-§5.2 개선 후 정상 동작하는 시나리오(1~9: LLM/RAG, 10: ODM 단순)의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
+개선 후 정상 동작하는 시나리오(1~9: LLM/RAG, 10: ODM 단순)의 메타데이터, 프롬프트, workflow_definition 빌더를 제공한다.
 
 CLI 실행 (SCENARIO 필수):
   python workflow/definitions.py 3      # 3번 시나리오 상세
@@ -314,6 +314,33 @@ SCENARIOS: dict[int, dict] = {
         "inference_kind": "ml",
         "prompts": {},
     },
+    11: {
+        "name": "pLM 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "plm",
+        "prompts": {},
+    },
+    12: {
+        "name": "BFM fill-mask 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "fill_mask",
+        "prompts": {},
+    },
+    13: {
+        "name": "BFM structure-prediction 단순",
+        "graph": "시작 → MODEL → 종료",
+        "kb_count": 0,
+        "kb_labels": [],
+        "inference_text": "",
+        "inference_kind": "structure_prediction",
+        "prompts": {},
+    },
 }
 
 
@@ -348,6 +375,22 @@ def _build_scenario_10(model_id: int, kb_ids: list[int], top_k: int, prompt_ids:
         "connections": [
             {"source_ref_id": start, "target_ref_id": odm},
             {"source_ref_id": odm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_11(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → pLM(MODEL) → 종료 — ODM 단순과 위상 동일. 백엔드는 model_type(pLM)으로 추론 경로를 가른다."""
+    start, plm, end = _ref("start"), _ref("plm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(plm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": plm},
+            {"source_ref_id": plm, "target_ref_id": end},
         ],
     }
 
@@ -563,6 +606,41 @@ def _build_scenario_9(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: 
     }
 
 
+def _build_scenario_12(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → BFM(MODEL, base fill-mask) → 종료 — base 모델을 어댑터 없이 직접 서빙, task=fill-mask 로 추론 경로를 가른다."""
+    start, bfm, end = _ref("start"), _ref("bfm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(bfm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": bfm},
+            {"source_ref_id": bfm, "target_ref_id": end},
+        ],
+    }
+
+
+def _build_scenario_13(model_id: int, kb_ids: list[int], top_k: int, prompt_ids: dict) -> dict:
+    """시작 → BFM(MODEL, structure-prediction) → 종료 — ESMFold2 구조예측 모델을 직접 서빙.
+
+    task=protein-structure-prediction 로 추론 경로를 가른다.
+    """
+    start, bfm, end = _ref("start"), _ref("bfm"), _ref("end")
+    return {
+        "components": [
+            {"ref_id": start, "name": "시작", "type": "START"},
+            _odm_model_component(bfm, "MODEL", model_id),
+            {"ref_id": end, "name": "끝", "type": "END"},
+        ],
+        "connections": [
+            {"source_ref_id": start, "target_ref_id": bfm},
+            {"source_ref_id": bfm, "target_ref_id": end},
+        ],
+    }
+
+
 _BUILDERS = {
     1: _build_scenario_1,
     2: _build_scenario_2,
@@ -574,6 +652,9 @@ _BUILDERS = {
     8: _build_scenario_8,
     9: _build_scenario_9,
     10: _build_scenario_10,
+    11: _build_scenario_11,
+    12: _build_scenario_12,
+    13: _build_scenario_13,
 }
 
 

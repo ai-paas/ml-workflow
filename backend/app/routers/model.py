@@ -21,8 +21,10 @@ from schemas.model import (
     ModelTypeReadSchema,
     PredefinedModelKey,
 )
+from schemas.model_file import ModelFileDownloadUrlResponse, ModelFileListResponse
 from schemas.user import UserSchema
 from services.model import (
+    ESMFOLD2_BACKBONE_MODEL_NAME,
     PREDEFINED_MODEL_CONFIGS,
     CustomModelService,
     HuggingFaceModelService,
@@ -31,8 +33,10 @@ from services.model import (
     ModelService,
     ModelTypeService,
     OllamaModelService,
+    resolve_recommended_hparams,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
+from services.model_file import ModelFileService
 from sqlalchemy.orm import Session
 from utils.authentication import get_current_user, verify_internal_api_key
 
@@ -108,7 +112,9 @@ def create_model(
         - 모델 사용 예제 코드
         - 생략 가능
     - **file** (UploadFile, optional): 모델 파일
-        - 커스텀 모델인 경우 업로드할 모델 파일
+        - 커스텀 모델 직접 등록 시 **모델 디렉토리를 압축한 .zip** 만 허용
+          (config.json/safetensors/tokenizer 등 멀티파일 모델을 통째로 업로드)
+        - zip 은 최상위 단일 폴더로 감싸거나 파일을 루트에 평탄하게 담은 형태 모두 허용
         - 생략 가능
     - **model_registry_schema** (str, optional): 모델 레지스트리 스키마 (JSON 문자열)
         - 내부 시스템에서만 사용하는 파라미터
@@ -150,7 +156,7 @@ def create_model(
     - **ID 값 조회**: `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API(`/providers`, `/types`, `/formats`)
       를 먼저 호출하여 ID 값을 확인한 후 사용해야 합니다
     - HuggingFace 모델인 경우 provider_id가 huggingface의 ID와 일치해야 합니다
-    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, file이 필요합니다
+    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, **모델 디렉토리를 압축한 .zip** file이 필요합니다
     - YOLOX 모델인 경우에만 자동으로 학습 가능 모델(learning_enable_yn=True)로 설정됩니다
     - **중요**: `parent_model_id`와 `model_registry_schema`는 내부 시스템에서만 사용하는 파라미터입니다. 프론트엔드에서는 이 파라미터들을 전달하지 않아야 합니다.
 
@@ -214,14 +220,20 @@ def auto_generate_model(
         - `hustvl/yolos-small`: YOLOS Small (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-50`: DETR ResNet-50 (object-detection, HuggingFace, pytorch)
         - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-large`: RF-DETR Large (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-medium`: RF-DETR Medium (object-detection, HuggingFace, pytorch)
         - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
         - `bge-m3`: BGE-M3 Embedding (embedding, Ollama, gguf)
         - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
         - `qwq:32b`: QwQ-32B (text-generation, Ollama, gguf)
-        - `qwen3:32b`: Qwen3-32B (text-generation, Ollama, gguf)
-        - `qwen3:30b`: Qwen3-30B (text-generation, Ollama, gguf)
         - `gpt-oss:20b`: GPT-OSS-20B (text-generation, Ollama, gguf)
+        - `deepseek-r1:32b`: DeepSeek-R1 32B (text-generation, Ollama, gguf)
+        - `granite4.1:30b`: Granite 4.1 30B (text-generation, Ollama, gguf)
+        - `lfm2:24b`: LFM2 24B (text-generation, Ollama, gguf)
+        - `gemma4:27b`: Gemma 4 27B (vqa, Ollama, gguf)
+        - `qwen3.6:27b`: Qwen3.6 27B (vqa, Ollama, gguf)
+        - `nemotron3:33b`: Nemotron3 33B (vqa, Ollama, gguf)
 
     ## Response (ModelBriefReadSchema)
     `POST /api/v1/models`와 동일한 응답 형식
@@ -234,6 +246,7 @@ def auto_generate_model(
     ## Errors
     - 400: 모델 키에 해당하는 provider/type/format을 DB에서 찾을 수 없음
     - 401: 인증되지 않은 사용자
+    - 409: 이미 등록된 모델명 (중복 등록 방지 — 가중치 다운로드 전에 거부)
     - 422: 유효하지 않은 model_key
     - 500: 모델 등록 중 서버 내부 오류 (가중치 다운로드 실패 포함)
     """
@@ -244,6 +257,22 @@ def auto_generate_model(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"유효하지 않은 model_key: {model_key}",
         )
+
+    # 구조예측(ESMFold2)은 언어모델 백본 ESMC-6B 가 추론에 필수이며 서빙 시 로컬(MLflow)에서 로드한다.
+    # 백본이 먼저 등록돼 있어야 서빙이 로컬 로드로 붙을 수 있으므로, 미등록이면 등록을 거부한다.
+    if config.get("task") == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+        if not ModelService.get_by_name(db, ESMFOLD2_BACKBONE_MODEL_NAME):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"'{model_key}' 등록에는 백본 모델 '{ESMFOLD2_BACKBONE_MODEL_NAME}' 이 먼저 등록돼 있어야 합니다. "
+                    f"'{ESMFOLD2_BACKBONE_MODEL_NAME}' 을 먼저 등록한 뒤 다시 시도하세요."
+                ),
+            )
+
+    # 가중치 다운로드 전 모델명 중복 사전 체크(조기 종료) — 단일 가드 메서드 재사용.
+    # (register_model 도 같은 메서드를 호출해 동시성/타 경로까지 최종 보장한다.)
+    ModelService.assert_model_name_available(db, config["name"])
 
     ids = ModelService.resolve_predefined_model_ids(db, config)
 
@@ -442,8 +471,8 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
         - name (str): 자식 모델 이름
         - description (str, optional): 자식 모델 설명
         - child_models (List[ModelReadChildSchema], optional): 하위 자식 모델 (재귀적)
-    - **learning_enable_yn** (bool): 학습 파이프라인(§2)에 소스로 쓸 수 있는지(카탈로그/권한 기준)
-    - **opt_enable_yn** (bool): `POST /model-improvements`(§6) 최적화/경량화 **task**의 소스로 쓸 수 있는지
+    - **learning_enable_yn** (bool): 학습 파이프라인에 소스로 쓸 수 있는지(카탈로그/권한 기준)
+    - **opt_enable_yn** (bool): `POST /model-improvements` 최적화/경량화 **task**의 소스로 쓸 수 있는지
     - **visibility** (str): 목록/상세 공통 — `CATALOG` (초기 카탈로그·학습·최적화 제약) / `CUSTOM` (파생·학습·최적화 가능 모델)
     - **created_at** (datetime): 모델 생성 시각
     - **updated_at** (datetime): 모델 수정 시각
@@ -451,7 +480,7 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     ## Notes
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환합니다
     - 부모/자식 모델 관계는 재귀적으로 조회됩니다
-    - `visibility`는 `parent_model_id` 또는 `opt_enable_yn`에 따라 `CUSTOM`이 됨(목록 §5.1과 동일 규칙)
+    - `visibility`는 `parent_model_id` 또는 `opt_enable_yn`에 따라 `CUSTOM`이 됨(목록과 동일 규칙)
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -461,7 +490,98 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     db_model = ModelService().get(db, model_id)
     if db_model is None:
         raise HTTPException(status_code=404, detail="Model not found")
+    db_model.recommended_hparams = resolve_recommended_hparams(db, db_model)
     return db_model
+
+
+@router.get("/{model_id}/files", response_model=ModelFileListResponse)
+def list_model_files(
+    model_id: int,
+    cursor: Optional[str] = Query(None, description="이어받기 토큰. 첫 요청에는 넣지 않는다"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 목록 조회
+
+    모델이 실제로 보관하는 파일을 조회합니다.
+    파일 목록과 다운로드를 제공하는 것은 MLflow 아티팩트를 쓰는 모델(huggingface, custom 등)뿐이며,
+    Ollama·원격 서빙 전용 모델은 빈 목록에 사유만 담아 응답합니다.
+
+    ## Path Parameters
+    - **model_id** (int): 조회할 모델 ID
+
+    ## Query Parameters
+    - **cursor** (str, optional): 이어받기 토큰
+        - 첫 요청에는 넣지 않습니다
+        - 응답의 `next_cursor` 를 그대로 넣어 다음 쪽을 받습니다
+        - 서버가 준 값을 그대로 돌려보내는 불투명한 문자열이며, 형식을 해석하지 않습니다
+
+    ## Response (ModelFileListResponse)
+    - **model_id** (int): 모델 ID
+    - **model_name** (str): 모델 이름
+    - **storage_type** (str): `MLFLOW`(파일 제공) | `OLLAMA`(미제공) | `NONE`(파일 없음)
+    - **location** (str, optional): MLFLOW 는 S3 prefix, OLLAMA 는 볼륨 이름, NONE 은 null
+    - **files** (list): 파일 목록. 없으면 빈 배열이며 null 이 되지 않습니다
+        - name (str): location 기준 상대 경로
+        - size_bytes (int): 파일 크기(바이트)
+        - last_modified (str): 마지막 수정 시각 (ISO8601, UTC)
+        - download_url (str): 다운로드 URL 을 발급받을 API 경로. 파일을 바로 주는 링크가 아닙니다
+    - **next_cursor** (str, optional): 다음 쪽이 있으면 토큰, 없으면 null
+    - **message** (str, optional): files 가 빈 사유. 목록이 있으면 null
+
+    ## Notes
+    - `files` 가 비어 있으면 `message` 를 그대로 화면에 노출하면 됩니다
+    - `.cache` 디렉터리 아래 파일(모델 다운로드 과정의 캐시 부산물)은 목록에서 제외됩니다
+    - 폴더는 항목으로 나오지 않습니다. 계층이 필요하면 `name` 을 `/` 로 나눠 구성합니다
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델을 찾을 수 없음
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.list_files(db, model_id, cursor)
+
+
+@router.get("/{model_id}/files/download-url", response_model=ModelFileDownloadUrlResponse)
+def issue_model_file_download_url(
+    model_id: int,
+    name: str = Query(..., description="목록 응답의 files[].name"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 다운로드 URL 발급
+
+    파일 하나에 대한 스토리지 서명 URL 을 그 시점에 발급합니다.
+    목록 응답에 서명 URL 을 미리 담지 않는 이유는, 목록을 열어 둔 채 시간이 지나면 URL 이 만료되어
+    사용자가 스토리지의 오류 문서를 보게 되기 때문입니다.
+
+    ## Path Parameters
+    - **model_id** (int): 모델 ID
+
+    ## Query Parameters
+    - **name** (str, required): 목록 응답의 `files[].name` (location 기준 상대 경로)
+
+    ## Response (ModelFileDownloadUrlResponse)
+    - **model_id** (int): 모델 ID
+    - **name** (str): 파일 상대 경로
+    - **size_bytes** (int): 파일 크기(바이트)
+    - **download_url** (str): 스토리지 서명 URL
+    - **expires_at** (str): 만료 시각 (ISO8601, UTC). 유효기간 5분
+
+    ## Notes
+    - 발급된 URL 은 인증 없이 접근 가능하므로 공유에 주의합니다
+    - 브라우저에서는 이 API 를 `fetch` 로 호출해 `download_url` 을 받은 뒤 이동시킵니다
+      (링크 이동으로는 인증 헤더가 실리지 않습니다)
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델이 없거나 해당 파일이 없음
+    - 409: 파일 다운로드를 제공하지 않는 모델(Ollama·원격 서빙 전용)
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.issue_download_url(db, model_id, name)
 
 
 @router.get("", response_model=list[ModelBriefReadSchema])
@@ -577,14 +697,22 @@ def read_models(
 
     if filters or visibility_filter:
         if page is None or page_size is None:
-            return ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
-        skip = page_size * (page - 1)
-        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter)
+            models = ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().filter(
+                db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter
+            )
     else:
         if page is None or page_size is None:
-            return ModelService().get_multi(db, skip=0, limit=10000)
-        skip = page_size * (page - 1)
-        return ModelService().get_multi(db, skip=skip, limit=page_size)
+            models = ModelService().get_multi(db, skip=0, limit=10000)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().get_multi(db, skip=skip, limit=page_size)
+
+    for m in models:
+        m.recommended_hparams = resolve_recommended_hparams(db, m)
+    return models
 
 
 @router.delete("/{model_id}")

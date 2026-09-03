@@ -25,6 +25,7 @@ def register_model_component(
     type_name: str,  # Enum 값 전달
     yolox_format_name: str,  # Enum 값 전달
     pytorch_format_name: str,  # Enum 값 전달
+    output_task: str = "",  # 자식 task 전이값(family.output_task). 있으면 부모 task 상속 대신 이 값 사용
     mlflow_run_id: str = "",  # 학습 실험의 MLflow run ID (직접 전달)
 ):
     import glob
@@ -101,7 +102,7 @@ def register_model_component(
                 return None
 
         def get_model_info(self, model_id: int) -> Optional[Dict[str, Any]]:
-            """모델 ID로부터 모델 정보 조회 (name, format_id)"""
+            """모델 ID로부터 모델 정보 조회 (name, format_id, task, parameter, sample_code)"""
             try:
                 response = self._session.get(
                     f"{self.base_url}/api/v1/models/{model_id}",
@@ -115,7 +116,14 @@ def register_model_component(
                     if data.get("format_info"):
                         format_id = data["format_info"].get("id")
 
-                    return {"name": data.get("name"), "format_id": format_id}
+                    return {
+                        "name": data.get("name"),
+                        "format_id": format_id,
+                        # 파인튜닝 산출물에 부모(reference) 모델의 메타를 그대로 상속
+                        "task": data.get("task"),
+                        "parameter": data.get("parameter"),
+                        "sample_code": data.get("sample_code"),
+                    }
                 else:
                     logger.error(f"모델 조회 실패: {response.status_code} - {response.text}")
                     return None
@@ -184,8 +192,16 @@ def register_model_component(
                 logger.error(f"메타데이터 삽입 중 오류 발생: {e}")
                 return None
 
-    def find_checkpoint_file(artifact_path: str) -> str:
-        """체크포인트 파일 찾기"""
+    def find_esm2_adapter_dir(artifact_path: str):
+        """LoRA 어댑터 디렉토리 찾기 (adapter_model.safetensors + adapter_config.json 보유). 없으면 None."""
+        for cfg in glob.glob(os.path.join(artifact_path, "**/adapter_config.json"), recursive=True):
+            adapter_dir = os.path.dirname(cfg)
+            if os.path.exists(os.path.join(adapter_dir, "adapter_model.safetensors")):
+                return adapter_dir
+        return None
+
+    def find_yolox_checkpoint(artifact_path: str) -> str:
+        """YOLOX 체크포인트 파일 찾기 (best_ckpt.pth → 최신 epoch_*_ckpt.pth)"""
         # best_ckpt 파일 먼저 찾기
         best_ckpt = glob.glob(os.path.join(artifact_path, "**/best_ckpt.pth"), recursive=True)
 
@@ -242,9 +258,6 @@ def register_model_component(
         local_artifact_path = mlflow.artifacts.download_artifacts(run_id=run_id)
 
         try:
-            # 체크포인트 파일 찾기
-            original_model_path = find_checkpoint_file(local_artifact_path)
-
             # reference_model의 정보 조회 (name, format_id)
             reference_model_info = api_client.get_model_info(reference_model_id)
             if not reference_model_info:
@@ -252,6 +265,10 @@ def register_model_component(
 
             reference_model_name = reference_model_info.get("name")
             reference_format_id = reference_model_info.get("format_id")
+            # 부모(reference) 모델의 task/parameter/sample_code 를 파인튜닝 산출물에 상속
+            reference_task = reference_model_info.get("task")
+            reference_parameter = reference_model_info.get("parameter")
+            reference_sample_code = reference_model_info.get("sample_code")
 
             if not reference_model_name:
                 raise Exception(f"모델 ID {reference_model_id}의 이름을 조회할 수 없습니다.")
@@ -285,25 +302,37 @@ def register_model_component(
                     raise Exception("기본 format_id도 조회할 수 없습니다.")
 
             reference_model_name = reference_model_name.replace("/", "-")
-            # 파일명을 reference_model_name.pth로 변경
-            model_dir = os.path.dirname(original_model_path)
-            new_model_filename = f"{reference_model_name}.pth"
-            new_model_path = os.path.join(model_dir, new_model_filename)
 
-            # 파일명 변경
-            shutil.copy2(original_model_path, new_model_path)
-            logger.info(f"체크포인트 파일명 변경: {os.path.basename(original_model_path)} -> {new_model_filename}")
+            # 학습 산출물 형태로 분기: ESM2(LoRA 어댑터 디렉토리) vs YOLOX(.pth 체크포인트)
+            adapter_dir = find_esm2_adapter_dir(local_artifact_path)
 
-            # MLflow에 모델 등록
             with mlflow.start_run(run_name=f"{uuid.uuid4()}-model") as run:
-                mlflow.log_artifact(
-                    local_path=new_model_path, artifact_path=reference_model_name, run_id=run.info.run_id
-                )
+                if adapter_dir:
+                    # ESM2: PEFT 어댑터 디렉토리 통째를 'adapter' 아티팩트로 등록 (활성 run 컨텍스트)
+                    mlflow.log_artifacts(adapter_dir, artifact_path="adapter")
+                    registry_artifact_path = f"{run.info.artifact_uri}/adapter"
+                    registry_uri = "adapter"
+                    logger.info("ESM2 LoRA 어댑터 디렉토리를 'adapter' 아티팩트로 등록했습니다.")
+                else:
+                    # YOLOX: 체크포인트(.pth)를 reference_model_name.pth 로 복사 후 등록
+                    original_model_path = find_yolox_checkpoint(local_artifact_path)
+                    model_dir = os.path.dirname(original_model_path)
+                    new_model_filename = f"{reference_model_name}.pth"
+                    new_model_path = os.path.join(model_dir, new_model_filename)
+                    shutil.copy2(original_model_path, new_model_path)
+                    logger.info(
+                        f"체크포인트 파일명 변경: {os.path.basename(original_model_path)} -> {new_model_filename}"
+                    )
+                    mlflow.log_artifact(
+                        local_path=new_model_path, artifact_path=reference_model_name, run_id=run.info.run_id
+                    )
+                    registry_artifact_path = f"{run.info.artifact_uri}/{reference_model_name}"
+                    registry_uri = reference_model_name
 
                 # 모델 메타데이터 조회 (provider, type만 조회)
                 metadata = api_client.get_model_metadata(provider_name, type_name)
 
-                # 모델 데이터 준비 (format_id는 reference_model의 것을 사용)
+                # 모델 데이터 준비 (format_id·task·parameter·sample_code 는 reference_model 의 것을 상속)
                 model_data = {
                     "name": train_model_name,
                     "description": description,
@@ -313,15 +342,32 @@ def register_model_component(
                     "parent_model_id": lineage_root_parent_model_id,
                     "model_registry_schema": json.dumps(
                         {
-                            "artifact_path": f"{run.info.artifact_uri}/{reference_model_name}",
-                            "uri": reference_model_name,
+                            "artifact_path": registry_artifact_path,
+                            "uri": registry_uri,
                             "run_id": run.info.run_id,
                         }
                     ),
                 }
+                # task 전이: output_task(family.output_task)가 있으면 그 값(예: protein-classification)을 쓴다.
+                # base 가 fill-mask 여도 자식은 protein-classification 이어야 하므로 부모 task 상속이 아님.
+                # output_task 미전달 시에만 부모 task 상속(하위호환).
+                child_task = output_task or reference_task
+                if child_task:
+                    model_data["task"] = child_task
+                # parameter/sample_code 는 부모 것 상속(값 있을 때만)
+                if reference_parameter:
+                    model_data["parameter"] = reference_parameter
+                if reference_sample_code:
+                    model_data["sample_code"] = reference_sample_code
 
-                # 메타데이터 삽입
-                api_client.insert_model_metadata(model_data)
+                # 메타데이터 삽입 (실패 시 raise — 조용한 실패로 registration 이 거짓 SUCCESS 되는 것 방지)
+                insert_result = api_client.insert_model_metadata(model_data)
+                if not insert_result:
+                    raise Exception(
+                        "모델 메타데이터 삽입(POST /api/v1/models) 실패. "
+                        f"name={model_data.get('name')} provider_id={model_data.get('provider_id')} "
+                        f"type_id={model_data.get('type_id')} format_id={model_data.get('format_id')}"
+                    )
 
         finally:
             # 임시 파일 정리

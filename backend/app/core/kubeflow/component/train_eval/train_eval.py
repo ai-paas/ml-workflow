@@ -34,16 +34,20 @@ def container_train_eval_component(
     restapi_url: str,
     restapi_username: str,
     restapi_password: str,
+    internal_api_key: str,
     gpu_limit: str,
     batch_size: str,
     epochs: str,
     save_period: str,
     weight_decay: str,
-    lr0: str,
-    lrf: str,
+    learning_rate: str,
+    model_kind: str,
     namespace: str,
     train_image_url: str,
     image_pull_secret_name: str = "harbor",
+    gpu_resource_key: str = "nvidia.com/gpu",
+    node_selector_json: str = "{}",
+    tolerations_json: str = "[]",
 ) -> str:
     import json
     import logging
@@ -61,17 +65,27 @@ def container_train_eval_component(
 
         logger.info(f"Creating training job for model_id: {model_id}, experiment_id: {experiment_id}")
 
-        # 리소스 설정 (Pod YAML 형식과 유사)
+        # 리소스 설정 (Pod YAML 형식과 유사). GPU 노드풀 프로파일(MIG taint 등)에 따라 자원키가 달라질 수 있음.
         resources = client.V1ResourceRequirements(
             requests={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
             limits={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
         )
 
-        logger.info(f"GPU resources added: {gpu_limit} GPU(s) (fixed to: {gpu_limit})")
+        # 노드풀 프로파일: taint 통과용 toleration + nodeSelector (학습은 플래너 미경유 → 정적 주입)
+        try:
+            train_node_selector = json.loads(node_selector_json) or {}
+        except Exception:
+            train_node_selector = {}
+        try:
+            train_tolerations = [client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])]
+        except Exception:
+            train_tolerations = []
+
+        logger.info(f"GPU resources added: {gpu_limit} x {gpu_resource_key}")
 
         # Job 생성
         job_name = f"train-eval-{model_id}-{experiment_id}-{int(time.time())}"
@@ -124,6 +138,8 @@ def container_train_eval_component(
             restapi_username,
             "--restapi_password",
             restapi_password,
+            "--internal_api_key",
+            internal_api_key,
             "--gpu_limit",
             gpu_limit,
             "--batch_size",
@@ -134,10 +150,10 @@ def container_train_eval_component(
             save_period,
             "--weight_decay",
             weight_decay,
-            "--lr0",
-            lr0,
-            "--lrf",
-            lrf,
+            "--learning_rate",
+            learning_rate,
+            "--model_kind",
+            model_kind,
         ]
 
         job = client.V1Job(
@@ -184,6 +200,8 @@ def container_train_eval_component(
                             if image_pull_secret_name
                             else []
                         ),
+                        node_selector=(train_node_selector or None),
+                        tolerations=(train_tolerations or None),
                     ),
                 ),
                 backoff_limit=0,

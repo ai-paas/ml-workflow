@@ -1,5 +1,5 @@
 """
-§7.9 / §7.9.1 사전정의 서빙 메타 조회·파생 및 워크플로우 배포용 리소스 계획.
+사전정의 서빙 메타 조회·파생 및 워크플로우 배포용 리소스 계획.
 
 GPU VRAM·호스트 메모리·CPU 밀리코어는 PREDEFINED_MODEL_CONFIGS에만 두고,
 파생 모델은 부모 repo_id 맵 + 고정 계수로 산출한다.
@@ -26,7 +26,24 @@ SERVING_META_KEYS = (
     "serving_cpu_request_millicores",
 )
 
+#: CPU limit 은 선택 키다. 없으면 같은 경로의 request 값을 그대로 limit 으로 쓴다(기존 동작).
+#: request 는 노드에 예약되는 양이라 정상 부하 기준으로 낮게, limit 은 모델 로딩 등 순간 스파이크를
+#: 흡수하도록 크게 잡는 용도로 분리한다.
+SERVING_CPU_LIMIT_KEYS = (
+    "serving_gpu_pod_cpu_limit_millicores",
+    "serving_cpu_limit_millicores",
+)
+
 ServingMetaSource = Literal["direct", "parent_derived"]
+
+
+class ServingCapacityError(ValueError):
+    """노드 잔여 자원이 모자라 서빙 배치를 거부할 때.
+
+    ValueError 를 상속하므로 워크플로우 execute 경로에서 400 으로 그대로 노출된다.
+    자원이 빌 때까지 Pod 를 만들지 않는 편이, 만들어 두고 kubelet 이 OutOfcpu 로
+    떨어뜨리는 것보다 원인이 분명하고 뒷정리도 필요 없다.
+    """
 
 
 @dataclass(frozen=True)
@@ -45,8 +62,15 @@ class ServingResourcePlan:
     fallback_reason: Optional[str]
     serving_node_name: Optional[str] = None
     planner_note: Optional[str] = None
-    #: §7.3.2 가상 점유: 플래너가 잔여를 차감할 때 사용한 노드(핀 해제여도 내부 선정 노드).
+    #: 가상 점유: 플래너가 잔여를 차감할 때 사용한 노드(핀 해제여도 내부 선정 노드).
     reservation_node_name: Optional[str] = None
+    #: GPU 노드풀 프로파일 기반 배치(MIG taint 등). 선택 노드의 값(없으면 dev 기본).
+    gpu_resource_key: str = "nvidia.com/gpu"
+    node_selector_json: str = "{}"
+    tolerations_json: str = "[]"
+    #: 서빙 Pod ephemeral-storage limit. 서빙 시 MLflow 아티팩트(모델 파일)를 Pod 로컬로 내려받으므로
+    #: 모델 디스크 크기보다 커야 한다(초과 시 Pod eviction). 미지정 모델은 소형이라 기본 1Gi.
+    ephemeral_storage_limit: str = "1Gi"
 
 
 def _has_complete_serving_keys(cfg: dict[str, Any]) -> bool:
@@ -71,6 +95,14 @@ def _parse_positive_int(value: Any, field: str) -> int:
     return n
 
 
+def _resolve_cpu_limit_millicores(cfg: dict[str, Any], key: str, request_mc: int) -> int:
+    """CPU limit 밀리코어. 미지정이면 request 와 동일. limit < request 는 K8s 가 거부하므로 올려 맞춘다."""
+    raw = cfg.get(key)
+    if raw is None or (not isinstance(raw, int) and not str(raw).strip()):
+        return request_mc
+    return max(request_mc, _parse_positive_int(raw, key))
+
+
 _MEMORY_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGTPE]i|[KMGTPE])\s*$", re.IGNORECASE)
 
 
@@ -91,7 +123,7 @@ def k8s_memory_quantity_to_bytes(quantity: str) -> int:
 
 
 def format_k8s_memory_from_bytes(num_bytes: int) -> str:
-    """§7.9.1: Mi/Gi 형태로 반올림 (최소 1Mi)."""
+    """Mi/Gi 형태로 반올림 (최소 1Mi)."""
     mi = 1024 * 1024
     n = max(1, round(num_bytes / mi))
     if n % 1024 == 0:
@@ -105,7 +137,7 @@ def _derive_meta_from_parent(
     learning_enable_yn: bool,
     opt_enable_yn: bool,
 ) -> dict[str, Any]:
-    """§7.9.1 파생 규칙."""
+    """파생 규칙."""
     f_factor = 1.0
     if learning_enable_yn:
         f_factor *= 0.98
@@ -135,12 +167,24 @@ def _derive_meta_from_parent(
     mem_gpu_b = int(k8s_memory_quantity_to_bytes(str(parent_slice["serving_memory_request_gpu"])) * f_factor)
     mem_cpu_b = int(k8s_memory_quantity_to_bytes(str(parent_slice["serving_memory_request_cpu"])) * f_factor)
 
+    def _derived_limit(key: str, derived_request_mc: int) -> int:
+        """부모 limit 에 같은 계수를 적용. 부모에 limit 이 없으면 파생된 request 를 그대로 쓴다."""
+        raw = parent_slice.get(key)
+        if raw is None or (not isinstance(raw, int) and not str(raw).strip()):
+            return derived_request_mc
+        return max(derived_request_mc, round(_parse_positive_int(raw, key) * f_factor))
+
+    gpu_lim_mc = _derived_limit(SERVING_CPU_LIMIT_KEYS[0], gpu_mc)
+    cpu_lim_mc = _derived_limit(SERVING_CPU_LIMIT_KEYS[1], cpu_mc)
+
     return {
         "serving_vram_need_bytes": vram,
         "serving_memory_request_gpu": format_k8s_memory_from_bytes(mem_gpu_b),
         "serving_gpu_pod_cpu_request_millicores": gpu_mc,
         "serving_memory_request_cpu": format_k8s_memory_from_bytes(mem_cpu_b),
         "serving_cpu_request_millicores": cpu_mc,
+        SERVING_CPU_LIMIT_KEYS[0]: gpu_lim_mc,
+        SERVING_CPU_LIMIT_KEYS[1]: cpu_lim_mc,
     }
 
 
@@ -155,7 +199,7 @@ def resolve_normalized_serving_meta(
 
     - 자체 repo_id + PREDEFINED 완전 일치 → direct
     - 그 외(자체 repo 불완전·미매핑, 또는 repo_id 없음=학습/등록 파생 모델로 간주) → parent_model_id로
-      부모의 repo_id를 lookup하여 §7.9.1 파생
+      부모의 repo_id를 lookup하여 파생
     - repo_id도 없고 parent_model_id도 없으면 오류
 
     Returns:
@@ -176,9 +220,18 @@ def resolve_normalized_serving_meta(
                 "serving_cpu_request_millicores": _parse_positive_int(
                     child_cfg["serving_cpu_request_millicores"], "serving_cpu_request_millicores"
                 ),
+                # 선택 필드(미지정 시 기본 1Gi). 필수 5키 검증과 무관.
+                "serving_ephemeral_storage_limit": str(child_cfg.get("serving_ephemeral_storage_limit", "1Gi")).strip(),
             }
+            meta[SERVING_CPU_LIMIT_KEYS[0]] = _resolve_cpu_limit_millicores(
+                child_cfg, SERVING_CPU_LIMIT_KEYS[0], meta["serving_gpu_pod_cpu_request_millicores"]
+            )
+            meta[SERVING_CPU_LIMIT_KEYS[1]] = _resolve_cpu_limit_millicores(
+                child_cfg, SERVING_CPU_LIMIT_KEYS[1], meta["serving_cpu_request_millicores"]
+            )
             for mk in ("serving_memory_request_gpu", "serving_memory_request_cpu"):
                 k8s_memory_quantity_to_bytes(meta[mk])
+            k8s_memory_quantity_to_bytes(meta["serving_ephemeral_storage_limit"])  # 형식 검증
             return meta, "direct", None
 
     if model.parent_model_id is None:
@@ -188,7 +241,7 @@ def resolve_normalized_serving_meta(
             )
         raise ValueError(
             f"model_id={model.id}, repo_id={model.repo_id!r}: PREDEFINED_MODEL_CONFIGS에 "
-            f"필수 5키가 없고 parent_model_id도 없습니다. (§7.9)"
+            f"필수 5키가 없고 parent_model_id도 없습니다."
         )
 
     parent = db.get(Model, model.parent_model_id)
@@ -200,15 +253,20 @@ def resolve_normalized_serving_meta(
     parent_cfg = predefined_configs.get(parent.repo_id)
     if not parent_cfg or not _has_complete_serving_keys(parent_cfg):
         raise ValueError(
-            f"model_id={model.id}: 부모 repo_id={parent.repo_id!r}에 대한 사전정의 서빙 메타(5키)가 없습니다. (§7.9.1)"
+            f"model_id={model.id}: 부모 repo_id={parent.repo_id!r}에 대한 사전정의 서빙 메타(5키)가 없습니다."
         )
 
-    parent_slice = {k: parent_cfg[k] for k in SERVING_META_KEYS}
+    parent_slice: dict[str, Any] = {k: parent_cfg[k] for k in SERVING_META_KEYS}
+    for lk in SERVING_CPU_LIMIT_KEYS:
+        if lk in parent_cfg:
+            parent_slice[lk] = parent_cfg[lk]
     derived = _derive_meta_from_parent(
         parent_slice,
         learning_enable_yn=bool(model.learning_enable_yn),
         opt_enable_yn=bool(model.opt_enable_yn),
     )
+    # 파인튜닝 자식은 서빙 시 base(대용량)+adapter 를 함께 내려받으므로 부모의 ephemeral limit 을 그대로 상속.
+    derived["serving_ephemeral_storage_limit"] = str(parent_cfg.get("serving_ephemeral_storage_limit", "1Gi")).strip()
     return derived, "parent_derived", parent.repo_id
 
 
@@ -266,13 +324,15 @@ def build_serving_resource_plan(
     log_context: Optional[str] = None,
 ) -> ServingResourcePlan:
     """
-    인벤토리 없이(또는 K8s 조회 실패 시) §7 단순 경로: decide_try_gpu_path + k는 default_gpu_vram_bytes 기준 ceil.
+    인벤토리 없이(또는 K8s 조회 실패 시) 단순 경로: decide_try_gpu_path + k는 default_gpu_vram_bytes 기준 ceil.
     """
     v_need = int(normalized_meta["serving_vram_need_bytes"])
     mem_gpu = str(normalized_meta["serving_memory_request_gpu"])
     mem_cpu = str(normalized_meta["serving_memory_request_cpu"])
     gpu_pod_mc = int(normalized_meta["serving_gpu_pod_cpu_request_millicores"])
     cpu_mc = int(normalized_meta["serving_cpu_request_millicores"])
+    gpu_pod_lim_mc = max(gpu_pod_mc, int(normalized_meta.get(SERVING_CPU_LIMIT_KEYS[0]) or gpu_pod_mc))
+    cpu_lim_mc = max(cpu_mc, int(normalized_meta.get(SERVING_CPU_LIMIT_KEYS[1]) or cpu_mc))
 
     try_gpu, fallback_reason = decide_try_gpu_path(
         task=task,
@@ -289,9 +349,11 @@ def build_serving_resource_plan(
 
     if try_gpu and k > 0:
         mem_req, cpu_req = mem_gpu, millicores_to_k8s_cpu(gpu_pod_mc)
+        cpu_lim = millicores_to_k8s_cpu(gpu_pod_lim_mc)
         device: Literal["GPU", "CPU"] = "GPU"
     else:
         mem_req, cpu_req = mem_cpu, millicores_to_k8s_cpu(cpu_mc)
+        cpu_lim = millicores_to_k8s_cpu(cpu_lim_mc)
         device = "CPU"
         k = 0
 
@@ -300,7 +362,7 @@ def build_serving_resource_plan(
     try_ko = "예" if try_gpu else "아니오"
     logger.info(
         "[serving_planner]%s 노드 정보 없이 단순 계산으로 플랜함 — 최종 디바이스 %s, GPU %d장, "
-        "모델 VRAM 안내 %s, Pod 메모리·CPU %s / %s, GPU 경로를 시도했는지 %s, "
+        "모델 VRAM 안내 %s, Pod 메모리·CPU 요청 %s / %s (CPU 상한 %s), GPU 경로를 시도했는지 %s, "
         "참고사유·메모 %r / %r, 장당 VRAM 기본값 %s",
         ctx,
         dev_ko,
@@ -308,6 +370,7 @@ def build_serving_resource_plan(
         format_k8s_memory_from_bytes(v_need),
         mem_req,
         cpu_req,
+        cpu_lim,
         try_ko,
         fallback_reason,
         planner_note,
@@ -320,13 +383,14 @@ def build_serving_resource_plan(
         memory_request=mem_req,
         cpu_request=cpu_req,
         memory_limit=mem_req,
-        cpu_limit=cpu_req,
+        cpu_limit=cpu_lim,
         serving_vram_need_bytes=v_need,
         serving_meta_source=serving_meta_source,
         parent_repo_id=parent_repo_id,
         fallback_reason=fallback_reason,
         serving_node_name=serving_node_name,
         planner_note=planner_note,
+        ephemeral_storage_limit=str(normalized_meta.get("serving_ephemeral_storage_limit", "1Gi")),
     )
 
 

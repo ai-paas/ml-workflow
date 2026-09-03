@@ -1,0 +1,9 @@
+# flake8 은 pyproject.toml 을 읽지 않으므로(setup.cfg / tox.ini / .flake8 만 인식),
+# ruff·isort·pre-commit 과 같은 제외 규칙을 여기에 따로 둔다.
+# 이 파일이 없으면 명령줄에 --exclude 를 넘기지 않는 실행(예: GitLab CI)에서
+# vendored/ 하위가 검사 대상이 되어 로컬 make lint 와 결과가 달라진다.
+[flake8]
+max-line-length = 120
+ignore = E203,W503,W605,E712,E266,F401,E402,F821,E711,F403
+# vendored/ 는 외부 원본을 그대로 복사한 서드파티 코드라 원본 바이트를 보존한다.
+extend-exclude = .venv,*/.venv,*/vendored/*

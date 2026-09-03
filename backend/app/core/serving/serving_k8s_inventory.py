@@ -1,7 +1,7 @@
 """
-§7.3 Kubernetes 노드 인벤토리 (백엔드 전용).
+Kubernetes 노드 인벤토리 (백엔드 전용).
 
-§7.3.1: allocatable에 더해, 전 네임스페이스 Pod의 resources.requests 합산으로
+allocatable에 더해, 전 네임스페이스 Pod의 resources.requests 합산으로
 G_used/M_used/C_used를 구하고 G_free/M_free/C_free를 근사한다.
 Pod 조회 실패 시 allocatable-only 폴백(planner_note 등으로 상위에서 기록 가능).
 """
@@ -13,6 +13,8 @@ import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Optional
+
+from core.serving.gpu_placement import parse_gpu_pool_profiles, resolve_placement
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,10 @@ class NodeInventory:
     m_free: int
     c_free: int
     pod_requests_applied: bool
+    # 노드 라벨이 GPU 노드풀 프로파일에 매칭될 때 결정되는 배치 정보. frozen 친화 위해 JSON 문자열로 보관.
+    gpu_resource_key: str = "nvidia.com/gpu"
+    node_selector_json: str = "{}"
+    tolerations_json: str = "[]"
 
 
 def _try_load_core_v1():
@@ -156,7 +162,7 @@ def _sum_container_list(containers: Any, gpu_key: str) -> tuple[int, int, int]:
 
 def _effective_pod_requests(pod: Any, gpu_key: str) -> tuple[int, int, int]:
     """
-    §7.3.1: 스케줄러와 동일하게 max(sum(init), sum(containers)) per resource.
+    스케줄러와 동일하게 max(sum(init), sum(containers)) per resource.
     """
     ig, im, ic = _sum_container_list(getattr(pod.spec, "init_containers", None) or [], gpu_key)
     ag, am, ac = _sum_container_list(getattr(pod.spec, "containers", None) or [], gpu_key)
@@ -257,12 +263,14 @@ def collect_node_inventory(
     vram_overrides_json: str,
     serving_node_names_csv: str,
     gpu_resource_key: str = _GPU_RESOURCE_KEY,
+    gpu_pool_profiles_json: str = "[]",
     exclude_control_plane_nodes: bool = True,
 ) -> list[NodeInventory]:
     """
     Ready·스케줄 가능 노드 목록. SERVING_NODE_NAMES 비면 클러스터 전체(필터: Ready).
-    §7.3.1: Pod requests 합산으로 g_free / m_free / c_free 채움.
+    Pod requests 합산으로 g_free / m_free / c_free 채움.
     exclude_control_plane_nodes: control-plane/master 역할 노드는 서빙 후보에서 제외(기본 True).
+    gpu_pool_profiles_json: GPU 노드풀 프로파일(MIG taint 등). 매칭 노드에 nodeSelector/tolerations/자원키 부여.
     """
     core = _try_load_core_v1()
     if core is None:
@@ -270,6 +278,7 @@ def collect_node_inventory(
 
     whitelist = [n.strip() for n in (serving_node_names_csv or "").split(",") if n.strip()]
     vram_gib = parse_vram_overrides_json(vram_overrides_json)
+    gpu_profiles = parse_gpu_pool_profiles(gpu_pool_profiles_json)
 
     try:
         resp = core.list_node()
@@ -297,7 +306,15 @@ def collect_node_inventory(
         alloc = node.status.allocatable or {}
         labels = node.metadata.labels or {}
 
-        alloc_gpu = _parse_alloc_gpu(alloc, gpu_resource_key)
+        # GPU 노드풀 프로파일 매칭 → 자원키/nodeSelector/tolerations 결정 (MIG taint 노드 등)
+        taints = [
+            {"key": t.key, "value": getattr(t, "value", None), "effect": getattr(t, "effect", None)}
+            for t in ((node.spec.taints if node.spec else None) or [])
+        ]
+        placement = resolve_placement(labels, profiles=gpu_profiles, taints=taints, default_gpu_key=gpu_resource_key)
+        node_gpu_key = placement["gpu_resource_key"]
+
+        alloc_gpu = _parse_alloc_gpu(alloc, node_gpu_key)
         mem_s = alloc.get("memory", "0")
         cpu_s = alloc.get("cpu", "0")
         alloc_mem = _parse_quantity_memory_to_bytes(mem_s)
@@ -313,9 +330,14 @@ def collect_node_inventory(
 
         v_card: Optional[int] = None
         if alloc_gpu > 0:
-            v_card = _v_card_bytes_for_node(
-                name, labels, default_vram_bytes=default_vram_bytes, vram_overrides_gib=vram_gib
-            )
+            # 프로파일에 slice_vram_gib 가 있으면 강제(예: gpu.memory 라벨 없는 MIG-미적용 노드 보정)
+            slice_gib = placement.get("slice_vram_gib")
+            if slice_gib:
+                v_card = int(slice_gib) * _GIB
+            else:
+                v_card = _v_card_bytes_for_node(
+                    name, labels, default_vram_bytes=default_vram_bytes, vram_overrides_gib=vram_gib
+                )
             if v_card is None or v_card <= 0:
                 v_card = default_vram_bytes if default_vram_bytes > 0 else None
 
@@ -331,6 +353,9 @@ def collect_node_inventory(
                 m_free=m_free,
                 c_free=c_free,
                 pod_requests_applied=pod_ok,
+                gpu_resource_key=node_gpu_key,
+                node_selector_json=json.dumps(placement["node_selector"]),
+                tolerations_json=json.dumps(placement["tolerations"]),
             )
         )
 
@@ -342,7 +367,7 @@ def node_inventories_with_free_overrides(
     frees: dict[str, tuple[int, int, int]],
 ) -> list[NodeInventory]:
     """
-    §7.3.2 연쇄 잔여: 동일 스냅샷 alloc/v_card는 유지하고 g_free/m_free/c_free만 덮어쓴다.
+    연쇄 잔여: 동일 스냅샷 alloc/v_card는 유지하고 g_free/m_free/c_free만 덮어쓴다.
     frees 키는 노드명; 없는 노드는 base 값 유지.
     """
     out: list[NodeInventory] = []
@@ -360,6 +385,9 @@ def node_inventories_with_free_overrides(
                 m_free=m,
                 c_free=c,
                 pod_requests_applied=n.pod_requests_applied,
+                gpu_resource_key=n.gpu_resource_key,
+                node_selector_json=n.node_selector_json,
+                tolerations_json=n.tolerations_json,
             )
         )
     return out
@@ -372,3 +400,63 @@ def whitelist_rank(name: str, order: list[str]) -> int:
         return order.index(name)
     except ValueError:
         return len(order) + hash(name) % 1000
+
+
+def choose_training_node_placement(
+    *,
+    requested_gpus: int,
+    default_vram_bytes: int,
+    vram_overrides_json: str,
+    serving_node_names_csv: str,
+    gpu_pool_profiles_json: str = "[]",
+    gpu_resource_key: str = _GPU_RESOURCE_KEY,
+    exclude_control_plane_nodes: bool = True,
+) -> Optional[dict]:
+    """학습 Job 을 서빙과 같은 노드 화이트리스트에 배치하기 위한 노드 선택.
+
+    화이트리스트(serving_node_names_csv) 노드 인벤토리에서 여유 GPU 가 requested_gpus 이상인
+    노드를 고른다. 여유 GPU 가 많은 노드를 우선(스프레드)하고, 같으면 화이트리스트 순서 → 이름 순.
+    고른 노드를 kubernetes.io/hostname 으로 고정하고, 노드 taint 통과용 toleration 을 함께 반환한다.
+    이렇게 하면 서빙이 화이트리스트로 피하는 비호환 GPU 노드를 학습 Job 도 함께 피한다.
+    적합 노드가 없거나 인벤토리 조회 실패면 None 을 반환한다(호출부가 기존 기본 배치로 폴백).
+
+    반환: {"gpu_resource_key", "node_selector"(dict), "tolerations"(list[dict]), "node_name"} 또는 None.
+    """
+    nodes = collect_node_inventory(
+        default_vram_bytes=default_vram_bytes,
+        vram_overrides_json=vram_overrides_json,
+        serving_node_names_csv=serving_node_names_csv,
+        gpu_resource_key=gpu_resource_key,
+        gpu_pool_profiles_json=gpu_pool_profiles_json,
+        exclude_control_plane_nodes=exclude_control_plane_nodes,
+    )
+    whitelist = [n.strip() for n in (serving_node_names_csv or "").split(",") if n.strip()]
+    need = max(1, int(requested_gpus or 1))
+    candidates = [n for n in nodes if n.alloc_gpu > 0 and (n.v_card_bytes or 0) > 0 and n.g_free >= need]
+    if not candidates:
+        logger.info("학습 노드 자동 선택: 여유 GPU %d장 이상인 화이트리스트 노드가 없어 기본 배치로 폴백합니다.", need)
+        return None
+    candidates.sort(key=lambda n: (-n.g_free, whitelist_rank(n.name, whitelist), n.name))
+    chosen = candidates[0]
+    try:
+        node_selector = json.loads(chosen.node_selector_json) or {}
+    except Exception:
+        node_selector = {}
+    node_selector["kubernetes.io/hostname"] = chosen.name
+    try:
+        tolerations = json.loads(chosen.tolerations_json) or []
+    except Exception:
+        tolerations = []
+    logger.info(
+        "학습 노드 자동 선택: '%s' 고정(여유 GPU %d장, 요청 %d장) node_selector=%s",
+        chosen.name,
+        chosen.g_free,
+        need,
+        node_selector,
+    )
+    return {
+        "gpu_resource_key": chosen.gpu_resource_key or gpu_resource_key,
+        "node_selector": node_selector,
+        "tolerations": tolerations,
+        "node_name": chosen.name,
+    }
