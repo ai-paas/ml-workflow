@@ -4,7 +4,7 @@ from datetime import timedelta
 from config.db.connect import SessionDepends
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from schemas.user import UserSchema
+from schemas.user import UserBriefSchema, UserSchema
 from services.user import UserService
 from sqlalchemy.orm import Session
 from utils.authentication import (
@@ -40,7 +40,7 @@ async def login_for_access_token(*, db: Session = SessionDepends, form_data: OAu
     - **access_token** (str): JWT 액세스 토큰
         - 이후 API 요청 시 Authorization 헤더에 사용
         - 형식: `Bearer {access_token}`
-        - 토큰 유효기간: 24시간 (86400초)
+        - 토큰 유효기간: 앱 설정 기준(기본 86400초, 약 24시간)
         - HS256 알고리즘으로 서명됨
     - **token_type** (str): 토큰 타입
         - 항상 `"bearer"`로 고정
@@ -72,7 +72,7 @@ async def login_for_access_token(*, db: Session = SessionDepends, form_data: OAu
     return {"access_token": access_token, "token_type": "bearer"}
 
 
-@router.get("/users/me", response_model=UserSchema)
+@router.get("/users/me", response_model=UserBriefSchema)
 async def read_users_me(current_user: UserSchema = Depends(get_current_user)):
     """
     현재 로그인한 사용자 정보 조회
@@ -85,15 +85,12 @@ async def read_users_me(current_user: UserSchema = Depends(get_current_user)):
         - 형식: `Bearer {access_token}`
         - `/authentications/token` API에서 발급받은 토큰 사용
 
-    ## Response (UserSchema)
+    ## Response (UserBriefSchema)
     - **id** (int): 사용자 고유 ID (PK)
     - **username** (str): 사용자 ID
         - 로그인 시 사용하는 사용자 이름
     - **name** (str): 사용자 이름
         - 사용자의 표시명
-    - **password** (str): 비밀번호 해시값
-        - SHA-256 알고리즘으로 해시된 값
-        - 복호화 불가능 (보안상 이유)
     - **created_at** (datetime): 계정 생성 시각
     - **updated_at** (datetime): 계정 정보 수정 시각
     - **created_by** (str, optional): 계정 생성자
@@ -103,7 +100,7 @@ async def read_users_me(current_user: UserSchema = Depends(get_current_user)):
     - 인증이 필요한 API (Bearer 토큰 필수)
     - 토큰에서 사용자 정보를 자동으로 추출하므로 별도 파라미터 불필요
     - 토큰이 만료되었거나 유효하지 않으면 401 에러 반환
-    - `password` 필드는 보안상 해시값만 반환 (평문 비밀번호는 반환하지 않음)
+    - 응답에는 `password` 필드를 포함하지 않음 (보안)
     - 현재 로그인한 사용자의 정보만 조회 가능
 
     ## Errors

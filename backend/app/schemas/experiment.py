@@ -1,5 +1,9 @@
+import json
+from datetime import datetime
 from typing import Any, Dict, Optional
 
+from config.db.enums import DatasetKindEnum
+from fastapi import Form
 from pydantic import BaseModel
 from schemas.base import TimeStampSchemaMixin
 from schemas.dataset import DatasetReadSchema
@@ -28,6 +32,7 @@ class ExperimentBaseSchema(TimeStampSchemaMixin):
     kubeflow_run_id: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     status: str
+    registration_kubeflow_run_id: Optional[str] = None
 
 
 class ExperimentReadSchema(TimeStampSchemaMixin):
@@ -70,36 +75,20 @@ class ExperimentInternalUpdateRequest(BaseModel):
     status: Optional[str] = None
     mlflow_run_id: Optional[str] = None
     kubeflow_run_id: Optional[str] = None
-
-
-class HyperparameterTypeBaseSchema(BaseModel):
-    param_name: str
-    param_type: str
-    default_value: str
-
-
-class HyperparameterTypeReadSchema(BaseModel):
-    id: int
-    param_name: str
-    param_type: str
-    default_value: str
-
-    class Config:
-        from_attributes = True
+    registration_kubeflow_run_id: Optional[str] = None
 
 
 class HyperparameterBaseSchema(BaseModel):
-    value: str
     experiment_id: int
-    hyperparameter_type_id: int
+    param_name: str
+    value: str
 
 
 class HyperparameterReadSchema(BaseModel):
     id: int
-    value: str
     experiment_id: int
-    hyperparameter_type_id: int
-    hyperparameter_type: "HyperparameterTypeReadSchema"
+    param_name: str
+    value: str
 
     class Config:
         from_attributes = True
@@ -107,9 +96,10 @@ class HyperparameterReadSchema(BaseModel):
 
 # Training Status 관련 Pydantic 모델들
 class TrainingStatusResponse(BaseModel):
-    status: str  # RUNNING, FINISHED, FAILED
-    start_time: int  # unix timestamp
-    end_time: Optional[int] = None  # unix timestamp
+    status: str
+    start_time: int
+    end_time: Optional[int] = None
+    elapsed_time: int
     max_epoch: int
     current_epoch: int
     loss_history: list[Any]
@@ -118,3 +108,158 @@ class TrainingStatusResponse(BaseModel):
     average_precision_75_history: list[Any]
     best_average_precision_history: list[Any]
     average_precision_50_95_history: list[Any]
+
+
+# ── 학습 요청 Body 스키마 ──
+
+
+class TrainingRequest(BaseModel):
+    """POST /pipeline/training 요청 바디 (YOLOX + ESM2 통합, multipart/form-data)
+
+    학습 파라미터는 모두 Optional[str] 이며, 비어 있으면 라우터가
+    user input → 모델별 recommended_hparams → SYSTEM_HPARAM_DEFAULTS 순으로 백필한다.
+    데이터셋 입력은 dataset_id XOR dataset_file(라우터의 별도 UploadFile 인자).
+    """
+
+    model_id: int
+    train_name: str = ""
+    description: str = ""
+
+    # 데이터셋 입력 — dataset_file(별도 인자)과 XOR
+    dataset_id: Optional[int] = None
+    # 데이터셋 분류(업로드 데이터의 사실) — dataset_file 동반 시 필수. 모델이 요구하는
+    # 분류와 일치해야 한다(불일치 400). dataset_id 케이스에서는 무시(등록된 dataset.kind 사용).
+    dataset_kind: Optional[DatasetKindEnum] = None
+
+    # 학습 파라미터 (lr0/lrf 통합 → 단일 learning_rate)
+    gpus: Optional[str] = None
+    batch_size: Optional[str] = None
+    epochs: Optional[str] = None
+    save_period: Optional[str] = None
+    weight_decay: Optional[str] = None
+    learning_rate: Optional[str] = None
+
+    @classmethod
+    def as_form(
+        cls,
+        model_id: int = Form(...),
+        train_name: str = Form(""),
+        description: str = Form(""),
+        dataset_id: Optional[int] = Form(None),
+        dataset_kind: Optional[DatasetKindEnum] = Form(None),
+        gpus: Optional[str] = Form(None),
+        batch_size: Optional[str] = Form(None),
+        epochs: Optional[str] = Form(None),
+        save_period: Optional[str] = Form(None),
+        weight_decay: Optional[str] = Form(None),
+        learning_rate: Optional[str] = Form(None),
+    ) -> "TrainingRequest":
+        """FastAPI Form(...) 의존성 빌더 — 각 필드를 multipart/form-data 로 받아 인스턴스 생성."""
+        return cls(
+            model_id=model_id,
+            train_name=train_name,
+            description=description,
+            dataset_id=dataset_id,
+            dataset_kind=dataset_kind,
+            gpus=gpus,
+            batch_size=batch_size,
+            epochs=epochs,
+            save_period=save_period,
+            weight_decay=weight_decay,
+            learning_rate=learning_rate,
+        )
+
+
+# ── 모델 등록 요청/응답 스키마 ──
+
+
+class ModelRegistrationRequest(BaseModel):
+    """POST /pipeline/model/registration 요청 바디"""
+
+    model_name: str
+    description: str
+    experiment_id: int
+
+
+class ModelRegistrationResponse(BaseModel):
+    """POST /pipeline/model/registration 응답"""
+
+    accepted: bool
+    experiment_id: int
+    message: str
+
+
+# ── Experiment 메트릭 스키마 ──
+
+
+class ExperimentMetricsSchema(BaseModel):
+    elapsed_time: int | None = None
+    end_time: datetime | None = None
+    max_epoch: int = 0
+    current_epoch: int = 0
+    loss: float | None = None
+    loss_history: list[dict] | None = None
+    average_precision: float | None = None
+    accuracy: float | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+    class Config:
+        from_attributes = True
+
+    @classmethod
+    def from_orm_model(cls, m) -> "ExperimentMetricsSchema":
+        """ORM의 precision_value -> API의 precision으로 매핑"""
+        return cls(
+            elapsed_time=m.elapsed_time,
+            end_time=m.end_time,
+            max_epoch=m.max_epoch,
+            current_epoch=m.current_epoch,
+            loss=m.loss,
+            loss_history=json.loads(m.loss_history) if m.loss_history else None,
+            average_precision=m.average_precision,
+            accuracy=m.accuracy,
+            precision=m.precision_value,
+            recall=m.recall,
+        )
+
+
+# ── Experiment 목록/상세 응답 스키마 ──
+
+
+class ExperimentListResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    reference_model_id: int
+    dataset_id: int
+    status: str
+    registration_status: str = "NOT_REQUESTED"
+    registered_model_id: int | None = None
+    elapsed_time: int | None = None
+    end_time: datetime | None = None
+    reference_model: dict | None = None
+    dataset: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class ExperimentDetailResponse(ExperimentListResponse):
+    mlflow_run_id: str | None = None
+    train_msg: str | None = None
+    model_register_msg: str | None = None
+    max_epoch: int = 0
+    hyperparameters: list = []
+    current_epoch: int = 0
+    loss: float | None = None
+    loss_history: list[dict] | None = None
+    average_precision: float | None = None
+    accuracy: float | None = None
+    precision: float | None = None
+    recall: float | None = None
+
+    class Config:
+        from_attributes = True

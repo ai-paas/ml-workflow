@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 # Copyright (c) Megvii, Inc. and its affiliates.
+#
+# Modified by Surromind, 2024-2026
+# Changes: Added weights_only=False to torch.load calls in resume_train()
+#          for PyTorch >= 2.6 compatibility with fine-tuned checkpoints.
 
 import datetime
 import os
@@ -294,7 +298,7 @@ class Trainer:
             else:
                 ckpt_file = self.args.ckpt
 
-            ckpt = torch.load(ckpt_file, map_location=self.device)
+            ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
             # resume the model/optimizer state dict
             model.load_state_dict(ckpt["model"])
             self.optimizer.load_state_dict(ckpt["optimizer"])
@@ -307,7 +311,7 @@ class Trainer:
             if self.args.ckpt is not None:
                 logger.info("loading checkpoint for fine tuning")
                 ckpt_file = self.args.ckpt
-                ckpt = torch.load(ckpt_file, map_location=self.device)["model"]
+                ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)["model"]
                 model = load_ckpt(model, ckpt)
             self.start_epoch = 0
 

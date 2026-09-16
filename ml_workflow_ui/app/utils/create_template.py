@@ -31,28 +31,25 @@ def create_detr_template(api_client: APIClient, model_id: int) -> dict:
     workflow_definition = {
         "components": [
             {
+                "ref_id": "n1",
                 "name": "시작 노드",
                 "type": "START",
             },
             {
+                "ref_id": "n2",
                 "name": "DETR Object Detection",
                 "type": "MODEL",
                 "model_id": model_id,
             },
             {
+                "ref_id": "n3",
                 "name": "종료 노드",
                 "type": "END",
             },
         ],
         "connections": [
-            {
-                "source_component_type": "START",
-                "target_component_type": "MODEL",
-            },
-            {
-                "source_component_type": "MODEL",
-                "target_component_type": "END",
-            },
+            {"source_ref_id": "n1", "target_ref_id": "n2"},
+            {"source_ref_id": "n2", "target_ref_id": "n3"},
         ],
     }
 

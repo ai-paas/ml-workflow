@@ -1,3 +1,8 @@
+"""모니터링 API 라우터.
+
+현재 활성 HTTP 엔드포인트는 없으며, 과거 `/metrics` 초안은 주석으로만 남아 있습니다.
+"""
+
 import base64
 import json
 import logging

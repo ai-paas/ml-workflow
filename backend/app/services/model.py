@@ -1,18 +1,24 @@
+import io
 import logging
 import os
 import re
 import tempfile
 import traceback
+import urllib.request
 import uuid
+import warnings
 from enum import Enum
 from typing import Any, Optional
 
-from config.db.enums import ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
+from config.optimization_sources import is_optimization_eligible
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
-from db.models.model import Model
-from fastapi import UploadFile
+from core.training.families import resolve_family
+from db.models.model import Model, ModelTaskType
+from fastapi import HTTPException, UploadFile
+from fastapi import status as http_status
 from huggingface_hub import snapshot_download
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -39,18 +45,7 @@ from schemas.model import (
     ModelTypeReadSchema,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
-from sqlalchemy.orm import Session
-from transformers import (
-    AutoConfig,
-    AutoModelForObjectDetection,
-    AutoProcessor,
-    AutoTokenizer,
-    CLIPTokenizer,
-    Owlv2ForObjectDetection,
-    Owlv2ImageProcessor,
-    Owlv2Processor,
-    Owlv2TextModel,
-)
+from sqlalchemy.orm import Session, joinedload
 from utils.model_registry import ModelRegistry
 
 logger = logging.getLogger(__name__)
@@ -91,11 +86,84 @@ def is_yolox_local_model(model_name: str) -> bool:
     return "yolox" in model_name.lower()
 
 
+def determine_model_visibility(
+    parent_model_id: int | None,
+    opt_enable_yn: bool,
+) -> str:
+    """parent_model_id와 opt_enable_yn을 기반으로 CATALOG / CUSTOM을 결정한다."""
+    if parent_model_id is not None or opt_enable_yn:
+        return ModelVisibility.CUSTOM.value
+    return ModelVisibility.CATALOG.value
+
+
 class ModelService:
     @staticmethod
     def get(db: Session, pk: int) -> Optional[Model]:
         """ID로 Model 객체 조회"""
         return model_repository.get(db, pk)
+
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[Model]:
+        """이름으로 Model 1건 조회(모델명 중복 거부용). 없으면 None."""
+        return model_repository.get_by_name(db, name)
+
+    @staticmethod
+    def assert_model_name_available(db: Session, name: str) -> None:
+        """모델명 중복 등록 방지의 **단일 정의**. 같은 이름이 이미 있으면 409.
+
+        모델 생성의 모든 경로(POST /models · auto-generate · 자식 등록 컴포넌트→POST /models)는
+        register_model 을 거치므로, 그 안에서 이 메서드를 호출해 한 곳에서 일괄 차단한다.
+        라우터의 사전 체크(가중치 다운로드/파이프라인 제출 전 조기 종료)도 같은 메서드를 재사용한다.
+        """
+        if name and model_repository.get_by_name(db, name) is not None:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=f"이미 존재하는 모델명입니다: '{name}'",
+            )
+
+    @staticmethod
+    def get_latest_child_model(db: Session, parent_model_id: int) -> Optional[Model]:
+        """
+        parent_model_id의 자식 모델 중 가장 최근 생성된 것을 반환한다.
+        등록 파이프라인 완료 후 등록된 모델 ID 확인에 사용.
+        """
+        children = model_repository.get_by_parent_model_id(db, parent_model_id)
+        if not children:
+            return None
+        return max(children, key=lambda m: m.id)
+
+    @staticmethod
+    def resolve_lineage_root_model_id(db: Session, model_id: int) -> int:
+        """
+        parent_model_id 체인을 따라 올라가 부모가 없는 모델(원본 사전학습·카탈로그 루트) id를 반환한다.
+        재학습으로 생성되는 모델의 parent_model_id는 직전 학습본이 아니라 항상 이 루트를 가리키도록 한다.
+        """
+        current_id: int | None = model_id
+        seen: set[int] = set()
+        while current_id is not None:
+            if current_id in seen:
+                raise ValueError(f"model parent_model_id 순환이 감지되었습니다: id={current_id}")
+            seen.add(current_id)
+            m = model_repository.get(db, current_id)
+            if m is None:
+                raise ValueError(f"model id={current_id} 을(를) 찾을 수 없습니다.")
+            if m.parent_model_id is None:
+                return current_id
+            current_id = m.parent_model_id
+        raise ValueError(f"model id={model_id} 에 대한 lineage root를 결정할 수 없습니다.")
+
+    @staticmethod
+    def get_latest_child_model_for_registration(db: Session, reference_model_id: int) -> Optional[Model]:
+        """
+        학습 등록 직후: 새 행은 lineage root를 parent로 두므로,
+        root의 자식 중 실험의 reference_model_id보다 id가 큰 것 중 최댓값을 등록 결과로 본다.
+        """
+        root_id = ModelService.resolve_lineage_root_model_id(db, reference_model_id)
+        children = model_repository.get_by_parent_model_id(db, root_id)
+        candidates = [m for m in children if m.id > reference_model_id]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda m: m.id)
 
     def get_multi(self, db: Session, skip: int = 0, limit: int = 100) -> list[ModelReadSchema]:
         return model_repository.get_multi(db, skip=skip, limit=limit)
@@ -112,6 +180,7 @@ class ModelService:
         filters: dict[str, Any],
         skip: int = 0,
         limit: int = 100,
+        visibility: str | None = None,
     ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모델 목록을 조회합니다.
@@ -119,36 +188,37 @@ class ModelService:
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             skip: 건너뛸 레코드 수
             limit: 반환할 최대 레코드 수
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
-        # 페이지네이션 적용
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         paginated_models = models[skip : skip + limit]
         return [self.get(db, model.id) for model in paginated_models]
 
-    def filter_all(self, db: Session, filters: dict[str, Any], max_limit: int = 10000) -> list[ModelReadSchema]:
+    def filter_all(
+        self,
+        db: Session,
+        filters: dict[str, Any],
+        max_limit: int = 10000,
+        visibility: str | None = None,
+    ) -> list[ModelReadSchema]:
         """
         필터 조건에 따라 모든 모델 목록을 조회합니다 (페이지네이션 없음).
 
         Args:
             db: 데이터베이스 세션
             filters: 필터 조건 딕셔너리
-                - type_id: 모델 타입 ID
-                - provider_id: 모델 제공자 ID
-                - format_id: 모델 포맷 ID
             max_limit: 최대 반환 레코드 수 (기본값: 10000)
+            visibility: CATALOG / CUSTOM 필터
 
         Returns:
             필터링된 모델 목록 (ModelReadSchema)
         """
-        models = model_repository.filter(db, filters)
+        models = model_repository.filter_with_visibility(db, filters, visibility)
         limited_models = models[:max_limit]
         return [self.get(db, model.id) for model in limited_models]
 
@@ -313,29 +383,13 @@ class ModelService:
                             run_info = client.get_run(run_id)
                             artifact_uri = run_info.info.artifact_uri
 
-                            # artifact_uri에서 S3 경로 추출
-                            # 형식 1: mlflow-artifacts:/0/abc123/artifacts
-                            # 형식 2: s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/google-owlv2-base-patch16
-                            s3_artifact_path = None
-                            if artifact_uri.startswith("mlflow-artifacts:/"):
-                                s3_artifact_path = artifact_uri.replace("mlflow-artifacts:/", "")
-                            elif artifact_uri.startswith("s3://"):
-                                # s3://bucket/path 형식에서 버킷 이름 제거
-                                # s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                                # -> 8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                                uri_without_protocol = artifact_uri.replace("s3://", "")
-                                # 첫 번째 '/' 이후의 경로만 추출 (버킷 이름 제거)
-                                if "/" in uri_without_protocol:
-                                    s3_artifact_path = uri_without_protocol.split("/", 1)[1]
-
+                            s3_artifact_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
                             if s3_artifact_path:
                                 MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
                         except Exception as s3_error:
                             # S3 삭제 실패 처리
                             # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
                             if mlflow_deleted:
-                                import warnings
-
                                 warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
                                 # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
                             else:
@@ -364,6 +418,246 @@ class ModelService:
             db.rollback()
             raise RuntimeError(f"모델 삭제 중 오류 발생: {str(e)}")
 
+    @staticmethod
+    def _is_remote_only_repo_id(repo_id: Optional[str]) -> bool:
+        """`PREDEFINED_MODEL_CONFIGS` 태그가 remote_only 인지. 순환 import 를 피해 호출 시점에 가져온다."""
+        from core.serving.serving_mode import ServingMode
+        from core.serving.serving_workflow_deployment_policy import resolve_serving_mode_by_repo_id
+
+        rid = (repo_id or "").strip()
+        if not rid:
+            return False
+        return resolve_serving_mode_by_repo_id(rid) is ServingMode.REMOTE_ONLY
+
+    @staticmethod
+    def register_model(
+        db: Session,
+        *,
+        name: str,
+        provider_id: int,
+        type_id: int,
+        format_id: int,
+        description: str | None = None,
+        repo_id: str | None = None,
+        parent_model_id: int | None = None,
+        task: str | None = None,
+        parameter: str | None = None,
+        sample_code: str | None = None,
+        model_registry_schema: ModelRegistryRequestSchema | None = None,
+        file: UploadFile | None = None,
+    ):
+        """POST /api/v1/models 와 POST /api/v1/models/auto-generate 공통 등록 로직"""
+        # 모델명 중복 등록 방지(단일 가드) — 모든 생성 경로가 이 메서드를 거치므로 여기서 일괄 차단.
+        ModelService.assert_model_name_available(db, name)
+        if task is not None:
+            try:
+                task_enum = ModelTaskType(task)
+                task = task_enum.value
+            except ValueError:
+                valid_tasks = [e.value for e in ModelTaskType]
+                raise HTTPException(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
+                )
+
+        format_obj = model_format_repository.get(db, format_id)
+        format_name = format_obj.name if format_obj is not None else ""
+        # ESM2 는 repo_id 로 유일 식별 (model_format 은 pytorch 로 detr/yolos 와 공유되므로 format 비의존)
+        # 학습 가능 여부 = 학습 가능 모델군(yolox/esm2) 레지스트리에 매칭되는가 (단일 진실원천)
+        learning_enable_yn = resolve_family(format_name=format_name, repo_id=repo_id) is not None
+        if not repo_id and learning_enable_yn:
+            key = (name or "").strip()
+            pred = PREDEFINED_MODEL_CONFIGS.get(key)
+            if not pred:
+                pred = PREDEFINED_MODEL_CONFIGS.get(key.replace("-", "_").lower())
+            if pred and pred.get("repo_id"):
+                repo_id = pred["repo_id"]
+        # 파인튜닝 자식 모델: 부모(=학습 가능 모델)의 학습 가능성을 상속 (ESM2 재학습 지원)
+        if not learning_enable_yn and parent_model_id is not None:
+            parent = model_repository.get(db, parent_model_id)
+            if parent is not None and parent.learning_enable_yn:
+                learning_enable_yn = True
+        opt_enable_yn = is_optimization_eligible(repo_id, model_name=name)
+
+        model = ModelBaseSchema(
+            name=name,
+            description=description,
+            repo_id=repo_id,
+            provider_id=provider_id,
+            type_id=type_id,
+            format_id=format_id,
+            parent_model_id=parent_model_id,
+            learning_enable_yn=learning_enable_yn,
+            opt_enable_yn=opt_enable_yn,
+            version=1,
+            subversion=1,
+            task=task,
+            parameter=parameter,
+            sample_code=sample_code,
+        )
+
+        custom_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.CUSTOM.value)
+        huggingface_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.HUGGINGFACE.value)
+        ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
+        gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
+        embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
+        llm_type = ModelTypeService.get_by_name(db, ModelTypeEnum.LLM.value)
+
+        # 원격 전용 모델은 가중치가 존재하지 않는다. provider 별 등록 경로(PVC 다운로드·snapshot_download·
+        # 파일 업로드)는 모두 실물 가중치를 전제하므로, 그보다 앞에서 DB 행만 만들고 끝낸다.
+        if ModelService._is_remote_only_repo_id(repo_id):
+            if llm_type is None or type_id != llm_type.id:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"'{repo_id}' 는 원격 서빙 전용 모델이라 LLM 타입으로만 등록할 수 있습니다.",
+                )
+            try:
+                model_obj = model_repository.create(db, obj_in=model)
+                model_registry_repository.create(
+                    db,
+                    obj_in=ModelRegistryBaseSchema(
+                        artifact_path="",
+                        uri=repo_id,
+                        reference_model_id=model_obj.id,
+                        run_id=None,
+                        pvc=None,
+                    ),
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            logger.info(f"Registered remote-only model without weights: {repo_id}")
+            return model_repository.get(db, model_obj.id)
+
+        try:
+            if (
+                ollama_model_provider
+                and gguf_format
+                and provider_id == ollama_model_provider.id
+                and format_id == gguf_format.id
+            ):
+                if not repo_id:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="repo_id is required for Ollama models",
+                    )
+
+                model_obj = model_repository.create(db, obj_in=model)
+                model_id = model_obj.id
+
+                pvc_name = None
+                try:
+                    sanitized_model_name = name.replace("/", "-")
+                    pvc_name = OllamaModelService.download_ollama_model_to_pvc(
+                        db=db,
+                        model_id=model_id,
+                        model_name=sanitized_model_name,
+                        repo_id=repo_id,
+                    )
+                    logger.info(f"Started Ollama model download pipeline for model_id: {model_id}, PVC: {pvc_name}")
+                except Exception as download_error:
+                    logger.error(f"Failed to start Ollama model download pipeline: {download_error}")
+
+                model_registry_repository.create(
+                    db,
+                    obj_in=ModelRegistryBaseSchema(
+                        artifact_path="",
+                        uri=repo_id,
+                        reference_model_id=model_id,
+                        run_id=None,
+                        pvc=pvc_name,
+                    ),
+                )
+                db.commit()
+
+                if embedding_type and type_id == embedding_type.id:
+                    logger.info(f"Auto-deploying Ollama embedding model: {model_id} (repo_id: {repo_id})")
+                    try:
+                        sanitized_model_name = name.replace("/", "-")
+                        ModelBaseDeploymentService.deploy_ollama_embedding_model(
+                            db=db,
+                            model_id=model_id,
+                            model_name=sanitized_model_name,
+                            repo_id=repo_id,
+                            gpu_enabled=False,
+                        )
+                        logger.info(f"Successfully initiated deployment for embedding model: {model_id}")
+                    except Exception as deploy_error:
+                        logger.error(f"Failed to deploy embedding model {model_id}: {deploy_error}")
+
+                return model_repository.get(db, model_id)
+
+            elif huggingface_model_provider and provider_id == huggingface_model_provider.id:
+                if not repo_id:
+                    raise HTTPException(
+                        status_code=http_status.HTTP_400_BAD_REQUEST,
+                        detail="repo_id is required for HuggingFace models",
+                    )
+                return HuggingFaceModelService().create(db, model_schema=model)
+
+            elif custom_model_provider and provider_id == custom_model_provider.id:
+                return CustomModelService().create(
+                    db, model_schema=model, model_registry_schema=model_registry_schema, file=file
+                )
+
+            else:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported provider_id: {provider_id}",
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            db.rollback()
+            raise e
+
+    @staticmethod
+    def resolve_predefined_model_ids(db: Session, config: dict[str, Any]) -> dict[str, int]:
+        """사전 정의 모델 config에서 provider_name, type_name, format_name을 DB ID로 변환"""
+        provider = ModelProviderService.get_by_name(db, config["provider_name"])
+        if not provider:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 제공자 '{config['provider_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        model_type = ModelTypeService.get_by_name(db, config["type_name"])
+        if not model_type:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 타입 '{config['type_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        model_format = ModelFormatService.get_by_name(db, config["format_name"])
+        if not model_format:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"모델 포맷 '{config['format_name']}'를 찾을 수 없습니다. DB에 등록되어 있는지 확인하세요.",
+            )
+
+        return {
+            "provider_id": provider.id,
+            "type_id": model_type.id,
+            "format_id": model_format.id,
+        }
+
+    @staticmethod
+    def download_weight_file(url: str, filename: str) -> UploadFile:
+        """URL에서 모델 가중치 파일을 다운로드하여 UploadFile로 반환"""
+        try:
+            logger.info(f"Downloading weight file from {url}")
+            response = urllib.request.urlopen(url, timeout=600)
+            file_obj = io.BytesIO(response.read())
+            logger.info(f"Downloaded weight file: {filename} ({file_obj.getbuffer().nbytes} bytes)")
+            return UploadFile(filename=filename, file=file_obj)
+        except Exception as e:
+            raise HTTPException(
+                status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"모델 가중치 파일 다운로드 실패 ({url}): {str(e)}",
+            )
+
 
 class HuggingFaceModelService:
     def create(self, db: Session, *, model_schema: ModelBaseSchema):
@@ -373,87 +667,110 @@ class HuggingFaceModelService:
             raise ValueError("repo_id is required for HuggingFace models")
         # transformers_db_obj = model_format_repository.get_by_name(db, "transformers")
         # if model_format_id == transformers_db_obj.id:  # transformers
-        save_dir = self.load_and_save_transformers(repo_id)
+        save_dir = self.load_and_save_transformers(repo_id, model_schema.task)
         model_name = repo_id.replace("/", "-")
         run_id, artifact_uri = ModelRegistry().log_artifact(model_name=model_name, save_dir=save_dir)
         model_uri = model_name
-        # else:
-        #     print("Error!!!")
 
-        model_obj = model_repository.create(db, obj_in=model_schema)
-        model_id = model_obj.id
-        model_registry_repository.create(
-            db,
-            obj_in=ModelRegistryBaseSchema(
-                artifact_path=artifact_uri,
-                uri=model_uri,
-                run_id=run_id,
-                reference_model_id=model_id,
-            ),
-        )
-        db.commit()
-        return model_repository.get(db, model_id)
+        # 위 snapshot_download/MLflow 업로드는 대형 모델에서 수 분~수십 분 걸린다. 그동안 요청의 DB 연결이
+        # idle 로 방치돼 MySQL 에 끊길 수 있어("MySQL server has gone away"), DB 반영은 새 세션으로 한다
+        # (pool_pre_ping 으로 검증된 새 연결). 반영이 실패하면 진행된 DB 작업을 롤백하고 MLflow 아티팩트도
+        # 삭제해, DB 엔 없는데 MLflow 에만 남는 불일치(고아 아티팩트)를 막는다.
+        from config.db.session import SessionLocal
+
+        write_db = SessionLocal()
+        try:
+            model_obj = model_repository.create(write_db, obj_in=model_schema)
+            model_id = model_obj.id
+            model_registry_repository.create(
+                write_db,
+                obj_in=ModelRegistryBaseSchema(
+                    artifact_path=artifact_uri,
+                    uri=model_uri,
+                    run_id=run_id,
+                    reference_model_id=model_id,
+                ),
+            )
+            write_db.commit()
+            # write_db.close()(finally)로 반환 객체가 detach 되면, 응답 직렬화가
+            # provider_info/type_info/format_info/registry 관계를 지연 로드하려다
+            # DetachedInstanceError 로 실패한다(auto-generate 응답 500). 세션 내에서 이 관계들을
+            # 미리 즉시 로드(eager)한 뒤 expunge 해, 닫힌 세션과 무관하게 로드된 값으로 직렬화되게 한다.
+            result = (
+                write_db.query(Model)
+                .options(
+                    joinedload(Model.provider_info),
+                    joinedload(Model.type_info),
+                    joinedload(Model.format_info),
+                    joinedload(Model.registry),
+                )
+                .filter(Model.id == model_id)
+                .one()
+            )
+            write_db.expunge_all()
+            return result
+        except Exception:
+            write_db.rollback()
+            # MLflow run(tracking) 과 S3 아티팩트를 함께 정리한다. delete_run 은 run 레코드만 지우고
+            # S3 blob 은 남기므로 delete_folder 로 S3 까지 지운다. artifact_uri 는 이미 확보돼 있어 재조회 불필요.
+            try:
+                ModelRegistry().delete_run_artifacts(run_id)
+                s3_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
+                if s3_path:
+                    MLFlowS3Manager.get_instance().delete_folder(s3_path)
+            except Exception as cleanup_err:
+                logger.error(f"MLflow/S3 아티팩트 정리 실패(run_id={run_id}): {cleanup_err}")
+            raise
+        finally:
+            write_db.close()
 
     @staticmethod
-    def load_and_save_transformers(repo_id: str) -> str:
+    def load_and_save_transformers(repo_id: str, task: str) -> str:
         """
-        transformers 계열 Model을 Load하는 method
+        HuggingFace 모델을 내려받아 MLflow 등록용 로컬 디렉토리 경로를 반환한다.
+
+        모든 task(object-detection 포함)에서 **원본 HF 스냅샷을 그대로 저장**한다. backend 는 모델을
+        인스턴스화하지 않으므로 backend transformers 버전과 무관하게 등록된다 — 예: rf_detr 처럼 최신
+        아키텍처(transformers 5.8+ 네이티브)도 backend 구버전에 막히지 않고, 서빙 predictor(최신
+        transformers)가 로드한다. vision 전용(detr/yolos/rf_detr)·MaskedLM(esm2/rnafm/molformer)·
+        구조예측(esmfold2) 모두 동일 경로다. HF_TOKEN 은 쓰지 않으며(token=False), 접근 승인(gated)·
+        인증이 필요한 저장소는 클라이언트 오류(400)로 반환한다.
 
         * params
-            * repo_id: str
-                - from HuggingFace: model_name (e.g. 'openbmb/MiniCPM-V-2_6-gguf')
-                - from User: Model과 Tokenizer가 함께 저장된 directory 경로
-
-        * return
-            - transformer_model used in mlflow.transformers.log_model
-                ```python
-                components = {
-                    "model": model,
-                    "tokenizer": tokenizer,
-                }
-                ```
+            * repo_id: str — HuggingFace 저장소 id (예: 'facebook/detr-resnet-50')
+            * task: str — 모델 task (로깅/메타용. 분기에는 쓰지 않는다).
+        * return: 저장된 로컬 디렉토리 경로
         """
-        # TODO: MS 제공 Model의 경우, trust_remote_code=True 옵션을 추가해야하는 경우 발견됨
+        from huggingface_hub.utils import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
-        if repo_id.startswith(str(MODEL_NAME.OWLV2)):
-            processor = Owlv2Processor.from_pretrained(repo_id)
-            model = Owlv2ForObjectDetection.from_pretrained(repo_id)
-            tokenizer = CLIPTokenizer.from_pretrained(repo_id)
-        else:
-            processor = AutoProcessor.from_pretrained(repo_id)
-            model = AutoModelForObjectDetection.from_pretrained(repo_id)
-
-            # 모델 설정을 확인하여 토크나이저 필요 여부 판단
-            config = AutoConfig.from_pretrained(repo_id)
-            if hasattr(config, "model_type") and (config.model_type == "detr" or config.model_type == "yolos"):
-                tokenizer = None
-            else:
-                tokenizer = AutoTokenizer.from_pretrained(repo_id)
-
-        components = {
-            "model": model,
-            "image_processor": processor,
-        }
-
-        if tokenizer is not None:
-            components["tokenizer"] = tokenizer
-
-        # 임시 디렉토리를 수동으로 생성하여 자동 삭제되지 않도록 함
         temp_dir = tempfile.mkdtemp()
-        model.save_pretrained(temp_dir)
-        processor.save_pretrained(temp_dir)
-        if tokenizer is not None:
-            tokenizer.save_pretrained(temp_dir)
-
-        return temp_dir
+        try:
+            # local_dir 에 원본 파일을 그대로 받고, 호출부가 MLflow 에 올릴 그 폴더(temp_dir)를 반환한다.
+            # (snapshot_download 의 반환값은 huggingface_hub 버전에 따라 캐시 경로일 수 있어 temp_dir 을 명시 반환.)
+            snapshot_download(repo_id, token=False, local_dir=temp_dir)
+            return temp_dir
+        except (GatedRepoError, RepositoryNotFoundError) as e:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"'{repo_id}' 는 HuggingFace 접근 승인/인증(HF_TOKEN)이 필요한 모델입니다. 토큰 없이 등록할 수 없습니다.",
+            ) from e
+        except HfHubHTTPError as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (401, 403):
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=f"'{repo_id}' 접근에 HuggingFace 인증(HF_TOKEN)이 필요합니다. 토큰 없이 등록할 수 없습니다.",
+                ) from e
+            raise
 
 
 class CustomModelService:
-    """
-    Llama.cpp 계열 gguf Model을 등록하는 method
+    """커스텀 업로드 모델을 등록하는 서비스.
 
-    * params
-        * model_path: gguf file path (e.g. "your/model/file/path.gguf")
+    직접 업로드(model_registry_schema 없음)는 **모델 디렉토리를 압축한 .zip 만 허용**한다. 등록 시
+    zip 을 풀어 모델 폴더 전체를 MLflow 아티팩트로 올려, 서빙 predictor 가 from_pretrained(local_path)
+    로 로드할 수 있게 한다(단일 파일 업로드는 config/토크나이저 등 멀티파일 모델을 표현하지 못함).
+    학습/등록 파이프라인이 이미 MLflow 에 올린 산출물은 model_registry_schema 로 링크만 한다.
     """
 
     def create(
@@ -466,11 +783,18 @@ class CustomModelService:
     ):
         # 이미 pipeline에서 등록한 mlflow model_registry가 있다면 mlflow에 등록하지 말것
         if not model_registry_schema:
+            if file is None:
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail="커스텀 모델 직접 등록에는 모델 디렉토리를 압축한 .zip 파일이 필요합니다.",
+                )
             model_name = model_schema.name
             model_name = model_name.replace("/", "-")
-            # log_artifact 내부에서 file.file.read()를 호출하므로, 파일 포인터를 처음으로 되돌릴 필요 없음
-            # 파일을 그대로 전달하면 됨
-            run_id, artifact_uri = ModelRegistry().log_artifact(file=file, model_name=model_name)
+            # 커스텀 업로드는 zip 만 허용 → 압축 해제 후 모델 폴더 전체를 MLflow 에 업로드.
+            try:
+                run_id, artifact_uri = ModelRegistry().log_artifact_from_zip(model_name=model_name, file=file)
+            except ValueError as e:
+                raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail=str(e))
             model_uri = model_name
         else:
             # run_id = model_registry_schema.run_id
@@ -729,16 +1053,19 @@ class OllamaModelService:
         Returns:
             str: Storage 용량 (예: "2Gi", "21Gi")
         """
+        # 용량은 PREDEFINED_MODEL_CONFIGS 각 엔트리의 `ollama_pvc_storage` 를 단일 진실원천으로 쓴다.
+        # 사전정의(PREDEFINED)에 없지만 등록될 수 있는 커스텀 Ollama 모델만 아래 폴백/기본값으로 처리한다.
         storage_map = {
-            "bge-m3": "2Gi",
-            "qwq:32b": "22Gi",
-            "qwen3:32b": "22Gi",
-            "qwen3:30b": "21Gi",
-            "gpt-oss:20b": "16Gi",
-            "ahmgam/medllama3-v20:latest": "7Gi",
-            "taozhiyuai/openbiollm-llama-3:70b_q4_k_m": "45Gi",
-            "gemma3:1b": "2Gi",
+            name: cfg["ollama_pvc_storage"]
+            for name, cfg in PREDEFINED_MODEL_CONFIGS.items()
+            if cfg.get("ollama_pvc_storage")
         }
+        storage_map.update(
+            {
+                "taozhiyuai/openbiollm-llama-3:70b_q4_k_m": "45Gi",
+                "gemma3:1b": "2Gi",
+            }
+        )
 
         # 정확한 매칭 우선
         if ollama_model_name in storage_map:
@@ -1108,3 +1435,716 @@ class OllamaModelService:
             namespace=settings.KUBEFLOW_NAMESPACE,
             storage_size=storage_size,
         )
+
+
+_GIB = 1024**3
+
+# ESMFold2(protein-structure-prediction)의 언어모델 백본. 추론에 필수이며(서열 임베딩=구조 신호의 핵심),
+# 서빙 시 런타임 HF 다운로드 대신 이 이름으로 등록된 MLflow 카탈로그본을 로컬 로드한다.
+# ESMFold2 config.esmc_id 와 동일해야 한다(vendored configuration_esmfold2._DEFAULT_ESMC_HF_REPO).
+ESMFOLD2_BACKBONE_MODEL_NAME = "biohub/ESMC-6B"
+
+PREDEFINED_MODEL_CONFIGS: dict[str, dict[str, Any]] = {
+    "hustvl/yolos-tiny": {
+        "name": "hustvl/yolos-tiny",
+        "description": "hustvl/yolos-tiny",
+        "repo_id": "hustvl/yolos-tiny",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "hustvl/yolos-small": {
+        "name": "hustvl/yolos-small",
+        "description": "hustvl/yolos-small",
+        "repo_id": "hustvl/yolos-small",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "facebook/detr-resnet-50": {
+        "name": "facebook/detr-resnet-50",
+        "description": "facebook/detr-resnet-50",
+        "repo_id": "facebook/detr-resnet-50",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "facebook/detr-resnet-101": {
+        "name": "facebook/detr-resnet-101",
+        "description": "facebook/detr-resnet-101",
+        "repo_id": "facebook/detr-resnet-101",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    # RF-DETR: transformers 5.x 네이티브(model_type=rf_detr, RfDetrForObjectDetection). 서빙 전용(학습 안 함).
+    # 기존 (pytorch, object-detection) ImageProcessingModelManager 재사용 — 신규 매니저/엔드포인트 없음.
+    # 가중치 실측 ~34M(detr-resnet-50 41.6M 보다 가벼움) → large/medium 모두 2GiB.
+    "Roboflow/rf-detr-large": {
+        "name": "Roboflow/rf-detr-large",
+        "description": "RF-DETR Large (object-detection, 입력 704², 서빙 전용)",
+        "repo_id": "Roboflow/rf-detr-large",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "Roboflow/rf-detr-medium": {
+        "name": "Roboflow/rf-detr-medium",
+        "description": "RF-DETR Medium (object-detection, 입력 576², 서빙 전용)",
+        "repo_id": "Roboflow/rf-detr-medium",
+        "task": "object-detection",
+        "provider_name": "huggingface",
+        "type_name": "ODM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "ahmgam/medllama3-v20:latest": {
+        "name": "ahmgam-medllama3-v20-latest",
+        "description": "ahmgam-medllama3-v20-latest",
+        "repo_id": "ahmgam/medllama3-v20:latest",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "7Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 8_192,
+        "serving_vram_need_bytes": 6 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "8Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "bge-m3": {
+        "name": "bge-m3",
+        "description": "bge-m3",
+        "repo_id": "bge-m3",
+        "ollama_pvc_storage": "2Gi",
+        "task": "embedding",
+        "provider_name": "ollama",
+        "type_name": "Embedding",
+        "format_name": "gguf",
+        "serving_vram_need_bytes": 1 * _GIB,
+        "serving_memory_request_gpu": "1Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_memory_request_cpu": "6Gi",
+        "serving_cpu_request_millicores": 500,
+        "serving_cpu_limit_millicores": 1000,
+    },
+    "facebook/esm2_t6_8M_UR50D": {
+        "name": "facebook/esm2_t6_8M_UR50D",
+        "description": "ESM-2 8M (base=fill-mask, 파인튜닝 시 protein-classification)",
+        "repo_id": "facebook/esm2_t6_8M_UR50D",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "16",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 1 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 200,
+        "serving_gpu_pod_cpu_limit_millicores": 500,
+        "serving_memory_request_cpu": "2Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
+    "multimolecule/rnafm": {
+        "name": "multimolecule/rnafm",
+        "description": "RNA-FM (RNA fill-mask, base MLM)",
+        "repo_id": "multimolecule/rnafm",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 200,
+        "serving_gpu_pod_cpu_limit_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
+    "ibm-research/MoLFormer-XL-both-10pct": {
+        "name": "ibm-research/MoLFormer-XL-both-10pct",
+        "description": "MoLFormer-XL (SMILES fill-mask, base MLM, 원격코드)",
+        "repo_id": "ibm-research/MoLFormer-XL-both-10pct",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 200,
+        "serving_gpu_pod_cpu_limit_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 1000,
+    },
+    "biohub/ESMC-300M": {
+        "name": "biohub/ESMC-300M",
+        "description": "ESM-C 300M (base=fill-mask, 파인튜닝 시 protein-classification)",
+        "repo_id": "biohub/ESMC-300M",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "16",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 2 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 200,
+        "serving_gpu_pod_cpu_limit_millicores": 500,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 1000,
+        # 서빙 시 모델 파일(~1.3GB)을 Pod 로컬로 내려받으므로 기본 1Gi 로는 부족 → 3Gi.
+        "serving_ephemeral_storage_limit": "3Gi",
+    },
+    "biohub/ESMC-6B": {
+        "name": "biohub/ESMC-6B",
+        "description": "ESM-C 6B (base=fill-mask, 파인튜닝 시 protein-classification). bf16 로드+멀티GPU 샤딩.",
+        "repo_id": "biohub/ESMC-6B",
+        "task": "fill-mask",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        "recommended_hparams": {
+            "learning_rate": "0.001",
+            "batch_size": "4",
+            "epochs": "10",
+            "weight_decay": "0.1",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        # 아래 리소스는 추정치다(실제 6B 등록·배포 전 클러스터에서 검증 필요).
+        # bf16 로드 시 가중치 ~12GB + 활성. vram_need 는 멀티GPU 샤딩 장수 계산에 쓰인다.
+        "serving_vram_need_bytes": 16 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+        # 다운로드되는 체크포인트는 fp32(~24GB)라 로드를 bf16 로 해도 디스크는 그만큼 필요 → 26Gi.
+        "serving_ephemeral_storage_limit": "26Gi",
+    },
+    "biohub/ESMFold2": {
+        "name": "biohub/ESMFold2",
+        "description": "ESMFold2 단백질 3D 구조 예측(서열→전원자 좌표+plddt/ptm). 백본 ESMC-6B 필요.",
+        "repo_id": "biohub/ESMFold2",
+        "task": "protein-structure-prediction",
+        "provider_name": "huggingface",
+        "type_name": "BFM",
+        "format_name": "pytorch",
+        # ESMFold2 는 folding trunk(~1.3GB) 단독이 아니라 언어모델 백본 ESMC-6B(~25GB fp32)를 함께
+        # 로드해야 추론이 성립한다(서열 임베딩이 구조 신호의 핵심). 따라서 서빙 풋프린트는 ESMC-6B 급이다.
+        # ESMC-6B 는 bf16 로 GPU 에 올린다(~13GB) + folding trunk + 확산 활성 → VRAM 20GB.
+        "serving_vram_need_bytes": 20 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        # fp32 shard(~25GB)를 로드하는 동안 호스트 메모리 여유가 필요하다.
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+        # ESMC-6B(~25GB) + folding trunk(~1.3GB)를 Pod 로컬로 내려받아야 한다 → 30Gi.
+        "serving_ephemeral_storage_limit": "30Gi",
+    },
+    "yolox_s": {
+        "name": "yolox_s",
+        "description": "yolox_s",
+        "repo_id": "yolox_s",
+        "task": "object-detection",
+        "provider_name": "custom",
+        "type_name": "ODM",
+        "format_name": "yolox",
+        "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.pth",
+        "weight_filename": "yolox_s.pth",
+        "recommended_hparams": {
+            "learning_rate": "0.01",
+            "batch_size": "8",
+            "epochs": "10",
+            "weight_decay": "0.0005",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 4 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "yolox_m": {
+        "name": "yolox_m",
+        "description": "yolox_m",
+        "repo_id": "yolox_m",
+        "task": "object-detection",
+        "provider_name": "custom",
+        "type_name": "ODM",
+        "format_name": "yolox",
+        "weight_url": "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_m.pth",
+        "weight_filename": "yolox_m.pth",
+        "recommended_hparams": {
+            "learning_rate": "0.01",
+            "batch_size": "8",
+            "epochs": "10",
+            "weight_decay": "0.0005",
+            "save_period": "1",
+            "gpus": "1",
+        },
+        "serving_vram_need_bytes": 4 * _GIB,
+        "serving_memory_request_gpu": "2Gi",
+        "serving_gpu_pod_cpu_request_millicores": 300,
+        "serving_gpu_pod_cpu_limit_millicores": 700,
+        "serving_memory_request_cpu": "4Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "qwq:32b": {
+        "name": "qwq-32b",
+        "description": "qwq-32b",
+        "repo_id": "qwq:32b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "22Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 40_960,
+        "serving_vram_need_bytes": 26 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "24Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "gpt-oss:20b": {
+        "name": "gpt-oss-20b",
+        "description": "gpt-oss-20b",
+        "repo_id": "gpt-oss:20b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "16Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 16 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "15Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    # ── 신규 Ollama 6종 (text-generation 3 + VQA 3) ──
+    # 자원 5키는 크기별 앵커 추정, max_context_length 는 Ollama 실측 필요 — 배포 전 재확인.
+    # VQA 3종은 task=vqa 로 저장하되 당분간 text-generation 과 동일 추론(라우팅 alias).
+    "deepseek-r1:32b": {
+        "name": "deepseek-r1-32b",
+        "description": "DeepSeek-R1 32B — 오픈 추론 모델(성능 O3/Gemini 2.5 Pro 근접). text-generation.",
+        "repo_id": "deepseek-r1:32b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "22Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 26 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "24Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "granite4.1:30b": {
+        "name": "granite4.1-30b",
+        "description": "IBM Granite 4.1 30B — 다국어·코딩·RAG·툴사용·JSON 출력(Apache 2.0). text-generation.",
+        "repo_id": "granite4.1:30b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "19Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 24 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "20Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "lfm2:24b": {
+        "name": "lfm2-24b",
+        "description": "LFM2 24B — 온디바이스용 하이브리드 모델(24B-A2B). text-generation.",
+        "repo_id": "lfm2:24b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "16Gi",
+        "task": "text-generation",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 32_768,
+        "serving_vram_need_bytes": 18 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "16Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "gemma4:27b": {
+        "name": "gemma4-27b",
+        "description": "Gemma 4 27B — 추론·에이전트·코딩·멀티모달. VQA(Text+Image), 현재 텍스트 전용 서빙.",
+        "repo_id": "gemma4:27b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "20Gi",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 262_144,
+        "serving_vram_need_bytes": 22 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "18Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "qwen3.6:27b": {
+        "name": "qwen3.6-27b",
+        "description": "Qwen3.6 27B — dense/MoE 최신 세대. VQA(Text+Image), 현재 텍스트 전용 서빙.",
+        "repo_id": "qwen3.6:27b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "19Gi",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 262_144,
+        "serving_vram_need_bytes": 22 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "18Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    "nemotron3:33b": {
+        "name": "nemotron3-33b",
+        "description": "NVIDIA Nemotron 3 Nano Omni 33B — video/audio/image/text 멀티모달 Q&A·요약·전사. VQA, 현재 텍스트 전용 서빙.",
+        "repo_id": "nemotron3:33b",
+        "serving_mode": "local",
+        "ollama_pvc_storage": "30Gi",
+        "task": "vqa",
+        "provider_name": "ollama",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "max_context_length": 131_072,
+        "serving_vram_need_bytes": 30 * _GIB,
+        "serving_memory_request_gpu": "4Gi",
+        "serving_gpu_pod_cpu_request_millicores": 500,
+        "serving_gpu_pod_cpu_limit_millicores": 1000,
+        "serving_memory_request_cpu": "26Gi",
+        "serving_cpu_request_millicores": 2000,
+    },
+    # ── 원격 서버(바이오브레인 ChatModel Web Service) 전용 19종 ──
+    # repo_id 는 원격 GET /model/info/list 의 id_or_path 와 문자 단위로 일치해야 한다.
+    # 서빙 자원 키가 없는 것은 의도된 것이다 — REMOTE 경로는 GPU·PVC 계획을 수립하지 않는다.
+    "deepseek-r1:1.5b": {
+        "name": "deepseek-r1-1.5b",
+        "description": "DeepSeek-R1 1.5B — 오픈 추론 모델(원격 서빙 전용).",
+        "repo_id": "deepseek-r1:1.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "gemma3:1b": {
+        "name": "gemma3-1b",
+        "description": "Google Gemma 3 1B — 경량 다국어 모델(원격 서빙 전용).",
+        "repo_id": "gemma3:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "llama3.2:1b": {
+        "name": "llama3.2-1b",
+        "description": "Meta Llama 3.2 1B — 다국어 instruction 튜닝 모델(원격 서빙 전용).",
+        "repo_id": "llama3.2:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen2.5:0.5b": {
+        "name": "qwen2.5-0.5b",
+        "description": "Qwen2.5 0.5B — 초경량 다국어 모델(원격 서빙 전용).",
+        "repo_id": "qwen2.5:0.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "phi3:3.8b": {
+        "name": "phi3-3.8b",
+        "description": "Microsoft Phi-3 Mini 3.8B — 경량 고성능 모델(원격 서빙 전용).",
+        "repo_id": "phi3:3.8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen2.5-coder:0.5b": {
+        "name": "qwen2.5-coder-0.5b",
+        "description": "Qwen2.5-Coder 0.5B — 코드 생성·수정 특화(원격 서빙 전용).",
+        "repo_id": "qwen2.5-coder:0.5b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "tinyllama:1.1b": {
+        "name": "tinyllama-1.1b",
+        "description": "TinyLlama 1.1B — 3T 토큰 학습 초경량 모델(원격 서빙 전용).",
+        "repo_id": "tinyllama:1.1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 2_000,
+    },
+    "starcoder2:3b": {
+        "name": "starcoder2-3b",
+        "description": "StarCoder2 3B — 코드 전용 오픈 LLM(원격 서빙 전용).",
+        "repo_id": "starcoder2:3b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 16_000,
+    },
+    "granite3.1-moe:1b": {
+        "name": "granite3.1-moe-1b",
+        "description": "IBM Granite 3.1 MoE 1B — 저지연 long-context MoE(원격 서빙 전용).",
+        "repo_id": "granite3.1-moe:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "falcon3:1b": {
+        "name": "falcon3-1b",
+        "description": "Falcon3 1B — 과학·수학·코딩 지향 경량 모델(원격 서빙 전용).",
+        "repo_id": "falcon3:1b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 8_000,
+    },
+    "lfm2.5:8b": {
+        "name": "lfm2.5-8b",
+        "description": "LFM2.5 8B-A1B — 툴 호출에 강한 엣지 모델(원격 서빙 전용).",
+        "repo_id": "lfm2.5:8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 125_000,
+    },
+    "nemotron-3-nano:4b": {
+        "name": "nemotron-3-nano-4b",
+        "description": "NVIDIA Nemotron-3-Nano 4B — 에이전트 지향 효율 모델(원격 서빙 전용).",
+        "repo_id": "nemotron-3-nano:4b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    "rnj-1:8b": {
+        "name": "rnj-1-8b",
+        "description": "Essential AI Rnj-1 8B — 코드·STEM 특화 dense 모델(원격 서빙 전용).",
+        "repo_id": "rnj-1:8b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 32_000,
+    },
+    "olmo-3:7b": {
+        "name": "olmo-3-7b",
+        "description": "AI2 Olmo 3 7B — 완전 공개 학습 파이프라인 모델(원격 서빙 전용).",
+        "repo_id": "olmo-3:7b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 64_000,
+    },
+    "granite4:3b": {
+        "name": "granite4-3b",
+        "description": "IBM Granite 4 3B — instruction·툴호출 개선판(원격 서빙 전용).",
+        "repo_id": "granite4:3b",
+        "task": "text-generation",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    # ── 멀티모달(Image-Text to Text) — 원격 API 에 이미지 입력 경로가 없어 텍스트 전용으로 서빙된다 ──
+    "medgemma1.5:4b": {
+        "name": "medgemma1.5-4b",
+        "description": "MedGemma 1.5 4B — 의료 특화 멀티모달. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "medgemma1.5:4b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "minicpm-v4.6:1b": {
+        "name": "minicpm-v4.6-1b",
+        "description": "MiniCPM-V 4.6 1B — 이미지·비디오 이해 경량 MLLM. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "minicpm-v4.6:1b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    "translategemma:4b": {
+        "name": "translategemma-4b",
+        "description": "TranslateGemma 4B — 55개 언어 번역 특화. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "translategemma:4b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+    "qwen3-vl:2b": {
+        "name": "qwen3-vl-2b",
+        "description": "Qwen3-VL 2B — Qwen 계열 비전·언어 모델. 원격 API 제약으로 텍스트 전용 서빙.",
+        "repo_id": "qwen3-vl:2b",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 256_000,
+    },
+    # 원격에서 텍스트 추론이 아직 실패한다(500 no_available_chat_model 또는 무응답).
+    # 원격 수정 여부를 플랫폼에서 그대로 확인할 수 있도록 등록해 둔다 — 배포는 되고 추론만 실패하며,
+    # 실패 시 사용자에게는 "원격 서버가 현재 서빙할 수 없습니다" 로 안내된다.
+    "glm-ocr:q8_0": {
+        "name": "glm-ocr-q8-0",
+        "description": "GLM-OCR (문서 OCR 특화 멀티모달). 원격 추론 미동작 상태 — 원격 수정 확인용으로 등록.",
+        "repo_id": "glm-ocr:q8_0",
+        "task": "vqa",
+        "provider_name": "custom",
+        "type_name": "LLM",
+        "format_name": "gguf",
+        "serving_mode": "remote_only",
+        "max_context_length": 128_000,
+    },
+}
+
+
+def resolve_recommended_hparams(db: Session, db_model: Model) -> dict[str, str]:
+    """학습 대상 모델의 권장 하이퍼파라미터를 반환한다.
+
+    - 학습 불가 모델(`learning_enable_yn=False`)은 빈 dict.
+    - 학습된 자식 모델은 `parent_model_id` 체인을 따라 lineage root까지 추적해
+      root의 `PREDEFINED_MODEL_CONFIGS[*].recommended_hparams`를 상속한다.
+    - 카탈로그 매칭 실패 시에도 빈 dict.
+
+    모델 직렬화(목록/상세) 경로에서 호출되므로, 예외가 나도 응답이 깨지지 않도록
+    빈 dict로 폴백한다.
+    """
+    try:
+        if not db_model.learning_enable_yn:
+            return {}
+        root_id = ModelService.resolve_lineage_root_model_id(db, db_model.id)
+        root = ModelService.get(db, root_id)
+        if root is None:
+            return {}
+        repo_key = (root.repo_id or root.name or "").strip()
+        return dict((PREDEFINED_MODEL_CONFIGS.get(repo_key) or {}).get("recommended_hparams", {}))
+    except Exception as exc:  # noqa: BLE001 - 직렬화 경로 보호
+        logger.warning("resolve_recommended_hparams 실패 (model_id=%s): %s", getattr(db_model, "id", None), exc)
+        return {}

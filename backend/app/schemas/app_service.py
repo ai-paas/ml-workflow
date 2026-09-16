@@ -4,23 +4,34 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from schemas.base import TimeStampSchemaMixin
-from schemas.user import UserSchema
+from schemas.user import UserBriefSchema
 from schemas.workflow import WorkflowBaseSchema
 
 
 # ============= Monitoring 스키마 =============
-class MonitoringMetrics(BaseModel):
-    """모니터링 메트릭"""
+class PeriodMetrics(BaseModel):
+    """단일 기간 집계 메트릭"""
 
-    message_count: int = Field(0, description="최근 1시간 총 메시지 수")
-    active_users: int = Field(0, description="최근 1시간 활성 사용자 수")
-    token_usage: int = Field(0, description="최근 1시간 토큰 사용량")
-    avg_interaction_count: float = Field(0.0, description="최근 1시간 평균 사용자 상호작용 수")
-    response_time_ms: Optional[float] = Field(None, description="평균 응답 시간(ms)")
-    error_count: int = Field(0, description="최근 1시간 오류 수")
-    success_rate: float = Field(100.0, description="최근 1시간 성공률(%)")
+    message_count: int = Field(0, description="총 메시지 수")
+    active_users: int = Field(0, description="활성 사용자 수")
+    token_usage: int = Field(0, description="토큰 사용량")
+    avg_interaction_count: float = Field(0.0, description="평균 사용자 상호작용 수")
+    response_time_ms: Optional[float] = Field(None, description="평균 응답 시간(ms). 요청 없으면 null")
+    error_count: int = Field(0, description="오류 수")
+    success_rate: Optional[float] = Field(None, description="성공률(%). 요청 없으면 null")
+
+
+class MonitoringMetrics(BaseModel):
+    """기간별 모니터링 메트릭 (1h / 1d / 1w)"""
+
+    # JSON 키를 "1h"/"1d"/"1w"로 노출 (숫자로 시작하는 식별자는 alias로 처리)
+    model_config = ConfigDict(populate_by_name=True)
+
+    period_1h: PeriodMetrics = Field(default_factory=PeriodMetrics, alias="1h", description="최근 1시간 집계")
+    period_1d: PeriodMetrics = Field(default_factory=PeriodMetrics, alias="1d", description="최근 1일 집계")
+    period_1w: PeriodMetrics = Field(default_factory=PeriodMetrics, alias="1w", description="최근 1주일 집계")
 
 
 class WorkflowMonitoring(BaseModel):
@@ -35,10 +46,9 @@ class WorkflowMonitoring(BaseModel):
 class ServiceMonitoringData(BaseModel):
     """서비스 모니터링 데이터"""
 
-    total_metrics: MonitoringMetrics = Field(..., description="전체 서비스 메트릭")
-    workflow_metrics: List[WorkflowMonitoring] = Field(default_factory=list, description="워크플로우별 메트릭")
-    period_start: datetime = Field(..., description="집계 시작 시간")
-    period_end: datetime = Field(..., description="집계 종료 시간")
+    total_metrics: MonitoringMetrics = Field(..., description="전체 서비스 기간별 메트릭")
+    workflow_metrics: List[WorkflowMonitoring] = Field(default_factory=list, description="워크플로우별 기간별 메트릭")
+    aggregated_at: datetime = Field(..., description="집계 기준 시각(UTC). 각 기간의 끝점")
 
 
 # ============= Service 스키마 =============
@@ -80,7 +90,7 @@ class ServiceBaseSchema(TimeStampSchemaMixin):
 class ServiceBriefSchema(ServiceBaseSchema):
     """서비스 간략 정보 (리스트용)"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     workflow_count: int = Field(0, description="연결된 워크플로우 수")
 
     class Config:
@@ -90,7 +100,7 @@ class ServiceBriefSchema(ServiceBaseSchema):
 class ServiceDetailSchema(ServiceBaseSchema):
     """서비스 상세 정보"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     workflows: List[WorkflowBaseSchema] = Field(default_factory=list, description="연결된 워크플로우 목록")
     monitoring_data: Optional[ServiceMonitoringData] = Field(None, description="모니터링 데이터")
 

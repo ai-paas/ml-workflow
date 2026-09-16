@@ -1,0 +1,28 @@
+# 가상환경 — 로컬 .venv가 이미지에 복사되면 OS/아키텍처 불일치로 깨짐
+**/.venv/
+**/venv/
+
+# Python bytecode / build artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+**/dist/
+**/build/
+
+# 환경설정/시크릿 — 런타임에 k8s ConfigMap/Secret 으로 주입하므로 이미지에 포함하지 않음
+**/.env
+**/.env.*
+
+# Git
+.git/
+
+# 테스트 / 문서 (이미지에 불필요)
+.pytest_cache/
+e2e-test/
+docs/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

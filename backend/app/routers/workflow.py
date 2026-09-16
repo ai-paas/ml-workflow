@@ -1,5 +1,6 @@
 """Workflow API 라우터"""
 
+import asyncio
 import base64
 import io
 import json
@@ -7,16 +8,24 @@ import logging
 import math
 import tempfile
 import time
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import httpx
 import requests
 from config.db.connect import SessionDepends
 from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
 from core.kubeflow.workflow_executor import WorkflowExecutor
-from db.models.kserve_deployment import DeploymentStatus, KServeDeployment
+from core.serving.remote_workflow_serving import remote_chat_completion_async
+from core.serving.serving_mode import ServingMode
+from core.serving.serving_resource_meta import ServingCapacityError, serving_meta_validation_error
+from core.serving.serving_workflow_deployment_policy import decide_workflow_serving
+from db.models.model import Model, ModelTaskType
+from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.prompt import PromptVariableType
 from db.models.service import ComponentType, Workflow, WorkflowComponent, WorkflowStatus
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -25,20 +34,28 @@ from repos.prompt import prompt_repository
 from repos.workflow import workflow_repository
 from schemas.user import UserSchema
 from schemas.workflow import (
+    ComponentCreateRequest,
     ComponentTestErrorResult,
     ComponentTestResult,
     ComponentTypeInfo,
     KnowledgeBaseComponentTestResult,
     KnowledgeBaseTestResult,
     ModelComponentTestResult,
+    ModelFillMaskTestResult,
     ModelLLMTestResult,
     ModelODMTestResult,
+    ModelProteinClassificationTestResult,
+    ModelStructurePredictionTestResult,
+    ValidationCheckResponse,
     WorkflowBaseSchema,
     WorkflowCreateRequest,
-    WorkflowExecuteRequest,
+    WorkflowDefinition,
     WorkflowExecuteResponse,
+    WorkflowFillMaskTestResponse,
     WorkflowListSchema,
     WorkflowMLTestResponse,
+    WorkflowProteinClassificationTestResponse,
+    WorkflowProteinStructurePredictionTestResponse,
     WorkflowRAGTestResponse,
     WorkflowReadSchema,
     WorkflowTemplateBriefSchema,
@@ -47,14 +64,16 @@ from schemas.workflow import (
     WorkflowTemplateReadSchema,
     WorkflowTemplateUpdateRequest,
     WorkflowUpdateRequest,
+    WorkflowValidateRequest,
+    WorkflowValidateResponse,
 )
 from services.app_service import ServiceMonitoringService
 from services.knowledge_base import KnowledgeBaseService
-from services.kserve_deployment import KServeDeploymentService
-from services.model import ModelService
+from services.model import PREDEFINED_MODEL_CONFIGS, ModelService
+from services.model_workflow_deployment import ModelWorkflowDeploymentService
 from services.workflow import WorkflowService
 from sqlalchemy.orm import Session
-from utils.authentication import get_current_user
+from utils.authentication import get_current_user, get_current_user_or_internal, verify_internal_api_key
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -151,14 +170,19 @@ def create_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
     - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 프론트 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
+            - config (dict, optional): 컴포넌트별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - connections (List[ConnectionCreateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowBaseSchema)
     - **id** (str): 워크플로우 UUID
@@ -197,18 +221,14 @@ def create_workflow(
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if workflow_data.workflow_definition:
-            _validate_workflow_definition(db, workflow_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, workflow_data.workflow_definition)
 
-        # create_workflow는 항상 is_template=False로 생성됨
         workflow = WorkflowService.create_workflow(db=db, workflow_data=workflow_data, creator_id=current_user.id)
 
-        # 기본 스키마로 변환
         return WorkflowBaseSchema.model_validate(workflow)
 
     except HTTPException:
-        # _validate_workflow_definition 등에서 발생한 HTTPException을 그대로 전달
         raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -319,6 +339,36 @@ def list_workflows(
     return WorkflowListSchema(total=total_count, items=items)
 
 
+# ============= Workflow Validation Endpoint =============
+
+
+@router.post("/validate", response_model=WorkflowValidateResponse)
+def validate_workflow_definition_endpoint(
+    *,
+    db: Session = SessionDepends,
+    body: WorkflowValidateRequest,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    워크플로우 정의 사전 검증
+
+    워크플로우 생성 전에 workflow_definition이 유효한지 사전 체크합니다.
+    DB에 아무것도 생성하지 않고 항목별 결과를 반환합니다.
+
+    ## Request Body (WorkflowValidateRequest)
+    - **workflow_definition** (WorkflowDefinition): 검증할 워크플로우 정의
+
+    ## Response (WorkflowValidateResponse)
+    - **valid** (bool): 전체 검증 통과 여부
+    - **checks** (List[ValidationCheckResponse]): 검증 항목별 결과 리스트
+    """
+    checks = _validate_workflow_definition_checks(db, body.workflow_definition)
+    return WorkflowValidateResponse(
+        valid=all(c.passed for c in checks),
+        checks=[ValidationCheckResponse(rule=c.rule, passed=c.passed, message=c.message) for c in checks],
+    )
+
+
 # ============= Template Management =============
 # NOTE: 템플릿 라우트는 /{workflow_id} 보다 먼저 정의되어야 합니다.
 # FastAPI는 위에서 아래로 순서대로 라우트를 매칭하므로,
@@ -342,16 +392,21 @@ def create_workflow_template(
     - **name** (str, required): 템플릿 이름
     - **description** (str, optional): 템플릿 설명
     - **category** (str, optional): 템플릿 카테고리
-    - **workflow_definition** (WorkflowDefinition, required): 템플릿 구조
+    - **workflow_definition** (WorkflowDefinition, optional): 템플릿 구조 (생성 시 검증·저장에 사용)
         - components (List[ComponentCreateRequest]): 컴포넌트 정의
+            - ref_id (str): 프론트·스크립트용 임시 참조 ID (연결의 source_ref_id/target_ref_id와 매칭)
             - name (str): 컴포넌트 이름
             - type (str): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionCreateRequest]): 연결 정의
-            - source_component_id (str): 소스 컴포넌트 ID
-            - target_component_id (str): 타겟 컴포넌트 ID
+            - config (dict, optional): 타입별 세부 설정 (MODEL/KB 등, START/END는 미사용)
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 정의 (요청 시 ref_id 기준)
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowTemplateBriefSchema)
     - **id** (str): 템플릿 UUID
@@ -361,11 +416,10 @@ def create_workflow_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -393,11 +447,9 @@ def create_workflow_template(
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if template_data.workflow_definition:
-            _validate_workflow_definition(db, template_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, template_data.workflow_definition)
 
-        # is_template은 WorkflowService.create_workflow_template 내부에서 true로 설정됨
         template = WorkflowService.create_workflow_template(
             db=db, template_data=template_data, creator_id=current_user.id
         )
@@ -460,11 +512,10 @@ def list_workflow_templates(
         - status (str): 템플릿 상태 (DRAFT)
         - service_id (str): 기본 서비스 ID
         - creator_id (int): 템플릿 생성자 ID
-        - creator (UserSchema): 생성자 정보
+        - creator (UserBriefSchema): 생성자 정보
             - id (int): 사용자 ID
             - username (str): 사용자명
             - name (str): 사용자 이름
-            - password (str): 비밀번호 (해시된 값)
             - created_at (datetime): 계정 생성 시각
             - updated_at (datetime): 계정 정보 수정 시각
             - created_by (str, optional): 계정 생성자
@@ -554,11 +605,10 @@ def get_workflow_template(
         - 템플릿으로부터 워크플로우 생성 시 기본으로 연결될 서비스 ID
         - null 가능 (서비스 연결 없이 생성 가능)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -612,6 +662,8 @@ def get_workflow_template(
                 - updated_at (datetime): 수정 시각
             - created_at (datetime): 모델 생성 시각
             - updated_at (datetime): 모델 수정 시각
+        - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+        - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - created_at (datetime): 컴포넌트 생성 시각
         - updated_at (datetime): 컴포넌트 수정 시각
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
@@ -695,11 +747,10 @@ def clone_from_template(
     - **service_id** (str): 연결된 서비스 ID
     - **service_name** (str): 연결된 서비스 이름
     - **creator_id** (int): 생성자 ID (현재 사용자)
-    - **creator** (UserSchema): 생성자 정보 (현재 사용자)
+    - **creator** (UserBriefSchema): 생성자 정보 (현재 사용자)
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -775,16 +826,21 @@ def update_workflow_template(
     - **category** (str, optional): 새 카테고리
     - **status** (str, optional): 새 상태 (DRAFT/ACTIVE/ERROR)
         - 템플릿은 일반적으로 DRAFT 상태 유지 (실행 불가)
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 템플릿 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 템플릿 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 임시 참조 ID (연결과 매칭)
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 타입별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowTemplateReadSchema)
     - **id** (str): 템플릿 UUID
@@ -794,7 +850,7 @@ def update_workflow_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID (항상 null)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
     - **is_template** (bool): 템플릿 여부 (항상 true)
     - **template_id** (str): 원본 템플릿 ID (항상 null)
     - **components** (List[ComponentReadSchema]): 컴포넌트 상세 정보
@@ -830,9 +886,8 @@ def update_workflow_template(
         if not template or not template.is_template:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Template {template_id} not found")
 
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if template_data.workflow_definition:
-            _validate_workflow_definition(db, template_data.workflow_definition)
+            _validate_workflow_definition_or_raise(db, template_data.workflow_definition)
 
         # WorkflowTemplateUpdateRequest를 WorkflowUpdateRequest로 변환 (service_id는 None으로 설정)
         workflow_update_data = WorkflowUpdateRequest(
@@ -870,7 +925,7 @@ def delete_workflow_template(
     """
     워크플로우 템플릿 삭제
 
-    템플릿은 배포된 KServe InferenceService가 없으므로 즉시 DB에서 삭제됩니다.
+    템플릿은 워크플로 실행으로 생성된 클러스터 서빙 리소스가 없는 레코드이므로 DB에서 즉시 삭제됩니다.
     파생된 워크플로우가 있으면 삭제 불가
     """
     # 템플릿인지 확인
@@ -930,11 +985,10 @@ def get_workflow(
         - service_id가 null이면 null
     - **creator_id** (int): 생성자 ID
         - 워크플로우를 생성한 사용자의 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -999,6 +1053,8 @@ def get_workflow(
                 - updated_at (datetime): 수정 시각
             - created_at (datetime): 모델 생성 시각
             - updated_at (datetime): 모델 수정 시각
+        - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+        - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
         - created_at (datetime): 컴포넌트 생성 시각
         - updated_at (datetime): 컴포넌트 수정 시각
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
@@ -1013,19 +1069,15 @@ def get_workflow(
         - target_component (ComponentReadSchema): 타겟 컴포넌트 상세 정보
             - 위의 ComponentReadSchema 구조와 동일한 전체 정보 포함
         - created_at (datetime): 연결 생성 시각
-    - **public_url** (str): KServe 공개 엔드포인트 URL
-        - 배포 후 동적으로 생성되는 공개 접근 URL
-        - 배포 전이면 null
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
-    - **backend_api_url** (str): 백엔드 API URL
-        - 배포 후 동적으로 생성되는 백엔드 API URL
-        - 배포 전이면 null
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **public_url** (str|None): 요약용 첫 배포가 **KSERVE**이고 `KSERVE_GATEWAY_URL`이 설정된 경우에만
+        `{게이트웨이}/v2/models/{model_name}/infer`, 그 외 null
+    - **backend_api_url** (str|None): 요약용 첫 `model_workflow_deployments` 배포의 `internal_url` 기반(없으면 null;
+        REMOTE 등은 스키마 계산상 null일 수 있음 — 상세는 `/workflows/{id}/models` 참고)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
     ## Notes
-    - public_url과 backend_api_url은 워크플로우 실행 후 배포가 완료되면 동적으로 생성됨
+    - public_url·backend_api_url은 배포 레코드·설정에 따라 계산됨
     - 템플릿인 경우 is_template=true (템플릿 조회 API 사용 권장)
     - kubeflow_run_id가 있으면 /workflows/{workflow_id}/status로 실행 상태 확인 가능
     - 배포된 모델 정보는 /workflows/{workflow_id}/models로 확인 가능
@@ -1057,7 +1109,7 @@ def update_workflow(
     db: Session = SessionDepends,
     workflow_id: str,
     workflow_data: WorkflowUpdateRequest,
-    current_user: UserSchema = Depends(get_current_user),
+    current_user: Optional[UserSchema] = Depends(get_current_user_or_internal),
 ):
     """
     워크플로우 수정
@@ -1079,23 +1131,28 @@ def update_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
         - 모니터링 및 서비스 관리용 서비스 ID
         - null로 설정 시 서비스 연결 해제
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 워크플로우 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 워크플로우 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str): 프론트 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
                 - "START": 워크플로우 시작점
                 - "END": 워크플로우 종료점
                 - "MODEL": ML 모델 실행 노드
                 - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
+            - description (str, optional): 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
                 - MODEL 타입인 경우 필수, 다른 타입은 null
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
                 - KNOWLEDGE_BASE 타입인 경우 필수, 다른 타입은 null
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
                 - MODEL 타입인 경우 선택, 다른 타입은 null
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 타입별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 목록
+            - source_ref_id (str): 소스 컴포넌트 ref_id
+            - target_ref_id (str): 타겟 컴포넌트 ref_id
 
     ## Response (WorkflowReadSchema)
     - **id** (str): 워크플로우 UUID
@@ -1106,15 +1163,15 @@ def update_workflow(
     - **service_id** (str): 연결된 서비스 ID
     - **service_name** (str): 연결된 서비스 이름
     - **creator_id** (int): 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
     - **is_template** (bool): 템플릿 여부 (false)
     - **template_id** (str): 원본 템플릿 ID
     - **template_name** (str): 원본 템플릿 이름
     - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
     - **components** (List[ComponentReadSchema]): 컴포넌트 목록
     - **component_connections** (List[ConnectionReadSchema]): 연결 정보
-    - **public_url** (str): KServe 공개 엔드포인트 URL
-    - **backend_api_url** (str): 백엔드 API URL
+    - **public_url** (str|None): 첫 배포가 KSERVE이고 게이트웨이가 설정된 경우에만 공개 추론 URL
+    - **backend_api_url** (str|None): 첫 배포 기준 요약 URL(없으면 null)
     - **created_at** (datetime): 워크플로우 생성 시각
     - **updated_at** (datetime): 워크플로우 수정 시각
 
@@ -1134,12 +1191,17 @@ def update_workflow(
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 배포 중이거나 배포된 워크플로우의 구조 변경 시도
     - 500: 서버 내부 오류
     """
     try:
-        # 워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
         if workflow_data.workflow_definition:
-            _validate_workflow_definition(db, workflow_data.workflow_definition)
+            if ModelWorkflowDeploymentService.has_active_deployment(db, workflow_id):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="배포 중이거나 배포된 워크플로우는 수정할 수 없습니다. 먼저 배포를 삭제한 후 수정해주세요.",
+                )
+            _validate_workflow_definition_or_raise(db, workflow_data.workflow_definition)
 
         workflow = WorkflowService.update_workflow(db=db, workflow_id=workflow_id, workflow_data=workflow_data)
 
@@ -1168,8 +1230,6 @@ async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300
     Returns:
         성공 여부
     """
-    import asyncio
-
     kf_manager = KubeflowManager()
     elapsed = 0
     check_interval = 3  # 3초마다 확인
@@ -1240,15 +1300,15 @@ async def _wait_for_pipeline_completion(run_id: str, max_wait_seconds: int = 300
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_202_ACCEPTED)
-async def delete_workflow(
+def delete_workflow(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
     워크플로우 삭제 시작 (2단계 프로세스)
 
-    워크플로우 삭제를 시작합니다. KServe InferenceService를 정리하는
-    Kubeflow Pipeline을 실행하고 cleanup_run_id를 반환합니다.
-    실제 DB 삭제는 finalize-deletion API를 통해 완료 확인 후 수행됩니다.
+    워크플로우 삭제를 시작합니다. Kubeflow 정리 파이프라인으로 **KServe InferenceService**,
+    **Ollama Deployment/Service** 등 워크플로에 연결된 클러스터 서빙 리소스를 제거하고 `cleanup_run_id`를 반환합니다.
+    실제 DB 삭제는 finalize-deletion API에서 클러스터 잔존 여부를 확인한 뒤 수행됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
@@ -1259,21 +1319,23 @@ async def delete_workflow(
     - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 현재 상태 "cleanup_in_progress"
     - **next_step** (str): 다음 단계 API 안내
-        - 형식: "Call /workflows/{workflow_id}/finalize-deletion?run_id={cleanup_run_id} to complete deletion"
+        - 형식: "Call /workflows/{workflow_id}/finalize-deletion to complete deletion"
 
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
-    2. Kubeflow Pipeline: KServe InferenceService 삭제
-    3. finalize-deletion API: 완료 확인 및 DB 삭제
+    2. Kubeflow Pipeline: 라벨 `workflow-id` 기준 InferenceService·Deployment·Service 등 삭제
+    3. finalize-deletion API 호출: Kubernetes 잔존 리소스 확인 후 DB에서 워크플로 삭제
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
-    - KServe 리소스 정리에 시간이 걸릴 수 있음
+    - 클러스터 정리에 시간이 걸릴 수 있음
+    - REMOTE 배포는 전용 클러스터 리소스가 없을 수 있음(파이프라인은 noop·콜백 위주)
     - 템플릿은 바로 DB에서 삭제됨 (배포 리소스 없음)
 
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 배포가 진행 중인 워크플로우 삭제 시도
     - 500: 정리 파이프라인 시작 실패
     """
     try:
@@ -1282,7 +1344,13 @@ async def delete_workflow(
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-        # Kubeflow Pipeline을 통해 KServe InferenceService 리소스 삭제 시작
+        if ModelWorkflowDeploymentService.has_deploying(db, workflow_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="배포가 진행 중인 워크플로우는 삭제할 수 없습니다. 배포가 완료된 후 다시 시도해주세요.",
+            )
+
+        # Kubeflow Pipeline을 통해 워크플로 서빙 리소스(InferenceService·Ollama 등) 삭제 시작
         cleanup_run_id = None
         try:
             executor = WorkflowExecutor(db)
@@ -1302,9 +1370,7 @@ async def delete_workflow(
             "workflow_id": workflow_id,
             "cleanup_run_id": cleanup_run_id,
             "status": "cleanup_in_progress",
-            "next_step": (
-                f"Call /workflows/{workflow_id}/finalize-deletion?" f"run_id={cleanup_run_id} to complete deletion"
-            ),
+            "next_step": (f"Call /workflows/{workflow_id}/finalize-deletion to complete deletion"),
         }
 
     except HTTPException:
@@ -1317,49 +1383,53 @@ async def delete_workflow(
 
 
 @router.post("/{workflow_id}/finalize-deletion")
-async def finalize_workflow_deletion(
+def finalize_workflow_deletion(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     워크플로우 삭제 완료 처리
 
-    KServe 리소스 정리가 완료되었는지 확인하고,
-    완료된 경우 DB에서 워크플로우를 삭제합니다.
+    Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
+    확인된 경우 DB에서 워크플로우를 삭제합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
 
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - delete API에서 반환된 cleanup_run_id 사용
-
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 삭제 상태
         - "completed": 삭제 완료
+            - Kubernetes 리소스가 실제로 삭제되어 확인됨
+            - DB에서 워크플로우가 삭제됨
         - "in_progress": 아직 진행중
+            - Kubernetes에 리소스가 아직 존재함
+            - 완료될 때까지 대기 후 재호출 필요
         - "failed": 삭제 실패
-        - "unknown": 상태 확인 불가
+            - Kubernetes 리소스 확인 중 오류 발생
+            - error_message에 상세 오류 정보 포함
     - **deleted_from_db** (bool): DB에서 삭제 여부
         - true: 완전히 삭제됨
         - false: 아직 삭제되지 않음
     - **message** (str): 상태 메시지
 
     ## Process
-    1. Pipeline 상태 확인 (5초 타임아웃)
-    2. 완료 시: DB에서 워크플로우 삭제
-    3. 진행중: 진행 상태 반환
-    4. 실패: 오류 메시지 반환
+    1. 워크플로우 존재 여부 확인
+    2. Kubernetes 클러스터에서 리소스 직접 조회
+       - InferenceService 조회
+       - Ollama Deployment/Service 조회
+    3. 리소스가 모두 삭제된 경우: DB에서 워크플로우 삭제
+    4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
+    5. 확인 중 오류 발생: 실패 상태 반환
 
     ## Notes
+    - REMOTE 전용 배포는 클러스터에 남는 리소스가 없을 수 있어, 위 k8s 검사만으로는 곧바로 DB 삭제로 이어질 수 있음
     - 이미 삭제된 워크플로우 호출 시 "already deleted" 반환
-    - Pipeline 상태 확인에 실패해도 DB 조회 시도
+    - Kubernetes 리소스 확인에 실패해도 DB 조회 시도
     - 삭제는 되돌릴 수 없는 작업
+    - 리소스가 아직 존재하면 재호출하여 완료 확인 필요
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -1372,25 +1442,100 @@ async def finalize_workflow_deletion(
             # 이미 삭제된 경우
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "completed",
                 "deleted_from_db": True,
                 "message": "Workflow already deleted",
             }
 
-        # Pipeline 완료 확인
-        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+        # Kubernetes 클러스터에서 리소스 직접 조회하여 삭제 여부 확인
+        try:
+            from kubernetes import client
+            from kubernetes import config as k8s_config
 
-        if success:
-            # Pipeline 완료됨 - DB에서 삭제
-            logger.info(f"Cleanup pipeline completed for workflow {workflow_id}, deleting from DB")
+            # Kubernetes 설정
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                # 개발 환경에서는 kubeconfig 사용
+                try:
+                    k8s_config.load_kube_config()
+                except Exception as e:
+                    logger.error(f"Failed to load Kubernetes config: {e}")
+                    raise Exception(f"Failed to load Kubernetes config: {str(e)}")
+
+            namespace = settings.KUBEFLOW_NAMESPACE
+            label_selector = f"workflow-id={workflow_id}"
+
+            resources_exist = False
+
+            # 1. InferenceService 확인
+            try:
+                api = client.CustomObjectsApi()
+
+                result = api.list_namespaced_custom_object(
+                    group="serving.kserve.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="inferenceservices",
+                    label_selector=label_selector,
+                )
+
+                services = result.get("items", [])
+                if len(services) > 0:
+                    logger.info(f"Found {len(services)} InferenceServices still existing for workflow {workflow_id}")
+                    resources_exist = True
+            except Exception as e:
+                logger.warning(f"Error checking InferenceServices: {e}")
+
+            # 2. Ollama Deployment 확인
+            if not resources_exist:
+                try:
+                    apps_v1 = client.AppsV1Api()
+                    deployments = apps_v1.list_namespaced_deployment(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(deployments.items) > 0:
+                        logger.info(
+                            f"Found {len(deployments.items)} Deployments still existing for workflow {workflow_id}"
+                        )
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Deployments: {e}")
+
+            # 3. Ollama Service 확인
+            if not resources_exist:
+                try:
+                    core_v1 = client.CoreV1Api()
+                    services = core_v1.list_namespaced_service(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(services.items) > 0:
+                        logger.info(f"Found {len(services.items)} Services still existing for workflow {workflow_id}")
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Services: {e}")
+
+            if resources_exist:
+                # 리소스가 아직 존재함 - 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "in_progress",
+                    "deleted_from_db": False,
+                    "message": "Resources still exist in Kubernetes, waiting for cleanup",
+                }
+
+            # 리소스가 모두 삭제됨 - DB에서 워크플로우 삭제
+            logger.info(f"All resources deleted for workflow {workflow_id}, deleting from DB")
 
             delete_success = WorkflowService.delete_workflow(db, workflow_id)
 
             if delete_success:
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "completed",
                     "deleted_from_db": True,
                     "message": "Workflow deleted successfully",
@@ -1398,61 +1543,19 @@ async def finalize_workflow_deletion(
             else:
                 return {
                     "workflow_id": workflow_id,
-                    "run_id": run_id,
                     "status": "completed",
                     "deleted_from_db": False,
-                    "message": "Pipeline completed but DB deletion failed",
-                }
-        else:
-            # 아직 진행중이거나 실패
-            # 실제 상태 확인
-            try:
-                from ..core.kubeflow.kubeflow_manager import KubeflowManager
-
-                kf_manager = KubeflowManager()
-                run = kf_manager.kfp_client.get_run(run_id)
-
-                # 상태 추출
-                status_value = None
-                if hasattr(run, "state"):
-                    status_value = run.state
-                elif hasattr(run, "status"):
-                    status_value = run.status
-                elif hasattr(run, "run"):
-                    if hasattr(run.run, "status"):
-                        status_value = run.run.status
-                    elif hasattr(run.run, "state"):
-                        status_value = run.run.state
-
-                if status_value:
-                    status_upper = str(status_value).upper()
-                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
-                        return {
-                            "workflow_id": workflow_id,
-                            "run_id": run_id,
-                            "status": "failed",
-                            "deleted_from_db": False,
-                            "message": f"Cleanup pipeline failed with status: {status_value}",
-                        }
-
-                # 진행중
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "in_progress",
-                    "deleted_from_db": False,
-                    "message": "Cleanup pipeline still in progress",
+                    "message": "Resources deleted but DB deletion failed",
                 }
 
-            except Exception as e:
-                logger.error(f"Failed to check pipeline status: {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "unknown",
-                    "deleted_from_db": False,
-                    "message": f"Failed to check pipeline status: {str(e)}",
-                }
+        except Exception as k8s_error:
+            logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
+            return {
+                "workflow_id": workflow_id,
+                "status": "failed",
+                "deleted_from_db": False,
+                "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
+            }
 
     except Exception as e:
         logger.error(f"Failed to finalize workflow deletion: {e}")
@@ -1464,28 +1567,79 @@ async def finalize_workflow_deletion(
 # ============= Workflow Execution =============
 
 
+def _structure_prediction_backbone_error(db: Session, model_ids: List[int]) -> Optional[str]:
+    """구조예측(ESMFold2) 모델이 포함되면 백본 ESMC-6B 등록(+MLflow run) 여부를 검사한다.
+
+    문제가 있으면 오류 메시지, 문제 없음(또는 구조예측 모델 없음)이면 None 을 반환한다.
+    ESMFold2 는 추론에 언어모델 백본 ESMC-6B 가 필수이며, 서빙 시 런타임 HF 다운로드 대신 등록된
+    ESMC-6B 의 MLflow 본을 로컬 로드한다. 백본이 등록(+run)돼 있지 않으면 서빙이 성립하지 않는다.
+    이 헬퍼를 구조 검증(_validate_workflow_definition_checks)과 배포(execute) 양쪽에서 공유한다.
+    """
+    from services.model import ESMFOLD2_BACKBONE_MODEL_NAME
+
+    needs_backbone = False
+    for mid in model_ids:
+        if not mid:
+            continue
+        model = ModelService.get(db, mid)
+        if model and getattr(model, "task", None) == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+            needs_backbone = True
+            break
+    if not needs_backbone:
+        return None
+
+    backbone = ModelService.get_by_name(db, ESMFOLD2_BACKBONE_MODEL_NAME)
+    registry = getattr(backbone, "registry", None) if backbone else None
+    if not backbone or not registry or not registry.run_id:
+        return (
+            f"구조예측(ESMFold2) 서빙에는 백본 모델 '{ESMFOLD2_BACKBONE_MODEL_NAME}' 이 먼저 등록돼 있어야 합니다. "
+            f"'{ESMFOLD2_BACKBONE_MODEL_NAME}' 을 등록한 뒤 다시 배포하세요."
+        )
+    return None
+
+
+def _validate_structure_prediction_backbone(db: Session, workflow: Workflow) -> None:
+    """배포(execute) 시 구조예측(ESMFold2) 백본 ESMC-6B 준비를 강제한다(공유 헬퍼 재사용). 미비 시 400."""
+    model_ids = [c.model_id for c in workflow.components if c.type == ComponentType.MODEL and c.model_id]
+    err = _structure_prediction_backbone_error(db, model_ids)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+
+
+def _validate_workflow_serving_decisions(db: Session, workflow: Workflow) -> None:
+    """MODEL 컴포넌트별 서빙 경로 판정. 배포 불가 사유가 하나라도 있으면 422."""
+    s = get_settings()
+    reasons: List[str] = []
+    for comp in workflow.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        model = db.get(Model, comp.model_id)
+        decision = decide_workflow_serving(model, s)
+        if decision.reject_reason:
+            reasons.append(f"'{comp.name}': {decision.reject_reason}")
+    if reasons:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="; ".join(reasons))
+
+
 @router.post("/{workflow_id}/execute", response_model=WorkflowExecuteResponse)
-async def execute_workflow(
+def execute_workflow(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    execute_data: WorkflowExecuteRequest,
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
-    워크플로우 실행 (KServe 배포 + Kubeflow 파이프라인 실행)
+    워크플로우 실행 (서빙 배포 + Kubeflow 파이프라인)
 
-    워크플로우를 실행하여 ML 모델을 배포합니다.
-    Kubeflow 파이프라인을 통해 KServe InferenceService를 생성하고,
-    모델 서빙 엔드포인트를 활성화합니다.
+    워크플로우를 실행하여 MODEL 컴포넌트를 배포합니다. 배포 유형(`deployment_type`)은 모델·설정에 따라
+    **KServe InferenceService**, **Ollama Deployment/Service**, 또는 **REMOTE**(원격 LLM 스텁·콜백만)로 결정됩니다.
+    Kubeflow 파이프라인은 위 유형에 맞는 태스크(또는 REMOTE 알림용 경량 컴포넌트)를 실행합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
 
-    ## Request Body (WorkflowExecuteRequest)
-    - **parameters** (Dict[str, Any], optional): 실행 파라미터
-        - 커스텀 설정 값들을 전달할 수 있음
-        - 예: {"gpu_enabled": true, "replicas": 2}
+    ## Request Body
+    - 없음. GPU/CPU·GPU 장 수·노드 지정 등은 백엔드가 사전정의 모델 메타 및 설정으로 결정한다.
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1499,10 +1653,9 @@ async def execute_workflow(
 
     ## Process
     1. 지식베이스가 모델 앞에 있는지 검증
-    2. MODEL 컴포넌트를 KServe InferenceService로 배포
-    3. 워크플로우를 Kubeflow 파이프라인으로 변환
-    4. 파이프라인 실행 및 모니터링 시작
-    5. KServeDeployment 테이블에 배포 정보 기록
+    2. MODEL별 서빙 계획·PVC(Ollama)·`model_workflow_deployments` 레코드 생성(REMOTE는 즉시 DEPLOYED 처리 가능)
+    3. 워크플로우를 Kubeflow 파이프라인으로 변환·실행
+    4. 파이프라인·콜백으로 배포 상태 및 워크플로 ACTIVE 반영
 
     ## Notes
     - 워크플로우 상태가 ERROR인 경우만 실행 불가
@@ -1513,15 +1666,29 @@ async def execute_workflow(
     - 파이프라인 완료 시 워크플로우 상태가 자동으로 ACTIVE로 변경됨
 
     ## Errors
-    - 400: 워크플로우가 ERROR 상태이거나 지식베이스가 모델 뒤에 있음
+    - 400: MODEL 컴포넌트 없음, ERROR 상태, 지식베이스 순서 위반, 서빙 메타 검증 실패
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
+    - 409: 이미 배포 중이거나 배포 완료된 상태
     - 500: 실행 중 오류 발생
     """
     workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
 
     if not workflow:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    model_component_count = sum(1 for c in workflow.components if c.type == ComponentType.MODEL)
+    if model_component_count == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="워크플로우에 MODEL 컴포넌트가 없어 배포할 수 없습니다.",
+        )
+
+    if ModelWorkflowDeploymentService.has_active_deployment(db, workflow_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 배포 중이거나 배포가 완료된 워크플로우입니다. 재배포가 필요하면 삭제·정리 후 다시 시도해 주세요.",
+        )
 
     # ERROR 상태인 경우만 실행 불가
     if workflow.status == WorkflowStatus.ERROR:
@@ -1536,10 +1703,32 @@ async def execute_workflow(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
+    # 구조예측(ESMFold2) 컴포넌트가 있으면 백본 ESMC-6B 등록·레지스트리 준비를 배포 전에 강제한다.
+    _validate_structure_prediction_backbone(db, workflow)
+
+    # 서빙 경로를 먼저 판정해, 배포할 수 없는 조합(원격 전용인데 원격 미설정 등)은
+    # PVC 복제·GPU 예약 같은 부작용이 생기기 전에 막는다.
+    _validate_workflow_serving_decisions(db, workflow)
+
+    # 배포 행은 서빙 계획·PVC 확보가 끝난 뒤에야 생기므로, 그 사이에 들어온 같은 워크플로의 재요청은
+    # 위의 has_active_deployment 검사를 그냥 통과한다. 실행 구간 자체를 워크플로 단위로 직렬화한다.
+    from core.serving.workflow_serving_volume_lock import get_workflow_serving_volume_lock, workflow_execute_guard_key
+
+    exec_guard = get_workflow_serving_volume_lock()
+    exec_guard_key = workflow_execute_guard_key(workflow_id)
+    if not exec_guard.try_acquire_nonblocking(exec_guard_key):
+        logger.warning(f"Workflow execute already in progress: {workflow_id}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이 워크플로우의 배포가 이미 진행 중입니다. 완료될 때까지 기다려 주세요.",
+        )
+
     try:
+        from core.serving.serving_model_workflow_pvc import PvcReplicationConflict
+
         # WorkflowExecutor를 사용하여 워크플로우 실행
         executor = WorkflowExecutor(db)
-        execution_result = executor.execute_workflow(workflow=workflow, parameters=execute_data.parameters)
+        execution_result = executor.execute_workflow(workflow=workflow, parameters={})
 
         return WorkflowExecuteResponse(
             workflow_id=execution_result["workflow_id"],
@@ -1548,11 +1737,29 @@ async def execute_workflow(
             message=execution_result["message"],
         )
 
+    except PvcReplicationConflict as e:
+        logger.warning(f"Workflow execute PVC lock conflict: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=e.message,
+        )
+
+    except ServingCapacityError as e:
+        logger.warning(f"Workflow execute rejected (insufficient node capacity): {e}")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+    except ValueError as e:
+        logger.warning(f"Workflow execution rejected (serving meta / validation): {e}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     except Exception as e:
         logger.error(f"Failed to execute workflow {workflow_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to execute workflow: {str(e)}"
         )
+
+    finally:
+        exec_guard.release(exec_guard_key)
 
 
 @router.get("/{workflow_id}/status")
@@ -1563,7 +1770,7 @@ def get_workflow_execution_status(
     워크플로우 실행 상태 조회
 
     워크플로우의 실행 상태와 배포된 모델들의 상태를 종합적으로 조회합니다.
-    KServe 배포 상태와 Kubeflow 파이프라인 실행 상태를 모두 포함합니다.
+    `model_workflow_deployments` 기반 배포 요약(KSERVE·OLLAMA·REMOTE)과 Kubeflow 파이프라인 실행 ID를 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
@@ -1583,25 +1790,16 @@ def get_workflow_execution_status(
         - 각 항목은 다음 필드를 포함:
         - **component_id** (str): 컴포넌트 UUID
             - 워크플로우 컴포넌트의 고유 ID
-        - **service_name** (str): KServe InferenceService 이름
-            - Kubernetes 리소스 이름 (DNS 1035 규칙 준수)
-        - **service_hostname** (str): KServe 서비스 호스트명
-            - Istio Virtual Service 라우팅에 사용
-            - 형식: `{service_name}.{namespace}.example.com`
-        - **model_name** (str): 컴포넌트 이름
-            - 워크플로우 컴포넌트의 표시명 (사용자가 지정한 이름)
-        - **sanitized_model_name** (str): 정제된 모델 이름
-            - DNS 규칙에 맞게 변환된 모델 이름 (슬래시가 하이픈으로 변경됨)
-            - KServe 엔드포인트에서 실제로 사용되는 이름
-            - `model_name`과는 다를 수 있음 (model_name은 컴포넌트 이름, sanitized_model_name은 실제 배포된 모델 이름)
-        - **model_id** (int, optional): 모델 ID
-            - 컴포넌트에 연결된 모델의 ID
-            - MODEL 타입 컴포넌트인 경우에만 포함
-        - **internal_url** (str, optional): 내부 접근 URL
-            - 클러스터 내부에서 접근 가능한 URL
-            - 형식: `http://{service_name}.{namespace}.svc.cluster.local`
-        - **gateway_url** (str): 게이트웨이 URL
-            - 외부에서 접근 가능한 KServe Gateway 엔드포인트 URL
+        - **deployment_type** (str, optional): `KSERVE` | `OLLAMA` | `REMOTE`
+        - **service_name** (str): Kubernetes 리소스 또는 식별용 이름 (DNS 1035 규칙 준수)
+        - **service_hostname** (str): KServe 게이트웨이 라우팅용 호스트명 등 (Ollama·REMOTE는 빈 문자열일 수 있음)
+        - **model_name** (str): 배포 레코드에 저장된 모델/컴포넌트 식별명 (REMOTE 시 맵 기준 원격 모델명 등)
+        - **sanitized_model_name** (str): API 응답용 정제 이름 (레거시 필드, `model_name`과 동일할 수 있음)
+        - **model_id** (int, optional): 컴포넌트에 연결된 모델 ID
+        - **internal_url** (str, optional): 클러스터 내부 접근 URL (Ollama ClusterIP 등) 또는 REMOTE 베이스 URL
+        - **gateway_url** (str|None): 설정된 KServe 게이트웨이 베이스 URL(없으면 null)
+        - **public_url** (str|None): KSERVE+게이트웨이 설정 시에만 추론 URL
+        - **backend_api_url** (str|None): `internal_url` 우선, REMOTE는 `remote_api_url` 폴백
         - **status** (str): 배포 상태
             - 가능한 값:
                 - "DEPLOYING": 배포 중
@@ -1620,7 +1818,7 @@ def get_workflow_execution_status(
     - 워크플로우가 실행되지 않았다면 `kubeflow_run_id`는 null
     - `deployed_models`는 MODEL 타입 컴포넌트가 있는 경우만 포함
     - 모든 조회는 DB 기반으로 수행되며, Kubernetes나 Kubeflow를 직접 조회하지 않음
-    - 배포 상태는 `kserve_deployments` 테이블의 정보를 기반으로 함
+    - 배포 상태는 `model_workflow_deployments` 테이블의 정보를 기반으로 함
     - `deployed_models` 조회 실패 시에도 에러를 발생시키지 않고 빈 리스트로 처리됨
 
     ## Errors
@@ -1650,8 +1848,10 @@ def get_workflow_execution_status(
         }
 
 
-@router.post("/{workflow_id}/components/{component_id}/deployment-status")
-async def update_component_deployment_status(
+@router.post(
+    "/{workflow_id}/components/{component_id}/deployment-status", dependencies=[Depends(verify_internal_api_key)]
+)
+def update_component_deployment_status(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
@@ -1664,25 +1864,25 @@ async def update_component_deployment_status(
     error_message: Optional[str] = Body(None),
 ):
     """
-    컴포넌트의 KServe 배포 상태를 업데이트합니다.
+    컴포넌트의 워크플로 서빙 배포 상태를 업데이트합니다.
 
-    **중요**: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
+    **중요**: 이 API는 Kubeflow Pipeline(또는 파이프라인 내 경량 컴포넌트)에서만 호출되는 내부 API입니다.
     프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
 
-    Kubeflow Pipeline 실행 중 컴포넌트의 KServe 배포가 완료되면,
-    Pipeline 내부에서 자동으로 이 API를 호출하여 배포 상태를 업데이트합니다.
+    MODEL 배포(KServe·Ollama·REMOTE 알림 등)가 끝나면 파이프라인이 이 API를 호출해
+    `model_workflow_deployments` 상태를 갱신하고, 콜백 로직에 따라 워크플로를 ACTIVE로 전환할 수 있습니다.
 
     ## Path Parameters
     - **workflow_id** (str): 워크플로우 ID
     - **component_id** (str): 컴포넌트 UUID
 
     ## Request Body
-    - **service_name** (str, required): KServe 서비스 이름
-    - **service_hostname** (str, required): KServe 서비스 호스트명
-    - **model_name** (str, required): 배포된 모델 이름
-    - **status** (str, required): 배포 상태 (예: "ready", "failed")
-    - **internal_url** (str, optional): 내부 서비스 URL
-    - **error_message** (str, optional): 배포 실패 시 에러 메시지
+    - **service_name** (str, required): 식별용 서비스/리소스 이름
+    - **service_hostname** (str, required): KServe 라우팅용 호스트명(없으면 빈 문자열 가능)
+    - **model_name** (str, required): 배포 레코드에 반영할 모델명(정제명 등)
+    - **status** (str, required): `"deployed"` | `"failed"` 등 파이프라인에서 전달하는 상태 문자열
+    - **internal_url** (str, optional): Ollama ClusterIP URL, REMOTE 베이스 URL 등
+    - **error_message** (str, optional): 배포 실패 시 메시지
 
     ## Response
     - **message** (str): 업데이트 결과 메시지
@@ -1690,13 +1890,12 @@ async def update_component_deployment_status(
         - service_name (str): 서비스 이름
         - service_hostname (str): 서비스 호스트명
         - model_name (str): 모델 이름
-        - status (str): 배포 상태
-        - internal_url (str, optional): 내부 서비스 URL
+        - status (str): DB상 배포 상태 (`DEPLOYED`/`FAILED` 등 enum 값)
+        - deployed_at (str, optional): 배포 완료 시각
 
     ## Notes
-    - 이 API는 Kubeflow Pipeline의 컴포넌트 내부에서만 호출됩니다
-    - 프론트엔드나 사용자 애플리케이션에서는 직접 호출하지 않아야 합니다
-    - 배포 상태는 Pipeline 실행 중 자동으로 업데이트됩니다
+    - `X-Internal-API-Key` 헤더(설정 시)로만 호출 가능
+    - KServe·Ollama·REMOTE noop 경로가 동일 엔드포인트를 사용할 수 있음
 
     ## Errors
     - 404: 워크플로우를 찾을 수 없음
@@ -1713,7 +1912,7 @@ async def update_component_deployment_status(
             )
 
         # Service를 통한 배포 상태 업데이트
-        deployment = KServeDeploymentService.update_deployment_status(
+        deployment = ModelWorkflowDeploymentService.update_deployment_status(
             db=db,
             workflow_id=workflow_id,
             component_id=component_id,
@@ -1743,699 +1942,649 @@ async def update_component_deployment_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{workflow_id}/models/{component_id}/inference", deprecated=True)
-async def inference_workflow_model(
-    *,
-    db: Session = SessionDepends,
-    workflow_id: str,
-    component_id: str,
-    image: Optional[UploadFile] = File(None),
-    text: Optional[str] = Form(None),
-    search_text: Optional[str] = Form(None, description="Knowledge Base 검색 결과 텍스트"),
-    current_user: UserSchema = Depends(get_current_user),
-):
-    """
-    배포된 모델에 추론 요청 (Deprecated)
-
-    ⚠️ 이 API는 deprecated 되었습니다. 대신 다음 API를 사용하세요:
-    - RAG 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/rag`
-    - ML 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/ml`
-
-    워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
-    - KServe 모델: KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
-    - Ollama 모델: Ollama 채팅 API(/api/chat)를 사용하며, LLM 모델을 지원합니다.
-
-    ## Path Parameters
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID (WorkflowComponent.id)
-        - 컴포넌트 ID 조회 방법:
-          1. 워크플로우 상세 조회: `GET /api/v1/workflows/{workflow_id}`
-             - 응답의 `components` 배열에서 `id` 필드 확인
-             - `type`이 "MODEL"인 컴포넌트의 `id` 사용
-          2. 배포된 모델 목록 조회: `GET /api/v1/workflows/{workflow_id}/models`
-             - 응답의 `deployed_models` 배열에서 `component_id` 필드 확인
-             - 배포된 모델만 조회 가능 (DEPLOYED 상태)
-
-    ## Request Body (Form Data)
-    - **image** (file, optional): 분석할 이미지 파일
-        - KServe 모델인 경우 필수
-        - Ollama 모델인 경우 선택 (텍스트와 함께 사용 가능)
-        - 지원 형식: JPEG, PNG, GIF, WebP
-        - Base64로 인코딩되어 서버로 전송
-    - **text** (str, optional): 텍스트 입력
-        - Ollama 모델인 경우 필수 (image가 없는 경우)
-        - KServe 모델인 경우 사용하지 않음
-    - **search_text** (str, optional): Knowledge Base 검색 결과 텍스트
-        - Knowledge Base 컴포넌트에서 검색된 결과를 전달하는 파라미터
-        - Ollama 모델인 경우에만 사용됨
-        - prompt_id가 설정된 경우: prompt의 context 변수에 자동 치환
-        - prompt_id가 없는 경우: [참고자료] 태그와 함께 system 메시지로 추가
-
-    ## Response (통일된 형식)
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID
-    - **model_info** (dict): 모델 정보
-        - component_id (str): 컴포넌트 ID
-        - service_name (str): 서비스 이름
-        - sanitized_model_name (str): 정제된 모델 이름 (DNS 규칙 준수)
-        - model_id (int, optional): 모델 ID
-        - original_model_name (str, optional): 원본 모델 이름
-        - model_type (str, optional): 모델 타입 (예: "ODM", "LLM")
-        - model_format (str, optional): 모델 포맷 (예: "pytorch", "gguf")
-    - **result** (dict): 추론 결과
-        - **model_type** (str): 모델 타입 ("KServe" 또는 "Ollama")
-        - KServe 모델인 경우:
-            - **predictions** (List[dict]): 추론 결과 목록
-                - 각 항목은 다음 필드를 포함:
-                    - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
-                    - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
-                    - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
-            - **image_info** (dict, optional): 이미지 메타데이터
-                - **original_size** (dict): 원본 이미지 크기
-                - **model_input_size** (dict): 모델 입력 크기
-        - Ollama 모델인 경우:
-            - **response** (str): LLM 응답 텍스트
-            - **full_response** (dict, optional): Ollama API 전체 응답
-    - **raw_response** (dict, optional): 원본 응답 (예상치 못한 형식인 경우에만 포함)
-
-    ## Monitoring
-    - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
-    - 응답 시간, 성공/실패 여부, 사용자 정보 포함
-    - 서비스와 연결된 경우만 모니터링 데이터 저장
-
-    ## Notes
-    ### KServe 모델
-    - Istio Gateway를 통해 KServe InferenceService에 접근
-    - V2 프로토콜 엔드포인트: /v2/models/{model_name}/infer
-    - Host 헤더로 Istio 라우팅 제어
-
-    ### Ollama 모델
-    - internal_url을 통해 Ollama 서비스에 직접 접근 (예: http://localhost:11434)
-    - 채팅 API 엔드포인트: /api/chat
-    - model 필드에 repo_id 사용 (예: "gemma3", "ahmgam/medllama3-v20")
-    - 이미지는 base64로 인코딩되어 메시지에 포함됨
-
-    ## Errors
-    - 400: 잘못된 요청
-        - Ollama 모델인 경우: text 인자가 없으면 에러
-        - KServe 모델인 경우: image 인자가 없으면 에러
-        - 잘못된 이미지 파일
-    - 401: 인증되지 않은 사용자
-    - 404: 워크플로우나 컴포넌트를 찾을 수 없음
-    - 503: 모델 서비스가 준비되지 않음
-    - 504: 추론 요청 타임아웃
-    """
-    import base64  # noqa: F401, F811
-    import time  # noqa: F401, F811
-
-    import requests  # noqa: F401, F811
-    from services.app_service import ServiceMonitoringService
-
-    # 요청 시작 시간 기록
-    start_time = time.time()
-
-    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
-
-    if not workflow:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
-
-    # Service ID 확인 (워크플로우가 서비스에 연결되어 있는지)
-    service_id = workflow.service_id
-    if not service_id:
-        logger.warning(f"Workflow {workflow_id} is not associated with a service. Monitoring will be skipped.")
-        # 서비스가 없어도 추론은 진행 (하위 호환성)
-
-    # Service를 통한 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component_id)
-
-    if not is_ready:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE if deployment else status.HTTP_404_NOT_FOUND,
-            detail=error_msg,
-        )
-
-    # 배포 정보에서 필요한 값들 추출
-    infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"  # settings에서 가져오기
-    service_hostname = deployment.service_hostname
-    model_name = deployment.model_name  # 이미 정제된 이름 (슬래시가 하이픈으로 변경됨)
-    service_name = deployment.service_name
-
-    # 모델 정보 가져오기 (추가 메타데이터용)
-    model_info = {"component_id": component_id, "service_name": service_name, "sanitized_model_name": model_name}
-
-    # 컴포넌트의 모델 정보 추가
-    component = WorkflowService.get_component_by_id_and_workflow_id(db, component_id, workflow_id)
-
-    is_ollama_model = False
-    model_repo_id = None
-
-    if component and component.model_id:
-        model = ModelService.get(db, component.model_id)
-        if model:
-            model_info.update(
-                {
-                    "model_id": model.id,
-                    "original_model_name": model.name,
-                    "model_type": model.type_info.name if model.type_info else None,
-                    "model_format": model.format_info.name if model.format_info else None,
-                }
-            )
-            # Ollama 모델 확인 (provider가 ollama이고 format이 gguf인 경우)
-            if (
-                hasattr(model, "provider_info")
-                and model.provider_info
-                and model.provider_info.name.lower() == ModelProviderEnum.OLLAMA.value.lower()
-            ):
-                if (
-                    hasattr(model, "format_info")
-                    and model.format_info
-                    and model.format_info.name.lower() == ModelFormatEnum.GGUF.value.lower()
-                ):
-                    is_ollama_model = True
-                    model_repo_id = model.repo_id
-
-    # 입력 검증: 모델 타입에 따라 필수 인자 확인
-    if is_ollama_model:
-        # Ollama 모델인 경우: text 필수 (image는 선택)
-        if not text and not image:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ollama model requires either 'text' or 'image' parameter",
-            )
-    else:
-        # KServe 모델인 경우: image 필수
-        if not image:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="KServe model requires 'image' parameter",
-            )
-
-    # 이미지 읽기 및 base64 인코딩 (image가 제공된 경우)
-    image_base64 = None
-    if image:
-        try:
-            image_bytes = await image.read()
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        except Exception as e:
-            logger.error(f"Error reading image: {e}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unable to read image file")
-
-    # Ollama 모델인 경우와 KServe 모델인 경우 분기 처리
-    if is_ollama_model:
-        # Ollama 모델: /api/chat 엔드포인트 사용
-        if not deployment.internal_url:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Internal URL not available for Ollama model deployment",
-            )
-
-        # internal_url 사용 (예: http://localhost:11434)
-        ollama_url = deployment.internal_url.rstrip("/")
-        url = f"{ollama_url}/api/chat"
-
-        # Ollama 채팅 API 형식으로 요청 데이터 구성
-        # 텍스트와 이미지를 모두 지원 (단, 모델이 vision을 지원하는 경우에만 이미지 사용)
-        # Ollama API는 content가 문자열이어야 하고, images는 별도 필드로 전달
-
-        # 텍스트가 없으면 에러 (이미 검증했지만 안전을 위해)
-        if not text:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Ollama model requires 'text' parameter",
-            )
-
-        # 메시지 리스트 초기화
-        messages = []
-
-        # 프롬프트 처리
-        if component and component.prompt_id:
-            # prompt_id가 설정된 경우: 프롬프트 조회 및 처리
-            prompt = prompt_repository.get_with_variables(db, component.prompt_id)
-            if prompt:
-                # prompt_variables 중 context 변수가 있는지 확인
-                has_context_variable = False
-                if prompt.prompt_variables:
-                    for var in prompt.prompt_variables:
-                        if var.name == PromptVariableType.CONTEXT.value:
-                            has_context_variable = True
-                            break
-
-                # prompt.content 처리
-                prompt_content = prompt.content
-
-                # context 변수가 있고 search_text가 제공된 경우 치환
-                if has_context_variable and search_text:
-                    # {context} 또는 {{context}} 패턴을 search_text로 치환
-                    prompt_content = prompt_content.replace("{context}", search_text)
-                    prompt_content = prompt_content.replace("{{context}}", search_text)
-
-                # role: system 메시지에 prompt.content 추가
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": prompt_content,
-                    }
-                )
-        elif search_text:
-            # prompt_id가 없고 search_text가 있는 경우: [참고자료] 태그와 함께 system 메시지로 추가
-            messages.append(
-                {
-                    "role": "system",
-                    "content": f"[참고자료]\n{search_text}",
-                }
-            )
-
-        # role: user 메시지에 text 추가
-        user_message = {
-            "role": "user",
-            "content": text,  # content는 항상 문자열 (텍스트 필수)
-        }
-
-        # 이미지가 있고 모델이 vision을 지원하는 경우에만 images 필드 추가
-        # 주의: 모든 모델이 이미지를 지원하는 것은 아니므로,
-        # vision 모델이 아닌 경우 이미지를 보내면 에러가 발생할 수 있음
-        # 현재는 텍스트만 있는 모델을 가정하므로 이미지는 무시
-        # TODO: 모델 정보에서 vision 지원 여부를 확인하여 조건부로 images 추가
-        if image_base64:
-            logger.warning(
-                f"Image provided but model {model_repo_id} may not support vision. "
-                "Sending text only. If this is a vision model, update the code to include images field."
-            )
-            # Vision 모델이 아닌 경우 이미지를 보내지 않음
-            # Vision 모델인 경우 아래 주석을 해제하고 사용
-            # user_message["images"] = [image_base64]  # base64 문자열 배열
-
-        messages.append(user_message)
-
-        data = {
-            "model": model_repo_id,  # repo_id 사용
-            "messages": messages,
-            "stream": False,
-        }
-
-        headers = {"Content-Type": "application/json"}
-        kf_manager = KubeflowManager()
-        cookies = (
-            kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
-        )  # Ollama는 인증 불필요
-
-        logger.info(f"Sending Ollama inference request to {url} with model {model_repo_id}")
-    else:
-        # KServe V2 Protocol 형식으로 요청 데이터 구성
-        payload = {"image": image_base64}
-
-        # V2 프로토콜 요청 형식
-        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
-
-        # 헤더 설정 (Istio Virtual Service routing을 위한 Host 헤더)
-        headers = {"Content-Type": "application/json", "Host": service_hostname}  # Istio가 라우팅하는데 사용
-
-        # Kubeflow 인증이 필요한 경우
-        kf_manager = KubeflowManager()
-        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
-
-        # V2 프로토콜 엔드포인트로 요청 (Istio Gateway 경유)
-        url = f"{infer_svc_url}/v2/models/{model_name}/infer"
-
-        logger.info(f"Sending KServe inference request to {url}")
-
-    response_time_ms = 0.0
-
-    try:
-        # Ollama 모델의 경우 모델 로딩 시간과 추론 시간을 고려하여 타임아웃을 300초(5분)로 설정
-        # 큰 모델(Qwen3-30B 등)의 경우 로딩에 30초 이상 소요될 수 있음
-        # KServe 모델의 경우 30초로 유지
-        timeout = 300 if is_ollama_model else 30
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=timeout)
-        response.raise_for_status()
-
-        # 응답 시간 계산
-        response_time_ms = (time.time() - start_time) * 1000  # 밀리초로 변환
-
-        result = response.json()
-
-        # 통일된 응답 형식으로 변환
-        unified_result = {
-            "workflow_id": workflow_id,
-            "component_id": component_id,
-            "model_info": model_info,
-            "result": {
-                "model_type": "Ollama" if is_ollama_model else "KServe",
-            },
-        }
-
-        # Ollama 모델과 KServe 모델의 응답 처리 분기
-        if is_ollama_model:
-            # Ollama 채팅 API 응답 처리
-            # Ollama 응답 형식:
-            # {"model": "...", "created_at": "...", "message": {"role": "assistant",
-            # "content": "..."}, "done": true}
-            ollama_message = result.get("message", {})
-            ollama_content = ollama_message.get("content", "") if isinstance(ollama_message, dict) else ""
-
-            unified_result["result"]["response"] = ollama_content
-            unified_result["result"]["full_response"] = result
-
-            # 모니터링 데이터 기록 (성공)
-            if service_id:
-                try:
-                    ServiceMonitoringService.record_inference_request(
-                        db=db,
-                        service_id=service_id,
-                        workflow_id=workflow_id,
-                        user_id=current_user.id,
-                        response_time_ms=response_time_ms,
-                        is_success=True,
-                        is_object_detection=False,  # Ollama는 LLM이므로 Object Detection이 아님
-                    )
-                    db.commit()
-                except Exception as e:
-                    logger.error(f"Failed to record monitoring data: {e}")
-                    db.rollback()
-
-            return unified_result
-        else:
-            # KServe V2 프로토콜 응답 파싱
-            outputs = result.get("outputs", [])
-            if outputs and len(outputs) > 0:
-                prediction_data = outputs[0].get("data", [])
-                if prediction_data and len(prediction_data) > 0:
-                    # 첫 번째 출력 데이터 반환
-                    response_data = prediction_data[0]
-
-                    # JSON 문자열인 경우 파싱
-                    if isinstance(response_data, str):
-                        try:
-                            response_data = json.loads(response_data)
-                        except Exception:
-                            pass
-
-                    # response_data가 dict이고 predictions와 image_info를 포함하는 경우
-                    if isinstance(response_data, dict):
-                        predictions = response_data.get("predictions", response_data)
-                        image_info = response_data.get("image_info", {})
-
-                        logger.info(f"Parsed predictions with image_info: {image_info}")
-
-                        unified_result["result"]["predictions"] = predictions
-                        if image_info:
-                            unified_result["result"]["image_info"] = image_info
-
-                        # 모니터링 데이터 기록 (성공)
-                        if service_id:
-                            try:
-                                ServiceMonitoringService.record_inference_request(
-                                    db=db,
-                                    service_id=service_id,
-                                    workflow_id=workflow_id,
-                                    user_id=current_user.id,
-                                    response_time_ms=response_time_ms,
-                                    is_success=True,
-                                    is_object_detection=True,  # 현재는 Object Detection만 지원
-                                )
-                                db.commit()
-                            except Exception as e:
-                                logger.error(f"Failed to record monitoring data: {e}")
-                                # 모니터링 실패해도 추론 결과는 반환
-                                db.rollback()
-
-                        return unified_result
-                    else:
-                        # 하위 호환성: response_data가 dict가 아닌 경우
-                        unified_result["result"]["predictions"] = response_data
-
-                        # 모니터링 데이터 기록 (성공)
-                        if service_id:
-                            try:
-                                ServiceMonitoringService.record_inference_request(
-                                    db=db,
-                                    service_id=service_id,
-                                    workflow_id=workflow_id,
-                                    user_id=current_user.id,
-                                    response_time_ms=response_time_ms,
-                                    is_success=True,
-                                    is_object_detection=True,
-                                )
-                                db.commit()
-                            except Exception as e:
-                                logger.error(f"Failed to record monitoring data: {e}")
-                                db.rollback()
-
-                        return unified_result
-
-            # 예상치 못한 응답 형식
-            unified_result["raw_response"] = result
-
-            # 모니터링 데이터 기록 (성공 - 응답은 받았지만 형식이 예상과 다름)
-            if service_id:
-                try:
-                    ServiceMonitoringService.record_inference_request(
-                        db=db,
-                        service_id=service_id,
-                        workflow_id=workflow_id,
-                        user_id=current_user.id,
-                        response_time_ms=response_time_ms,
-                        is_success=True,
-                        is_object_detection=True,
-                    )
-                    db.commit()
-                except Exception as e:
-                    logger.error(f"Failed to record monitoring data: {e}")
-                    db.rollback()
-
-            return unified_result
-
-    except requests.exceptions.HTTPError as http_err:
-        # 응답 시간 계산
-        response_time_ms = (time.time() - start_time) * 1000
-
-        logger.error(f"HTTP error occurred: {http_err}")
-        logger.error(f"Response content: {http_err.response.text if hasattr(http_err, 'response') else 'N/A'}")
-
-        # 모니터링 데이터 기록 (실패)
-        if service_id:
-            try:
-                ServiceMonitoringService.record_inference_request(
-                    db=db,
-                    service_id=service_id,
-                    workflow_id=workflow_id,
-                    user_id=current_user.id,
-                    response_time_ms=response_time_ms,
-                    is_success=False,
-                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
-                )
-                db.commit()
-            except Exception as e:
-                logger.error(f"Failed to record monitoring data: {e}")
-                db.rollback()
-
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Model service returned error: {str(http_err)}"
-        )
-    except requests.exceptions.ConnectionError as conn_err:
-        # 응답 시간 계산
-        response_time_ms = (time.time() - start_time) * 1000
-
-        logger.error(f"Connection error: {conn_err}")
-
-        # 모니터링 데이터 기록 (실패)
-        if service_id:
-            try:
-                ServiceMonitoringService.record_inference_request(
-                    db=db,
-                    service_id=service_id,
-                    workflow_id=workflow_id,
-                    user_id=current_user.id,
-                    response_time_ms=response_time_ms,
-                    is_success=False,
-                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
-                )
-                db.commit()
-            except Exception as e:
-                logger.error(f"Failed to record monitoring data: {e}")
-                db.rollback()
-
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to connect to model service. Service may not be ready.",
-        )
-    except requests.exceptions.Timeout as timeout_err:
-        # 응답 시간 계산
-        response_time_ms = (time.time() - start_time) * 1000
-
-        logger.error(f"Request timeout: {timeout_err}")
-
-        # 모니터링 데이터 기록 (실패 - 타임아웃)
-        if service_id:
-            try:
-                ServiceMonitoringService.record_inference_request(
-                    db=db,
-                    service_id=service_id,
-                    workflow_id=workflow_id,
-                    user_id=current_user.id,
-                    response_time_ms=response_time_ms,
-                    is_success=False,
-                    is_object_detection=not is_ollama_model,  # Ollama는 LLM이므로 Object Detection이 아님
-                )
-                db.commit()
-            except Exception as e:
-                logger.error(f"Failed to record monitoring data: {e}")
-                db.rollback()
-
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Model inference request timed out")
-    except Exception as e:
-        # 응답 시간 계산
-        response_time_ms = (time.time() - start_time) * 1000
-
-        logger.error(f"Unexpected error occurred: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Unexpected error: {str(e)}")
-
-
 def _get_workflow_execution_order(workflow: Workflow) -> List[WorkflowComponent]:
-    """
-    워크플로우의 실행 순서를 결정 (START -> KNOWLEDGE_BASE -> MODEL -> END)
-
-    Args:
-        workflow: 워크플로우
-
-    Returns:
-        실행 순서대로 정렬된 컴포넌트 리스트
-    """
-    # START 컴포넌트 찾기
-    start_components = [c for c in workflow.components if c.type == ComponentType.START]
-    if not start_components:
-        return []
-
-    # 컴포넌트 ID -> 컴포넌트 매핑
+    """위상 정렬(Kahn's algorithm) 기반 실행 순서 결정"""
     component_map = {c.id: c for c in workflow.components}
 
-    # 연결 정보로 그래프 구성 (source -> target)
-    graph = {}
+    in_degree = {c.id: 0 for c in workflow.components}
+    graph: Dict[str, List[str]] = {}
     for conn in workflow.component_connections:
-        if conn.source_component_id not in graph:
-            graph[conn.source_component_id] = []
-        graph[conn.source_component_id].append(conn.target_component_id)
+        graph.setdefault(conn.source_component_id, []).append(conn.target_component_id)
+        in_degree[conn.target_component_id] = in_degree.get(conn.target_component_id, 0) + 1
 
-    # BFS로 워크플로우 순회
-    visited = set()
-    execution_order = []
+    queue = deque([cid for cid, deg in in_degree.items() if deg == 0])
+    execution_order: List[WorkflowComponent] = []
 
-    def traverse(component_id: str):
-        if component_id in visited:
-            return
-        visited.add(component_id)
-
-        component = component_map.get(component_id)
-        if not component:
-            return
-
-        # START, END는 제외하고 KNOWLEDGE_BASE와 MODEL만 추가
-        if component.type in [ComponentType.KNOWLEDGE_BASE, ComponentType.MODEL]:
+    while queue:
+        current_id = queue.popleft()
+        component = component_map.get(current_id)
+        if component and component.type in (ComponentType.KNOWLEDGE_BASE, ComponentType.MODEL):
             execution_order.append(component)
 
-        # 다음 컴포넌트로 이동
-        for next_id in graph.get(component_id, []):
-            traverse(next_id)
-
-    # 모든 START 컴포넌트에서 시작
-    for start_component in start_components:
-        traverse(start_component.id)
+        for next_id in graph.get(current_id, []):
+            in_degree[next_id] -= 1
+            if in_degree[next_id] == 0:
+                queue.append(next_id)
 
     return execution_order
+
+
+# ============= Config Defaults & Effective Config =============
+
+DEFAULT_LLM_CONFIG = {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 2048,
+}
+
+DEFAULT_KB_CONFIG = {
+    "top_k": 3,
+}
+
+CONFIG_TO_OLLAMA_OPTIONS = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "max_tokens": "num_predict",
+}
+
+
+def _get_effective_config(component: WorkflowComponent) -> dict:
+    """실행 시 config 기본값 병합"""
+    if component.type == ComponentType.MODEL:
+        defaults = DEFAULT_LLM_CONFIG.copy()
+    elif component.type == ComponentType.KNOWLEDGE_BASE:
+        defaults = DEFAULT_KB_CONFIG.copy()
+    else:
+        return {}
+
+    if component.config:
+        defaults.update(component.config)
+    return defaults
 
 
 # ============= Workflow Validation Helper Functions =============
 
 
-def _validate_workflow_definition(db: Session, definition: Any) -> None:
-    """
-    워크플로우 정의 검증 (KNOWLEDGE_BASE와 ODM MODEL 공존 검증 및 순서 검증)
+@dataclass
+class ValidationCheckResult:
+    rule: str
+    passed: bool
+    message: Optional[str] = None
 
-    Args:
-        db: 데이터베이스 세션
-        definition: WorkflowDefinition 또는 WorkflowUpdateDefinition
 
-    Raises:
-        HTTPException: 검증 실패 시
+def _has_cycle(definition: WorkflowDefinition) -> bool:
+    """순환 참조 검증 (DFS)"""
+    graph: Dict[str, List[str]] = {}
+    for conn in definition.connections:
+        graph.setdefault(conn.source_ref_id, []).append(conn.target_ref_id)
+
+    visited: set = set()
+    rec_stack: set = set()
+
+    def dfs(node: str) -> bool:
+        visited.add(node)
+        rec_stack.add(node)
+        for neighbor in graph.get(node, []):
+            if neighbor not in visited:
+                if dfs(neighbor):
+                    return True
+            elif neighbor in rec_stack:
+                return True
+        rec_stack.discard(node)
+        return False
+
+    for node in {c.ref_id for c in definition.components}:
+        if node not in visited:
+            if dfs(node):
+                return True
+    return False
+
+
+def _validate_workflow_definition_checks(
+    db: Session,
+    definition: WorkflowDefinition,
+) -> List[ValidationCheckResult]:
+    """모든 검증 규칙을 순회하며 항목별 결과를 수집"""
+    results: List[ValidationCheckResult] = []
+    component_map = {c.ref_id: c for c in definition.components}
+
+    # 0. START / END 각 1개 필수
+    start_count = sum(1 for c in definition.components if c.type == ComponentType.START)
+    end_count = sum(1 for c in definition.components if c.type == ComponentType.END)
+    se_errors = []
+    if start_count != 1:
+        se_errors.append(f"START 컴포넌트는 정확히 1개여야 합니다. (현재 {start_count}개)")
+    if end_count != 1:
+        se_errors.append(f"END 컴포넌트는 정확히 1개여야 합니다. (현재 {end_count}개)")
+    results.append(
+        ValidationCheckResult(
+            rule="single_start_end",
+            passed=len(se_errors) == 0,
+            message="; ".join(se_errors) if se_errors else None,
+        )
+    )
+
+    # 1. ref_id 유효성
+    ref_id_errors = []
+    for conn in definition.connections:
+        if conn.source_ref_id not in component_map:
+            ref_id_errors.append(conn.source_ref_id)
+        if conn.target_ref_id not in component_map:
+            ref_id_errors.append(conn.target_ref_id)
+    results.append(
+        ValidationCheckResult(
+            rule="ref_id_validity",
+            passed=len(ref_id_errors) == 0,
+            message=f"유효하지 않은 ref_id: {', '.join(ref_id_errors)}" if ref_id_errors else None,
+        )
+    )
+
+    # 2. 자기 자신 연결
+    self_conns = [c for c in definition.connections if c.source_ref_id == c.target_ref_id]
+    results.append(
+        ValidationCheckResult(
+            rule="no_self_connection",
+            passed=len(self_conns) == 0,
+            message="컴포넌트가 자기 자신에게 연결될 수 없습니다." if self_conns else None,
+        )
+    )
+
+    # 3. 순환 참조
+    has_cycle = _has_cycle(definition)
+    results.append(
+        ValidationCheckResult(
+            rule="no_cycle",
+            passed=not has_cycle,
+            message="순환 참조가 감지되었습니다." if has_cycle else None,
+        )
+    )
+
+    # 4. OD/LLM/BFM 상호 배타 — 세 타입은 서로 혼합 불가
+    #    (EMBEDDING 은 RAG 구성에서 LLM 과 공존하므로 배타 집합에서 제외)
+    model_types = set()
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and comp.model_id:
+            model = ModelService.get(db, comp.model_id)
+            if model and model.type_info:
+                model_types.add(model.type_info.name)
+    has_od = ModelTypeEnum.ODM.value in model_types
+    has_llm = ModelTypeEnum.LLM.value in model_types
+    has_bfm = ModelTypeEnum.BFM.value in model_types
+    exclusive_present = [
+        name
+        for name, present in (
+            (ModelTypeEnum.ODM.value, has_od),
+            (ModelTypeEnum.LLM.value, has_llm),
+            (ModelTypeEnum.BFM.value, has_bfm),
+        )
+        if present
+    ]
+    results.append(
+        ValidationCheckResult(
+            rule="no_incompatible_model_type_mix",
+            passed=len(exclusive_present) <= 1,
+            message=(
+                f"하나의 워크플로우에 서로 혼합할 수 없는 모델 타입이 함께 있습니다: "
+                f"{', '.join(exclusive_present)} (OD/LLM/BFM 은 상호 배타적입니다)."
+                if len(exclusive_present) > 1
+                else None
+            ),
+        )
+    )
+
+    # 5. OD+KB 공존
+    has_kb = any(c.type == ComponentType.KNOWLEDGE_BASE for c in definition.components)
+    results.append(
+        ValidationCheckResult(
+            rule="no_od_with_kb",
+            passed=not (has_od and has_kb),
+            message=(
+                "ML 워크플로우(OD 모델)에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
+                if (has_od and has_kb)
+                else None
+            ),
+        )
+    )
+
+    # 5b. BFM + KB 공존 불가 (BFM 은 생체분자 서열 모델이라 RAG/KB 를 쓰지 않음; has_bfm 은 위 4번에서 계산)
+    results.append(
+        ValidationCheckResult(
+            rule="no_bfm_with_kb",
+            passed=not (has_bfm and has_kb),
+            message=(
+                "BFM 모델 워크플로우에는 KNOWLEDGE_BASE 컴포넌트를 포함할 수 없습니다."
+                if (has_bfm and has_kb)
+                else None
+            ),
+        )
+    )
+
+    # 5c. BFM + prompt 공존 불가 (BFM 은 프롬프트를 쓰지 않음; prompt_id 는 MODEL 컴포넌트의 필드)
+    has_prompt = any(getattr(c, "prompt_id", None) is not None for c in definition.components)
+    results.append(
+        ValidationCheckResult(
+            rule="no_bfm_with_prompt",
+            passed=not (has_bfm and has_prompt),
+            message=(
+                "BFM 모델 워크플로우에는 프롬프트(prompt_id)를 사용할 수 없습니다."
+                if (has_bfm and has_prompt)
+                else None
+            ),
+        )
+    )
+
+    # 5d. BFM 워크플로우 내 task 동질성 — BFM 모델들은 모두 같은 task 여야 한다.
+    #     task 가 섞이면(예: fill-mask + protein-structure-prediction) 어떤 /test/* 엔드포인트로도 추론이
+    #     안 된다(각 엔드포인트가 task 동질성을 요구하므로). 생성 시점에 조기 차단한다.
+    bfm_tasks = set()
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and comp.model_id:
+            model = ModelService.get(db, comp.model_id)
+            if model and model.type_info and model.type_info.name == ModelTypeEnum.BFM.value:
+                bfm_tasks.add(getattr(model, "task", None))
+    results.append(
+        ValidationCheckResult(
+            rule="bfm_single_task",
+            passed=len(bfm_tasks) <= 1,
+            message=(
+                "BFM 워크플로우의 모델은 모두 같은 task 여야 합니다 (task 혼합 불가): "
+                f"{', '.join(sorted(str(t) for t in bfm_tasks))}"
+                if len(bfm_tasks) > 1
+                else None
+            ),
+        )
+    )
+
+    # 6. MODEL 수 제한
+    model_count = sum(1 for c in definition.components if c.type == ComponentType.MODEL)
+    results.append(
+        ValidationCheckResult(
+            rule="model_count_limit",
+            passed=model_count <= 3,
+            message=f"MODEL 컴포넌트는 최대 3개까지 허용됩니다. (현재 {model_count}개)" if model_count > 3 else None,
+        )
+    )
+
+    # 7. 연결 타입 규칙 (KB→KB, END→*, *→START)
+    conn_type_errors = []
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        tgt = component_map.get(conn.target_ref_id)
+        if not src or not tgt:
+            continue
+        if src.type == ComponentType.KNOWLEDGE_BASE and tgt.type == ComponentType.KNOWLEDGE_BASE:
+            conn_type_errors.append("KNOWLEDGE_BASE → KNOWLEDGE_BASE 연결은 허용되지 않습니다.")
+        if src.type == ComponentType.END:
+            conn_type_errors.append("END 컴포넌트에서 나가는 연결은 허용되지 않습니다.")
+        if tgt.type == ComponentType.START:
+            conn_type_errors.append("START 컴포넌트로 들어오는 연결은 허용되지 않습니다.")
+    results.append(
+        ValidationCheckResult(
+            rule="connection_type_rules",
+            passed=len(conn_type_errors) == 0,
+            message="; ".join(conn_type_errors) if conn_type_errors else None,
+        )
+    )
+
+    # 8. 컴포넌트 필수 속성 검증
+    required_field_errors = []
+    for comp in definition.components:
+        if comp.type == ComponentType.MODEL and not comp.model_id:
+            required_field_errors.append(f"{comp.ref_id}: MODEL 컴포넌트에는 model_id가 필수입니다.")
+        if comp.type == ComponentType.KNOWLEDGE_BASE and not comp.knowledge_base_id:
+            required_field_errors.append(f"{comp.ref_id}: KNOWLEDGE_BASE 컴포넌트에는 knowledge_base_id가 필수입니다.")
+    results.append(
+        ValidationCheckResult(
+            rule="required_fields",
+            passed=len(required_field_errors) == 0,
+            message="; ".join(required_field_errors) if required_field_errors else None,
+        )
+    )
+
+    # 9. max_tokens vs 모델 context length 검증
+    max_tokens_errors = []
+    for comp in definition.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        max_tokens_val = (comp.config or {}).get("max_tokens")
+        if max_tokens_val is None:
+            continue
+        model = ModelService.get(db, comp.model_id)
+        if not model or not model.repo_id:
+            continue
+        predefined = PREDEFINED_MODEL_CONFIGS.get(model.repo_id)
+        if not predefined:
+            continue
+        ctx_len = predefined.get("max_context_length")
+        if ctx_len and int(max_tokens_val) > ctx_len:
+            max_tokens_errors.append(
+                f"{comp.ref_id}: max_tokens({int(max_tokens_val)})가 "
+                f"{model.repo_id}의 context length({ctx_len})를 초과합니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="max_tokens_within_context_length",
+            passed=len(max_tokens_errors) == 0,
+            message="; ".join(max_tokens_errors) if max_tokens_errors else None,
+        )
+    )
+
+    # 10. config 키·범위 검증 (config_validation) — 요청 스키마(pydantic)가 아닌 규칙 엔진에서 평가한다.
+    # 생성/수정 시엔 _validate_workflow_definition_or_raise 가 400 으로, 검증 API 에선 200 응답의
+    # passed=false 항목으로 일관 보고한다. (MODEL: temperature/top_p 0.0~1.0, max_tokens 1~4096;
+    # KNOWLEDGE_BASE: top_k 1~10; START/END: config 미사용)
+    config_errors = []
+    for comp in definition.components:
+        cfg = comp.config
+        if comp.type in (ComponentType.START, ComponentType.END):
+            if cfg:
+                config_errors.append(f"'{comp.name}': START/END 컴포넌트는 config 를 사용하지 않습니다")
+            continue
+        if not cfg:
+            continue
+        if comp.type == ComponentType.MODEL:
+            for key in cfg:
+                if key not in {"temperature", "top_p", "max_tokens"}:
+                    config_errors.append(f"'{comp.name}': MODEL config 에 허용되지 않는 키: {key}")
+            for k in ("temperature", "top_p"):
+                if k in cfg:
+                    try:
+                        fv = float(cfg[k])
+                    except (TypeError, ValueError):
+                        config_errors.append(f"'{comp.name}': {k} 는 숫자여야 합니다")
+                    else:
+                        if not (0.0 <= fv <= 1.0):
+                            config_errors.append(f"'{comp.name}': {k} 는 0.0~1.0 범위여야 합니다")
+            if "max_tokens" in cfg:
+                try:
+                    iv = int(cfg["max_tokens"])
+                except (TypeError, ValueError):
+                    config_errors.append(f"'{comp.name}': max_tokens 는 정수여야 합니다")
+                else:
+                    if not (1 <= iv <= 4096):
+                        config_errors.append(f"'{comp.name}': max_tokens 는 1~4096 범위여야 합니다")
+        elif comp.type == ComponentType.KNOWLEDGE_BASE:
+            for key in cfg:
+                if key != "top_k":
+                    config_errors.append(f"'{comp.name}': KNOWLEDGE_BASE config 에 허용되지 않는 키: {key}")
+            if "top_k" in cfg:
+                try:
+                    iv = int(cfg["top_k"])
+                except (TypeError, ValueError):
+                    config_errors.append(f"'{comp.name}': top_k 는 정수여야 합니다")
+                else:
+                    if not (1 <= iv <= 10):
+                        config_errors.append(f"'{comp.name}': top_k 는 1~10 범위여야 합니다")
+    results.append(
+        ValidationCheckResult(
+            rule="config_validation",
+            passed=len(config_errors) == 0,
+            message="; ".join(config_errors) if config_errors else None,
+        )
+    )
+
+    # 11. 경로당 컴포넌트 수 제한 — MODEL ≤ 2/경로, KB ≤ 1/경로
+    path_limit_errors = []
+    graph_fwd: Dict[str, List[str]] = {}
+    for conn in definition.connections:
+        graph_fwd.setdefault(conn.source_ref_id, []).append(conn.target_ref_id)
+
+    start_ref_ids = [c.ref_id for c in definition.components if c.type == ComponentType.START]
+    end_ref_ids = {c.ref_id for c in definition.components if c.type == ComponentType.END}
+
+    all_paths: List[List[str]] = []
+    for s in start_ref_ids:
+        stack = [(s, [s])]
+        while stack:
+            node, path = stack.pop()
+            if node in end_ref_ids:
+                all_paths.append(path)
+                continue
+            for nxt in graph_fwd.get(node, []):
+                if nxt not in set(path):
+                    stack.append((nxt, path + [nxt]))
+
+    for path in all_paths:
+        model_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.MODEL
+        )
+        kb_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.KNOWLEDGE_BASE
+        )
+        if model_in_path > 2:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            path_limit_errors.append(
+                f"경로({' → '.join(names)})에 MODEL 컴포넌트가 {model_in_path}개입니다. (최대 2개)"
+            )
+        if kb_in_path > 1:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            path_limit_errors.append(
+                f"경로({' → '.join(names)})에 KNOWLEDGE_BASE 컴포넌트가 {kb_in_path}개입니다. (최대 1개)"
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="path_component_limit",
+            passed=len(path_limit_errors) == 0,
+            message="; ".join(path_limit_errors) if path_limit_errors else None,
+        )
+    )
+
+    # 12. KB로 들어오는 MODEL 연결은 최대 1개
+    kb_model_conn_errors = []
+    kb_model_incoming: Dict[str, int] = {}
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        tgt = component_map.get(conn.target_ref_id)
+        if src and tgt and src.type == ComponentType.MODEL and tgt.type == ComponentType.KNOWLEDGE_BASE:
+            kb_model_incoming[tgt.ref_id] = kb_model_incoming.get(tgt.ref_id, 0) + 1
+
+    for kb_ref_id, cnt in kb_model_incoming.items():
+        if cnt > 1:
+            kb_comp = component_map.get(kb_ref_id)
+            kb_name = kb_comp.name if kb_comp else kb_ref_id
+            kb_model_conn_errors.append(f"KNOWLEDGE_BASE '{kb_name}'에 {cnt}개의 MODEL 연결이 들어옵니다. (최대 1개)")
+    results.append(
+        ValidationCheckResult(
+            rule="kb_incoming_model_limit",
+            passed=len(kb_model_conn_errors) == 0,
+            message="; ".join(kb_model_conn_errors) if kb_model_conn_errors else None,
+        )
+    )
+
+    # 13. START 데드 연결 검사 — START 직접 타겟이 동시에 MODEL/KB로부터 연결을 받으면 안 됨
+    #     START는 출력을 생성하지 않으므로, 다른 소스와 공존하는 START 연결은 데이터 전달 효과가 없다.
+    dead_start_errors = []
+    start_targets = set()
+    for conn in definition.connections:
+        src = component_map.get(conn.source_ref_id)
+        if src and src.type == ComponentType.START:
+            start_targets.add(conn.target_ref_id)
+
+    for target_ref in start_targets:
+        other_source_names = []
+        for conn in definition.connections:
+            if conn.target_ref_id != target_ref:
+                continue
+            src = component_map.get(conn.source_ref_id)
+            if src and src.type in (ComponentType.MODEL, ComponentType.KNOWLEDGE_BASE):
+                other_source_names.append(f"'{src.name}'")
+
+        if other_source_names:
+            tgt = component_map.get(target_ref)
+            tgt_name = tgt.name if tgt else target_ref
+            dead_start_errors.append(
+                f"'{tgt_name}'은(는) START에서 직접 연결되면서 동시에 "
+                f"{', '.join(other_source_names)}에서도 연결을 받고 있습니다. "
+                f"START는 출력을 생성하지 않으므로 이 연결은 데이터 전달 효과가 없습니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="no_dead_start_connection",
+            passed=len(dead_start_errors) == 0,
+            message="; ".join(dead_start_errors) if dead_start_errors else None,
+        )
+    )
+
+    # 14. 모든 실행 가능 컴포넌트(MODEL, KB)는 START→END 경로에 포함되어야 함
+    #     경로에 포함되지 않는 컴포넌트는 고아(orphan)이거나 데드엔드로, 불필요하게 실행될 수 있다.
+    reachability_errors = []
+    all_path_refs = set()
+    for path in all_paths:
+        all_path_refs.update(path)
+    for comp in definition.components:
+        if comp.type in (ComponentType.MODEL, ComponentType.KNOWLEDGE_BASE):
+            if comp.ref_id not in all_path_refs:
+                reachability_errors.append(
+                    f"'{comp.name}'({comp.type.value})이(가) START→END 경로에 포함되지 않습니다. "
+                    f"연결이 누락되었거나 불필요한 컴포넌트일 수 있습니다."
+                )
+    results.append(
+        ValidationCheckResult(
+            rule="component_reachability",
+            passed=len(reachability_errors) == 0,
+            message="; ".join(reachability_errors) if reachability_errors else None,
+        )
+    )
+
+    # 15. 모든 START→END 경로에 최소 1개의 MODEL 포함
+    #     MODEL 없는 경로(시작→종료, 시작→KB→종료 등)는 의미 있는 출력을 생성하지 않는다.
+    no_model_path_errors = []
+    for path in all_paths:
+        model_count_in_path = sum(
+            1 for rid in path if component_map.get(rid) and component_map[rid].type == ComponentType.MODEL
+        )
+        if model_count_in_path == 0:
+            names = [component_map[rid].name for rid in path if rid in component_map]
+            no_model_path_errors.append(
+                f"경로({' → '.join(names)})에 MODEL 컴포넌트가 없습니다. " f"각 경로에는 최소 1개의 MODEL이 필요합니다."
+            )
+    results.append(
+        ValidationCheckResult(
+            rule="minimum_model_per_path",
+            passed=len(no_model_path_errors) == 0,
+            message="; ".join(no_model_path_errors) if no_model_path_errors else None,
+        )
+    )
+
+    # 15b. 사전정의 서빙 메타(5키)를 모델에서 직접 또는 부모 모델 파생으로 해소할 수 있는지
+    #      원격 서빙 컴포넌트는 클러스터 자원을 잡지 않으므로 서빙 5키를 요구하지 않는다.
+    serving_settings = get_settings()
+    serving_meta_errors: List[str] = []
+    remote_only_errors: List[str] = []
+    local_artifact_errors: List[str] = []
+    for comp in definition.components:
+        if comp.type != ComponentType.MODEL or not comp.model_id:
+            continue
+        db_model = db.get(Model, comp.model_id)
+        if not db_model:
+            serving_meta_errors.append(f"{comp.ref_id}: model_id={comp.model_id}에 해당하는 모델이 없습니다.")
+            continue
+        decision = decide_workflow_serving(db_model, serving_settings)
+        if decision.reject_reason:
+            # 원격 설정이 없어 못 가는 경우와, 로컬 가중치가 없어 못 가는 경우를 구분해 보고한다.
+            # 배치 경로 자체가 막힌 상태라 서빙 5키는 따지지 않는다. 여기서 5키까지 검사하면
+            # 원격 전용 모델(5키를 두지 않는다)이 "5키 없음" 으로 보고돼 진짜 사유가 가려지고,
+            # 저장을 막지 않기로 한 규칙(_SAVE_NON_BLOCKING_VALIDATION_RULES)이 무력해진다.
+            if decision.serving_mode is ServingMode.LOCAL:
+                local_artifact_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
+            else:
+                remote_only_errors.append(f"{comp.ref_id}: {decision.reject_reason}")
+            continue
+        if decision.deployment_type is WorkflowServingDeploymentType.REMOTE:
+            continue  # 원격 서빙은 GPU·메모리 계획을 세우지 않아 서빙 5키가 필요 없다
+        err = serving_meta_validation_error(db, db_model, predefined_configs=PREDEFINED_MODEL_CONFIGS)
+        if err:
+            serving_meta_errors.append(f"{comp.ref_id}: {err}")
+    results.append(
+        ValidationCheckResult(
+            rule="serving_predefined_meta_complete",
+            passed=len(serving_meta_errors) == 0,
+            message="; ".join(serving_meta_errors) if serving_meta_errors else None,
+        )
+    )
+
+    # 15b-1. 원격 전용·원격 우선 모델인데 서버에 원격 엔드포인트가 설정되지 않은 경우(배포 불가)
+    results.append(
+        ValidationCheckResult(
+            rule="remote_only_model_configured",
+            passed=len(remote_only_errors) == 0,
+            message="; ".join(remote_only_errors) if remote_only_errors else None,
+        )
+    )
+
+    # 15b-2. 로컬 서빙 산출물(Ollama PVC·MLflow 아티팩트)이 실제로 있는지
+    results.append(
+        ValidationCheckResult(
+            rule="local_serving_artifacts_present",
+            passed=len(local_artifact_errors) == 0,
+            message="; ".join(local_artifact_errors) if local_artifact_errors else None,
+        )
+    )
+
+    # 15c. 구조예측(ESMFold2) 모델이 포함되면 백본 ESMC-6B 가 등록(+MLflow)돼 있어야 서빙 시 로컬 로드가 가능하다.
+    #      배포(execute) 시에도 동일 헬퍼로 재검사한다(서빙 요청 직전 방어).
+    sp_model_ids = [c.model_id for c in definition.components if c.type == ComponentType.MODEL and c.model_id]
+    sp_backbone_err = _structure_prediction_backbone_error(db, sp_model_ids)
+    results.append(
+        ValidationCheckResult(
+            rule="structure_prediction_backbone_registered",
+            passed=sp_backbone_err is None,
+            message=sp_backbone_err,
+        )
+    )
+
+    # 16. 중복 연결 검사 — 동일한 source→target 쌍이 2회 이상 등장하면 안 됨
+    seen_conns = set()
+    duplicate_errors = []
+    for conn in definition.connections:
+        key = (conn.source_ref_id, conn.target_ref_id)
+        if key in seen_conns:
+            src = component_map.get(conn.source_ref_id)
+            tgt = component_map.get(conn.target_ref_id)
+            src_name = src.name if src else conn.source_ref_id
+            tgt_name = tgt.name if tgt else conn.target_ref_id
+            duplicate_errors.append(f"'{src_name}' → '{tgt_name}' 연결이 중복되었습니다.")
+        seen_conns.add(key)
+    results.append(
+        ValidationCheckResult(
+            rule="no_duplicate_connections",
+            passed=len(duplicate_errors) == 0,
+            message="; ".join(duplicate_errors) if duplicate_errors else None,
+        )
+    )
+
+    return results
+
+
+# 워크플로 저장을 막지 않는 규칙. 워크플로 정의 자체의 결함이 아니라 서버 설정(원격 엔드포인트)이나
+# 모델 산출물(PVC·아티팩트) 상태에 달린 조건이며, 배포 시점에 422 로 거부된다. 저장까지 막으면
+# 설정·가중치가 준비되기 전에는 워크플로를 만들 수조차 없어진다.
+# 저장 단계에서 막지 않는 검사. 나중에 채울 수 있는 것만 둔다.
+# - local_serving_artifacts_present: 학습·업로드로 아티팩트를 뒤에 채우는 흐름이 정상이다.
+# 원격 전용 모델의 원격 엔드포인트 미설정(remote_only_model_configured)은 여기 두지 않는다.
+# 서버 설정이 없으면 그 모델은 어떤 경로로도 배포할 수 없어, 저장을 허용하면 배포 시점까지
+# 문제를 미루기만 한다.
+_SAVE_NON_BLOCKING_VALIDATION_RULES = {"local_serving_artifacts_present"}
+
+
+def _validate_workflow_definition_or_raise(db: Session, definition: WorkflowDefinition) -> None:
+    """생성/수정 시 사용. 검증 API 와 같은 검사 결과를 쓰고, 차단 대상 실패를 모두 모아 400 으로 낸다.
+
+    실패를 하나만 돌려주면 검증 API 로 본 결과와 어긋나 보이고, 남은 문제를 한 번에 알 수 없다.
+    저장을 막지 않기로 한 규칙(_SAVE_NON_BLOCKING_VALIDATION_RULES)은 검증 API 에서는 그대로
+    보고되고 저장 경로에서만 통과시킨다 — 이 차이가 두 경로의 유일한 차이다.
     """
     if not definition or not definition.components:
         return
-
-    components = definition.components
-    connections = definition.connections if hasattr(definition, "connections") else []
-
-    # 1. KNOWLEDGE_BASE와 ODM MODEL 공존 검증
-    has_knowledge_base = any(c.type == ComponentType.KNOWLEDGE_BASE for c in components)
-    has_odm_model = False
-
-    # MODEL 컴포넌트 중 ODM 타입이 있는지 확인
-    for component in components:
-        if component.type == ComponentType.MODEL and component.model_id:
-            model = ModelService.get(db, component.model_id)
-            if model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value:
-                has_odm_model = True
-                break
-
-    if has_knowledge_base and has_odm_model:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="KNOWLEDGE_BASE component and ODM MODEL component cannot coexist in the same workflow",
-        )
-
-    # 2. KNOWLEDGE_BASE가 MODEL 앞에 있는지 순서 검증
-    if not has_knowledge_base:
-        return  # KNOWLEDGE_BASE가 없으면 순서 검증 불필요
-
-    # START 컴포넌트 찾기
-    start_components = [c for c in components if c.type == ComponentType.START]
-    if not start_components:
-        return  # START가 없으면 검증 스킵
-
-    # 컴포넌트 타입 -> 컴포넌트 매핑 (같은 타입이 여러 개일 수 있으므로 리스트로 관리)
-    component_type_map: Dict[ComponentType, List[Any]] = {}
-    for comp in components:
-        if comp.type not in component_type_map:
-            component_type_map[comp.type] = []
-        component_type_map[comp.type].append(comp)
-
-    # 연결 정보로 그래프 구성 (타입 기반)
-    graph: Dict[ComponentType, List[ComponentType]] = {}
-    for conn in connections:
-        source_type = conn.source_component_type
-        target_type = conn.target_component_type
-        if source_type not in graph:
-            graph[source_type] = []
-        graph[source_type].append(target_type)
-
-    # DFS로 각 경로를 독립적으로 확인하여 모든 경로에서 KNOWLEDGE_BASE가 MODEL 앞에 있는지 검증
-    def traverse_path(component_type: ComponentType, path_visited: set, knowledge_base_found_in_path: bool = False):
-        """각 경로를 독립적으로 순회하여 순서 검증"""
-        # 순환 참조 방지 (현재 경로 내에서만)
-        if component_type in path_visited:
-            return
-        path_visited.add(component_type)
-
-        # KNOWLEDGE_BASE 발견
-        if component_type == ComponentType.KNOWLEDGE_BASE:
-            knowledge_base_found_in_path = True
-
-        # MODEL 발견 - 이전에 KNOWLEDGE_BASE가 없었으면 에러
-        if component_type == ComponentType.MODEL:
-            if not knowledge_base_found_in_path:
-                # KNOWLEDGE_BASE가 워크플로우에 있으면 에러
-                if has_knowledge_base:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Knowledge Base components must come before Model components in the workflow",
-                    )
-
-        # 다음 컴포넌트 타입으로 이동 (각 경로를 독립적으로 확인)
-        for next_type in graph.get(component_type, []):
-            traverse_path(next_type, path_visited.copy(), knowledge_base_found_in_path)
-
-    # 모든 START 컴포넌트에서 시작하여 각 경로를 독립적으로 확인
-    for start_component in start_components:
-        traverse_path(ComponentType.START, set(), False)
+    checks = _validate_workflow_definition_checks(db, definition)
+    failures = [c for c in checks if not c.passed and c.rule not in _SAVE_NON_BLOCKING_VALIDATION_RULES]
+    if not failures:
+        return
+    detail = "; ".join(f"[{c.rule}] {c.message}" for c in failures if c.message)
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=detail or "워크플로우 정의 검증에 실패했습니다.",
+    )
 
 
 # ============= Workflow Test Helper Functions =============
@@ -2486,7 +2635,7 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
                 logger.info(
                     f"Scaling bbox: model_input={model_width}x{model_height}, "
                     f"original={original_width}x{original_height}, "
-                    f"scale=({scale_x:.2f}, {scale_y:.2f})"
+                    f"scale=({scale_x: .2f}, {scale_y: .2f})"
                 )
 
         # 각 prediction에 대해 bbox와 label 그리기
@@ -2511,7 +2660,7 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
                 draw.rectangle([xmin, ymin, xmax, ymax], outline="red", width=3)
 
                 # 레이블 텍스트 (label + score)
-                text = f"{label}: {score:.2f}"
+                text = f"{label}: {score: .2f}"
 
                 # 텍스트 배경 박스
                 text_bbox = draw.textbbox((xmin, ymin - 25), text, font=font)
@@ -2529,6 +2678,20 @@ def _draw_predictions_on_image(image_bytes: bytes, predictions: List[dict], imag
         logger.error(f"Failed to draw predictions on image: {e}")
         # 에러 발생 시 원본 이미지 반환
         return image_bytes
+
+
+# task 라우팅 정규화 단일 지점. task 는 DB·응답에는 원본(vqa 등) 그대로 저장하되, 라우팅/디스패치는
+# 정규화된 task 로만 판단한다 — vqa 는 당분간 text-generation 과 동일 추론(엔드포인트 공유)이라 여기서 접는다.
+# 이미지 입력(멀티모달) 추론을 붙일 때 이 맵에서 "vqa" 만 제거하면 vqa 전용 경로로 갈린다.
+# (현재 라우팅/검증은 model_type 축이라 VQA(type=LLM)는 이미 /test/rag 로 통과하며, task 단일축 전환 시 이 맵이 훅이 된다.)
+ROUTING_ALIAS = {"vqa": "text-generation"}
+
+
+def normalize_task(task: str | None) -> str | None:
+    """라우팅용 task 정규화(alias 적용). 원본 task 는 보존하고, 라우팅 판단에만 이 값을 쓴다."""
+    if task is None:
+        return None
+    return ROUTING_ALIAS.get(task, task)
 
 
 def _validate_rag_workflow(db: Session, workflow: Workflow) -> None:
@@ -2598,8 +2761,118 @@ def _validate_ml_workflow(db: Session, workflow: Workflow) -> None:
         )
 
 
+def _get_incoming_outputs(
+    component: WorkflowComponent,
+    workflow: Workflow,
+    outputs: Dict[str, dict],
+) -> dict:
+    """컴포넌트에 연결된 이전 컴포넌트들의 출력을 타입별로 수집.
+
+    다중 소스가 같은 타입으로 합류할 경우, 각 소스 컴포넌트 이름을 포함한
+    구분자를 추가하여 후속 컴포넌트가 출처를 식별할 수 있도록 한다.
+    """
+    component_map = {c.id: c for c in workflow.components}
+
+    kb_entries = []
+    model_entries = []
+
+    for conn in workflow.component_connections:
+        if conn.target_component_id != component.id:
+            continue
+        source_output = outputs.get(conn.source_component_id)
+        if not source_output:
+            continue
+
+        source_comp = component_map.get(conn.source_component_id)
+        source_name = source_comp.name if source_comp else conn.source_component_id
+
+        if source_output["type"] == "kb":
+            kb_entries.append((source_name, source_output["text"]))
+        elif source_output["type"] == "model":
+            model_entries.append((source_name, source_output["text"]))
+
+    incoming: Dict[str, str] = {}
+
+    if kb_entries:
+        if len(kb_entries) > 1:
+            parts = [f"[{name} 검색결과]\n{text}" for name, text in kb_entries]
+            incoming["kb_output"] = "\n\n".join(parts)
+        else:
+            incoming["kb_output"] = kb_entries[0][1]
+
+    if model_entries:
+        if len(model_entries) > 1:
+            parts = [f"[{name} 응답결과]\n{text}" for name, text in model_entries]
+            incoming["model_output"] = "\n\n".join(parts)
+        else:
+            incoming["model_output"] = model_entries[0][1]
+
+    return incoming
+
+
+async def _execute_workflow_graph(
+    db: Session,
+    workflow: Workflow,
+    text: Optional[str] = None,
+    image_base64: Optional[str] = None,
+    service_id: Optional[str] = None,
+    current_user: Optional[UserSchema] = None,
+) -> tuple[List[ComponentTestResult], List[str]]:
+    """범용 그래프 실행 엔진 — 위상 정렬 순서로 컴포넌트를 실행하고 incoming outputs를 전달"""
+    execution_order = _get_workflow_execution_order(workflow)
+
+    if not execution_order:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No executable components found in workflow.",
+        )
+
+    outputs: Dict[str, dict] = {}
+    results: List[ComponentTestResult] = []
+    execution_order_ids: List[str] = []
+
+    for component in execution_order:
+        execution_order_ids.append(component.id)
+        incoming = _get_incoming_outputs(component, workflow, outputs)
+        config = _get_effective_config(component)
+
+        if component.type == ComponentType.KNOWLEDGE_BASE:
+            query = incoming.get("model_output") or text
+            search_result_text, component_result = await _execute_knowledge_base_search(
+                db, component, query, top_k=config.get("top_k", 3)
+            )
+            if search_result_text:
+                outputs[component.id] = {"type": "kb", "text": search_result_text}
+            results.append(component_result)
+
+        elif component.type == ComponentType.MODEL:
+            model = ModelService.get(db, component.model_id) if component.model_id else None
+            is_od = model and model.type_info and model.type_info.name == ModelTypeEnum.ODM.value
+
+            if is_od:
+                component_result = await _execute_odm_inference(
+                    db, workflow.id, component, image_base64, service_id, current_user
+                )
+                results.append(component_result)
+            else:
+                input_text = incoming.get("model_output") or text
+                kb_context = incoming.get("kb_output")
+                component_result = await _execute_llm_inference(
+                    db, workflow.id, component, input_text, kb_context, service_id, current_user, config=config
+                )
+                if isinstance(component_result, ModelComponentTestResult):
+                    if isinstance(component_result.result, ModelLLMTestResult):
+                        outputs[component.id] = {
+                            "type": "model",
+                            "text": component_result.result.response,
+                        }
+                results.append(component_result)
+
+    return results, execution_order_ids
+
+
 async def _execute_knowledge_base_search(
-    db: Session, component: WorkflowComponent, query: str
+    db: Session, component: WorkflowComponent, query: str, top_k: int = 3
 ) -> tuple[Optional[str], ComponentTestResult]:
     """
     지식베이스 검색 실행
@@ -2608,12 +2881,15 @@ async def _execute_knowledge_base_search(
         db: 데이터베이스 세션
         component: 지식베이스 컴포넌트
         query: 검색 쿼리
+        top_k: 검색 결과 상위 N건
 
     Returns:
         (search_result_text, component_result) 튜플
     """
     try:
-        search_result = KnowledgeBaseService.search(db, knowledge_base_id=component.knowledge_base_id, query=query)
+        search_result = KnowledgeBaseService.search(
+            db, knowledge_base_id=component.knowledge_base_id, query=query, top_k=top_k
+        )
 
         # 검색 결과를 문자열로 변환
         search_result_strings = []
@@ -2648,6 +2924,38 @@ async def _execute_knowledge_base_search(
         return None, error_result
 
 
+def _build_llm_chat_messages_for_component(
+    db: Session,
+    component: WorkflowComponent,
+    text: str,
+    search_text: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Ollama·REMOTE 공통: 프롬프트·참고자료·user 메시지 구성."""
+    messages: List[Dict[str, Any]] = []
+    if component.prompt_id:
+        prompt = prompt_repository.get_with_variables(db, component.prompt_id)
+        if prompt:
+            has_context_variable = False
+            if prompt.prompt_variables:
+                for var in prompt.prompt_variables:
+                    if var.name == PromptVariableType.CONTEXT.value:
+                        has_context_variable = True
+                        break
+            prompt_content = prompt.content
+            if has_context_variable and search_text:
+                prompt_content = prompt_content.replace("{context}", search_text)
+                prompt_content = prompt_content.replace("{{context}}", search_text)
+                messages.append({"role": "system", "content": prompt_content})
+            else:
+                messages.append({"role": "system", "content": prompt_content})
+                if search_text:
+                    messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
+    elif search_text:
+        messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
+    messages.append({"role": "user", "content": text})
+    return messages
+
+
 async def _execute_llm_inference(
     db: Session,
     workflow_id: str,
@@ -2656,6 +2964,7 @@ async def _execute_llm_inference(
     search_text: Optional[str],
     service_id: Optional[str],
     current_user: UserSchema,
+    config: Optional[dict] = None,
 ) -> ComponentTestResult:
     """
     LLM 모델 추론 실행
@@ -2668,6 +2977,7 @@ async def _execute_llm_inference(
         search_text: 지식베이스 검색 결과 텍스트
         service_id: 서비스 ID
         current_user: 현재 사용자
+        config: 실행 설정 (temperature, top_p, max_tokens)
 
     Returns:
         컴포넌트 테스트 결과
@@ -2696,7 +3006,9 @@ async def _execute_llm_inference(
                     model_repo_id = model.repo_id
 
     # 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
 
     if not is_ready:
         return ComponentTestErrorResult(
@@ -2721,6 +3033,53 @@ async def _execute_llm_inference(
     start_time = time.time()
 
     try:
+        if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+            base_url = (deployment.remote_api_url or deployment.internal_url or "").strip().rstrip("/")
+            if not base_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="REMOTE 배포에 remote_api_url 또는 internal_url이 없습니다.",
+                )
+            messages = _build_llm_chat_messages_for_component(db, component, text, search_text)
+            out_text, err = await remote_chat_completion_async(base_url, deployment.model_name, messages)
+            if err:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error=err,
+                )
+            response_time_ms = (time.time() - start_time) * 1000
+            component_result = ModelComponentTestResult(
+                component_id=component.id,
+                component_name=component.name,
+                component_type="MODEL",
+                model_type=model_type_name or ModelTypeEnum.LLM.value,
+                result=ModelLLMTestResult(
+                    response=out_text or "",
+                    full_response=None,
+                ),
+            )
+            if service_id:
+                try:
+                    ServiceMonitoringService.record_inference_request(
+                        db=db,
+                        service_id=service_id,
+                        workflow_id=workflow_id,
+                        user_id=current_user.username,
+                        response_time_ms=response_time_ms,
+                        is_success=True,
+                    )
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to record monitoring data: {e}")
+                    db.rollback()
+            return component_result
+
         if not is_ollama_model:
             return ComponentTestErrorResult(
                 component_id=component.id,
@@ -2743,54 +3102,35 @@ async def _execute_llm_inference(
         ollama_url = deployment.internal_url.rstrip("/")
         url = f"{ollama_url}/api/chat"
 
-        messages = []
+        messages = _build_llm_chat_messages_for_component(db, component, text, search_text)
 
-        # 프롬프트 처리
-        if component.prompt_id:
-            prompt = prompt_repository.get_with_variables(db, component.prompt_id)
-            if prompt:
-                has_context_variable = False
-                if prompt.prompt_variables:
-                    for var in prompt.prompt_variables:
-                        if var.name == PromptVariableType.CONTEXT.value:
-                            has_context_variable = True
-                            break
-
-                prompt_content = prompt.content
-                if has_context_variable and search_text:
-                    # context 변수가 있으면 치환
-                    prompt_content = prompt_content.replace("{context}", search_text)
-                    prompt_content = prompt_content.replace("{{context}}", search_text)
-                    messages.append({"role": "system", "content": prompt_content})
-                else:
-                    # context 변수가 없어도 search_text가 있으면 프롬프트와 함께 추가
-                    messages.append({"role": "system", "content": prompt_content})
-                    if search_text:
-                        messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
-        elif search_text:
-            messages.append({"role": "system", "content": f"[참고자료]\n{search_text}"})
-
-        user_message = {"role": "user", "content": text}
-        messages.append(user_message)
+        ollama_options = {}
+        if config:
+            for config_key, ollama_key in CONFIG_TO_OLLAMA_OPTIONS.items():
+                if config_key in config:
+                    ollama_options[ollama_key] = config[config_key]
 
         data = {
             "model": model_repo_id,
             "messages": messages,
             "stream": False,
-            "keep_alive": "24h",  # 모델을 24시간 동안 메모리에 유지
+            "keep_alive": "525600m",
         }
+        if ollama_options:
+            data["options"] = ollama_options
         headers = {"Content-Type": "application/json"}
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
-        # 요청 실행
+        # 요청 실행 (비동기 httpx 사용)
         # LLM 모델의 경우 모델 로딩 시간과 추론 시간을 고려하여 타임아웃을 300초(5분)로 설정
         # 큰 모델(Qwen3-30B 등)의 경우 로딩에 30초 이상 소요될 수 있음
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=300)
-        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=300.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
 
         response_time_ms = (time.time() - start_time) * 1000
-        result_data = response.json()
 
         # 결과 처리
         ollama_message = result_data.get("message", {})
@@ -2807,6 +3147,9 @@ async def _execute_llm_inference(
             ),
         )
 
+        # Ollama 응답의 토큰 사용량 = 입력(prompt_eval_count) + 출력(eval_count)
+        token_usage = int(result_data.get("prompt_eval_count") or 0) + int(result_data.get("eval_count") or 0)
+
         # 모니터링 데이터 기록
         if service_id:
             try:
@@ -2814,10 +3157,10 @@ async def _execute_llm_inference(
                     db=db,
                     service_id=service_id,
                     workflow_id=workflow_id,
-                    user_id=current_user.id,
+                    user_id=current_user.username,
                     response_time_ms=response_time_ms,
                     is_success=True,
-                    is_object_detection=False,
+                    token_usage=token_usage,
                 )
                 db.commit()
             except Exception as e:
@@ -2868,7 +3211,9 @@ async def _execute_odm_inference(
             model_type_name = model.type_info.name if model.type_info else None
 
     # 배포 검증
-    is_ready, error_msg, deployment = KServeDeploymentService.validate_deployment_ready(db, workflow_id, component.id)
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
 
     if not is_ready:
         return ComponentTestErrorResult(
@@ -2877,6 +3222,15 @@ async def _execute_odm_inference(
             component_type="MODEL",
             model_type=model_type_name,
             error=error_msg,
+        )
+
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 Remote LLM API 연동 전까지 ODM 테스트를 지원하지 않습니다.",
         )
 
     # 입력 검증
@@ -2906,7 +3260,15 @@ async def _execute_odm_inference(
             headers = {"Content-Type": "application/json"}
         else:
             # 게이트웨이 URL 사용 (Istio Gateway 경유)
-            infer_svc_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe ODM 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
             url = f"{infer_svc_url}/v2/models/{model_name}/infer"
             # 게이트웨이 사용 시 Host 헤더 필요 (Istio 라우팅용)
             headers = {"Content-Type": "application/json", "Host": service_hostname}
@@ -2916,12 +3278,13 @@ async def _execute_odm_inference(
         kf_manager = KubeflowManager()
         cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
 
-        # 요청 실행
-        response = requests.post(url, json=data, headers=headers, cookies=cookies, timeout=30)
-        response.raise_for_status()
+        # 요청 실행 (비동기 httpx 사용)
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
 
         response_time_ms = (time.time() - start_time) * 1000
-        result_data = response.json()
 
         # KServe 응답 처리
         outputs = result_data.get("outputs", [])
@@ -2958,10 +3321,9 @@ async def _execute_odm_inference(
                                 db=db,
                                 service_id=service_id,
                                 workflow_id=workflow_id,
-                                user_id=current_user.id,
+                                user_id=current_user.username,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
-                                is_object_detection=True,
                             )
                             db.commit()
                         except Exception as e:
@@ -2988,10 +3350,9 @@ async def _execute_odm_inference(
                                 db=db,
                                 service_id=service_id,
                                 workflow_id=workflow_id,
-                                user_id=current_user.id,
+                                user_id=current_user.username,
                                 response_time_ms=response_time_ms,
                                 is_success=True,
-                                is_object_detection=True,
                             )
                             db.commit()
                         except Exception as e:
@@ -3024,6 +3385,399 @@ async def _execute_odm_inference(
         )
 
 
+async def _execute_plm_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    epitope: str,
+    cdr3b: str,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """protein-classification(ESM2) 모델 추론 실행. 단백질 서열 {epitope, cdr3b} 를 KServe predictor(transformers)로 보낸다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 protein-classification 추론을 지원하지 않습니다.",
+        )
+    if not epitope or not cdr3b:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="protein-classification model requires non-empty 'epitope' and 'cdr3b'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe protein-classification 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 transformers 경로는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"epitope": epitope, "cdr3b": cdr3b}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.PROTEIN_CLASSIFICATION.value,
+            result=ModelProteinClassificationTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"protein-classification inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
+async def _execute_fill_mask_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    sequence: str,
+    top_k: int,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """fill-mask(base BFM) 모델 추론 실행. 마스크 포함 서열 {sequence, top_k} 를 KServe predictor(transformers)로 보낸다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 fill-mask 추론을 지원하지 않습니다.",
+        )
+    if not sequence:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="fill-mask model requires non-empty 'sequence'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe fill-mask 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 transformers 경로는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"sequence": sequence, "top_k": top_k}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        async with httpx.AsyncClient(timeout=30.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.FILL_MASK.value,
+            result=ModelFillMaskTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"fill-mask inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
+async def _execute_structure_prediction_inference(
+    db: Session,
+    workflow_id: str,
+    component: WorkflowComponent,
+    sequence: str,
+    num_loops: int,
+    num_sampling_steps: int,
+    service_id,
+    current_user: UserSchema,
+) -> ComponentTestResult:
+    """protein-structure-prediction(ESMFold2) 추론 실행. 서열 {sequence, num_loops, num_sampling_steps} 를
+    KServe predictor(ESMFold2Model)로 보내 전원자 구조(PDB)+신뢰도(plddt/ptm/iptm)를 받는다."""
+    model_type_name = None
+    if component.model_id:
+        model = ModelService.get(db, component.model_id)
+        if model and model.type_info:
+            model_type_name = model.type_info.name
+
+    is_ready, error_msg, deployment = ModelWorkflowDeploymentService.validate_deployment_ready(
+        db, workflow_id, component.id
+    )
+    if not is_ready:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=error_msg,
+        )
+    if deployment.deployment_type == WorkflowServingDeploymentType.REMOTE:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="REMOTE 배포 유형은 protein-structure-prediction 추론을 지원하지 않습니다.",
+        )
+    if not sequence:
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error="protein-structure-prediction model requires non-empty 'sequence'",
+        )
+
+    start_time = time.time()
+    try:
+        service_hostname = deployment.service_hostname
+        model_name = deployment.model_name
+        if deployment.internal_url:
+            base_url = deployment.internal_url.rstrip("/")
+            url = f"{base_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json"}
+        else:
+            infer_svc_url = (settings.KSERVE_GATEWAY_URL or "").strip().rstrip("/")
+            if not infer_svc_url:
+                return ComponentTestErrorResult(
+                    component_id=component.id,
+                    component_name=component.name,
+                    component_type="MODEL",
+                    model_type=model_type_name,
+                    error="KServe 구조예측 테스트에 필요한 internal_url 또는 KSERVE_GATEWAY_URL 설정이 없습니다.",
+                )
+            url = f"{infer_svc_url}/v2/models/{model_name}/infer"
+            headers = {"Content-Type": "application/json", "Host": service_hostname}
+
+        # predictor 의 서열 매니저는 inputs[0].data[0] 의 dict 를 그대로 받는다.
+        payload = {"sequence": sequence, "num_loops": num_loops, "num_sampling_steps": num_sampling_steps}
+        data = {"inputs": [{"name": "INPUT_1", "shape": [1], "datatype": "BYTES", "data": [payload]}]}
+        kf_manager = KubeflowManager()
+        cookies = kf_manager.auth_session.session_cookie_dict if hasattr(kf_manager, "auth_session") else {}
+
+        # 구조예측은 확산 샘플링이라 fill-mask 보다 훨씬 오래 걸린다 → 타임아웃 상향(5분).
+        async with httpx.AsyncClient(timeout=300.0, cookies=cookies) as client:
+            response = await client.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            result_data = response.json()
+
+        response_time_ms = (time.time() - start_time) * 1000
+
+        predictions = []
+        input_info = None
+        outputs = result_data.get("outputs", [])
+        if outputs and outputs[0].get("data"):
+            response_data = outputs[0]["data"][0]
+            if isinstance(response_data, str):
+                try:
+                    response_data = json.loads(response_data)
+                except Exception:
+                    pass
+            if isinstance(response_data, dict):
+                preds = response_data.get("predictions", response_data)
+                predictions = preds if isinstance(preds, list) else [preds]
+                input_info = response_data.get("input_info")
+            else:
+                predictions = response_data if isinstance(response_data, list) else [response_data]
+
+        if service_id:
+            try:
+                ServiceMonitoringService.record_inference_request(
+                    db=db,
+                    service_id=service_id,
+                    workflow_id=workflow_id,
+                    user_id=current_user.username,
+                    response_time_ms=response_time_ms,
+                    is_success=True,
+                )
+                db.commit()
+            except Exception as e:
+                logger.error(f"Failed to record monitoring data: {e}")
+                db.rollback()
+
+        return ModelComponentTestResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name or ModelTypeEnum.BFM.value,
+            task=ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value,
+            result=ModelStructurePredictionTestResult(predictions=predictions, input_info=input_info),
+        )
+
+    except Exception as e:
+        logger.error(f"protein-structure-prediction inference failed for component {component.id}: {e}")
+        return ComponentTestErrorResult(
+            component_id=component.id,
+            component_name=component.name,
+            component_type="MODEL",
+            model_type=model_type_name,
+            error=str(e),
+        )
+
+
 # ============= Workflow Test Endpoints =============
 
 
@@ -3038,9 +3792,9 @@ async def test_rag_workflow(
     """
     RAG 워크플로우 테스트
 
-    Knowledge Base와 LLM 모델을 사용하는 RAG 워크플로우를 테스트합니다.
-    지식베이스가 있으면 검색 후 결과를 LLM 모델에 전달하여 추론하고,
-    지식베이스가 없으면 LLM 모델만 실행합니다.
+    Knowledge Base와 LLM(MODEL) 컴포넌트를 사용하는 RAG 워크플로우를 테스트합니다.
+    지식베이스가 있으면 검색 후 결과를 LLM에 전달하고, 없으면 LLM만 실행합니다.
+    LLM 배포 유형은 Ollama·REMOTE(원격 API 스텁) 등에 따라 `_execute_llm_inference`에서 분기됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 테스트할 워크플로우 UUID
@@ -3071,7 +3825,7 @@ async def test_rag_workflow(
         - **model_type** (str): "LLM"
         - **result** (ModelLLMTestResult): LLM 추론 결과
             - **response** (str): LLM 응답 텍스트
-            - **full_response** (dict, optional): Ollama API 전체 응답 (디버깅용)
+            - **full_response** (dict, optional): 업스트림 LLM 전체 응답(Ollama 등·REMOTE 스텁은 null일 수 있음)
 
         **ComponentTestErrorResult** (오류 발생 시):
         - **component_id** (str): 컴포넌트 UUID
@@ -3089,6 +3843,7 @@ async def test_rag_workflow(
     ## Notes
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
+    - ODM(Object Detection) 전용 ML 그래프는 `POST .../test/ml`을 사용
     - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
     - 지식베이스 검색 결과는 자동으로 LLM 모델의 context 파라미터로 전달됨
     - prompt_id가 설정된 경우:
@@ -3121,52 +3876,22 @@ async def test_rag_workflow(
     # RAG 워크플로우 검증
     _validate_rag_workflow(db, workflow)
 
-    # 실행 순서 결정
-    execution_order = _get_workflow_execution_order(workflow)
+    results, execution_order_ids = await _execute_workflow_graph(
+        db,
+        workflow,
+        text=text,
+        service_id=workflow.service_id,
+        current_user=current_user,
+    )
 
-    if not execution_order:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No executable components found in workflow.",
-        )
-
-    # Service ID 확인
-    service_id = workflow.service_id
-
-    results = []
-    execution_order_ids = []
-    knowledge_base_search_result = None
-
-    # 각 컴포넌트를 순서대로 실행
-    for component in execution_order:
-        execution_order_ids.append(component.id)
-
-        if component.type == ComponentType.KNOWLEDGE_BASE:
-            # 지식베이스 검색 실행
-            search_result_text, component_result = await _execute_knowledge_base_search(db, component, text)
-            if search_result_text:
-                knowledge_base_search_result = search_result_text
-            results.append(component_result)
-
-        elif component.type == ComponentType.MODEL:
-            # LLM 모델 추론 실행
-            search_text = knowledge_base_search_result if knowledge_base_search_result else None
-            component_result = await _execute_llm_inference(
-                db, workflow_id, component, text, search_text, service_id, current_user
-            )
-            results.append(component_result)
-
-    # 최종 결과 문자열 추출 (마지막 MODEL 또는 KNOWLEDGE_BASE 컴포넌트의 결과)
-    # 우선순위: MODEL > KNOWLEDGE_BASE
+    # 최종 결과 문자열 추출 (마지막 MODEL > KNOWLEDGE_BASE)
     final_result = None
     for result in reversed(results):
         if isinstance(result, ModelComponentTestResult):
-            # LLM 모델인 경우 response 문자열 추출
             if isinstance(result.result, ModelLLMTestResult):
                 final_result = result.result.response
                 break
         elif isinstance(result, KnowledgeBaseComponentTestResult):
-            # MODEL이 없으면 KNOWLEDGE_BASE 검색 결과 문자열 추출
             if final_result is None:
                 final_result = result.result.search_result
 
@@ -3265,21 +3990,6 @@ async def test_ml_workflow(
     # ML 워크플로우 검증
     _validate_ml_workflow(db, workflow)
 
-    # 실행 순서 결정
-    execution_order = _get_workflow_execution_order(workflow)
-
-    if not execution_order:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No executable components found in workflow.",
-        )
-
-    # Service ID 확인
-    service_id = workflow.service_id
-
-    results = []
-    execution_order_ids = []
-
     # 이미지 읽기 및 base64 인코딩 (한 번만 수행)
     image_base64 = None
     image_bytes = None
@@ -3295,16 +4005,13 @@ async def test_ml_workflow(
                 detail="Unable to read image file",
             )
 
-    # 각 컴포넌트를 순서대로 실행
-    for component in execution_order:
-        execution_order_ids.append(component.id)
-
-        if component.type == ComponentType.MODEL:
-            # ODM 모델 추론 실행
-            component_result = await _execute_odm_inference(
-                db, workflow_id, component, image_base64, service_id, current_user
-            )
-            results.append(component_result)
+    results, execution_order_ids = await _execute_workflow_graph(
+        db,
+        workflow,
+        image_base64=image_base64,
+        service_id=workflow.service_id,
+        current_user=current_user,
+    )
 
     # 최종 결과 이미지 생성 (마지막 MODEL 컴포넌트의 predictions를 이용해 이미지에 bbox와 label 그리기)
     final_result = None
@@ -3343,6 +4050,246 @@ async def test_ml_workflow(
     )
 
 
+@router.post("/{workflow_id}/test/protein-classification", response_model=WorkflowProteinClassificationTestResponse)
+async def test_protein_classification_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    epitope: str = Body(..., embed=True, description="단백질 epitope 서열"),
+    cdr3b: str = Body(..., embed=True, description="TCR β-chain CDR3 서열"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 — 구 `/test/plm` 리네임.
+
+    단백질 서열 분류(TCR-Epitope 결합) 모델을 배포한 워크플로우에 `{epitope, cdr3b}` 를 보내
+    이진 분류 추론을 수행한다.
+
+    ## Request Body (JSON)
+    - **epitope** (str, required): epitope 서열
+    - **cdr3b** (str, required): cdr3b 서열
+
+    ## Response (WorkflowProteinClassificationTestResponse)
+    - **results[].result** (ModelProteinClassificationTestResult): `predictions` + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **task 가 protein-classification 이 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - **base(파인튜닝 안 된, parent_model_id IS NULL) 모델이면 400** — 어댑터가 없어 서빙 불가.
+
+    ## Errors
+    - 400: 해당 task 워크플로우가 아님 / base 모델 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — task 가 protein-classification 이 아니면 거부, 하나도 없어도 거부.
+    pc_task = ModelTaskType.PROTEIN_CLASSIFICATION.value
+    pc_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != pc_task:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"protein-classification 전용 추론 엔드포인트입니다. 비-protein-classification 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
+                )
+            # base(파인튜닝 안 된) 모델은 LoRA 어댑터가 없어 서빙 불가 → 파인튜닝 자식을 서빙해야 함.
+            if model.parent_model_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"base 모델({component.name})은 서빙할 수 없습니다. 파인튜닝된 자식 모델을 배포하세요.",
+                )
+            pc_components.append(component)
+
+    if not pc_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="protein-classification 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in pc_components:
+        results.append(
+            await _execute_plm_inference(db, workflow.id, component, epitope, cdr3b, workflow.service_id, current_user)
+        )
+
+    return WorkflowProteinClassificationTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in pc_components],
+        results=results,
+    )
+
+
+@router.post("/{workflow_id}/test/fill-mask", response_model=WorkflowFillMaskTestResponse)
+async def test_fill_mask_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    sequence: str = Body(..., embed=True, description="마스크(<mask>) 토큰이 포함된 서열"),
+    top_k: int = Body(5, embed=True, description="마스크 위치별 반환할 top-k 후보 수"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 워크플로우 테스트.
+
+    마스크 토큰이 포함된 서열을 배포된 base BFM 모델에 보내 각 마스크 위치의 top-k 토큰 예측을 받는다.
+    protein-classification 과 달리 파인튜닝이 불필요하며 base 모델을 그대로 서빙한다.
+
+    ## Request Body (JSON)
+    - **sequence** (str, required): 마스크 토큰을 포함한 서열
+    - **top_k** (int, optional, 기본 5): 마스크당 반환 후보 수
+
+    ## Response (WorkflowFillMaskTestResponse)
+    - **results[].result** (ModelFillMaskTestResult): 마스크 위치별 `predictions` + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **task 가 fill-mask 가 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - base 모델 서빙이 정상이므로 protein-classification 과 달리 base 가드는 없다.
+
+    ## Errors
+    - 400: 해당 task 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — task 가 fill-mask 가 아니면 거부, 하나도 없어도 거부.
+    fm_task = ModelTaskType.FILL_MASK.value
+    fm_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != fm_task:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"fill-mask 전용 추론 엔드포인트입니다. 비-fill-mask 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
+                )
+            fm_components.append(component)
+
+    if not fm_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="fill-mask 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in fm_components:
+        results.append(
+            await _execute_fill_mask_inference(
+                db, workflow.id, component, sequence, top_k, workflow.service_id, current_user
+            )
+        )
+
+    return WorkflowFillMaskTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in fm_components],
+        results=results,
+    )
+
+
+@router.post(
+    "/{workflow_id}/test/protein-structure-prediction",
+    response_model=WorkflowProteinStructurePredictionTestResponse,
+)
+async def test_protein_structure_prediction_workflow(
+    *,
+    db: Session = SessionDepends,
+    workflow_id: str,
+    sequence: str = Body(..., embed=True, description="구조를 예측할 단백질 서열"),
+    num_loops: int = Body(3, embed=True, description="ESMFold2 recycling loop 수"),
+    num_sampling_steps: int = Body(50, embed=True, description="확산 샘플링 스텝 수"),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    protein-structure-prediction(ESMFold2) 워크플로우 테스트.
+
+    단백질 서열을 배포된 ESMFold2 모델에 보내 전원자 3D 구조(PDB)와 신뢰도(plddt/ptm/iptm)를 받는다.
+    fill-mask/protein-classification 과 달리 AutoModel 이 아니라 vendored ESMFold2Model.infer_protein 경로다.
+
+    ## Request Body (JSON)
+    - **sequence** (str, required): 구조를 예측할 단백질 서열
+    - **num_loops** (int, optional, 기본 3): recycling loop 수
+    - **num_sampling_steps** (int, optional, 기본 50): 확산 샘플링 스텝 수
+
+    ## Response (WorkflowProteinStructurePredictionTestResponse)
+    - **results[].result** (ModelStructurePredictionTestResult): `predictions`(pdb/plddt_mean/ptm/iptm) + `input_info`
+
+    ## Notes
+    - 워크플로우는 ACTIVE(배포 완료) 상태여야 한다.
+    - **task 가 protein-structure-prediction 이 아닌 모델 컴포넌트가 있으면 400** (해당 task 전용 엔드포인트).
+    - 구조예측은 확산 샘플링으로 추론이 오래 걸릴 수 있다(타임아웃 5분).
+
+    ## Errors
+    - 400: 해당 task 워크플로우가 아님 / ACTIVE 아님 / 필수 입력 누락
+    - 401: 미인증 / 404: 워크플로우 없음 / 503: 모델 서비스 미준비 / 500: 내부 오류
+    """
+    workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
+
+    if workflow.status != WorkflowStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Workflow must be ACTIVE to test. Current status: {workflow.status.value}",
+        )
+
+    # MODEL 컴포넌트 수집 — task 가 protein-structure-prediction 이 아니면 거부, 하나도 없어도 거부.
+    sp_task = ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value
+    sp_components = []
+    for component in workflow.components:
+        if component.type == ComponentType.MODEL and component.model_id:
+            model = ModelService.get(db, component.model_id)
+            task_name = getattr(model, "task", None) if model else None
+            if task_name != sp_task:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"protein-structure-prediction 전용 추론 엔드포인트입니다. 비-구조예측 모델 컴포넌트가 "
+                    f"포함되어 있습니다: {component.name} (task={task_name})",
+                )
+            sp_components.append(component)
+
+    if not sp_components:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="protein-structure-prediction 워크플로우가 아닙니다 (해당 task 모델 컴포넌트가 없습니다).",
+        )
+
+    results = []
+    for component in sp_components:
+        results.append(
+            await _execute_structure_prediction_inference(
+                db, workflow.id, component, sequence, num_loops, num_sampling_steps, workflow.service_id, current_user
+            )
+        )
+
+    return WorkflowProteinStructurePredictionTestResponse(
+        workflow_id=workflow_id,
+        execution_order=[c.id for c in sp_components],
+        results=results,
+    )
+
+
 @router.get("/{workflow_id}/models")
 def get_deployed_models(
     *,
@@ -3353,32 +4300,30 @@ def get_deployed_models(
     """
     워크플로우에 배포된 모델 목록 조회
 
-    워크플로우에서 배포된 모든 ML 모델의 상세 정보를 조회합니다.
-    KServe InferenceService로 배포된 모델들의 엔드포인트와 상태를 포함합니다.
+    워크플로우의 `model_workflow_deployments` 레코드를 조회합니다.
+    KServe·Ollama·REMOTE 유형별 `internal_url`, `public_url`, `backend_api_url` 등을 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **backend_api_url** (str): 추론 API URL (첫 번째 모델 기준)
-        - 형식: {gateway_url}/v2/models/{model_name}/infer
+    - **backend_api_url** (str|None): 첫 번째 배포 기준 요약 URL(없으면 null)
     - **deployed_models** (List[dict]): 배포된 모델 목록
         - workflow_id (str): 소속 워크플로우 ID
         - component_id (str): 컴포넌트 ID
         - component_name (str): 컴포넌트 이름
         - model_id (int): 모델 ID
-        - model_name (str): 원본 모델 이름
+        - model_name (str): 표시/배포용 모델 이름
         - sanitized_model_name (str): DNS 규칙에 맞게 변환된 모델 이름
-        - service_name (str): KServe 서비스 이름
-        - service_hostname (str): KServe 서비스 호스트명
-        - status (str): 배포 상태
-            - "PENDING": 배포 대기중
-            - "DEPLOYED": 배포 완료
-            - "FAILED": 배포 실패
-            - "DELETED": 삭제됨
-        - internal_url (str): 내부 접근 URL
-        - gateway_url (str): 외부 게이트웨이 URL
+        - service_name (str): Kubernetes 리소스 또는 식별용 이름
+        - service_hostname (str): KServe 라우팅용 호스트명(없을 수 있음)
+        - status (str): 배포 상태 (`DEPLOYING`/`DEPLOYED`/`FAILED`/`DELETED`)
+        - internal_url (str|None): 클러스터 내부 URL 또는 REMOTE 베이스 URL
+        - deployment_type (str): KSERVE | OLLAMA | REMOTE
+        - public_url (str|None): KSERVE+게이트웨이 설정 시에만
+        - backend_api_url (str|None): REMOTE는 internal·remote_api 폴백
+        - gateway_url (str|None): KServe 게이트웨이 베이스 URL(없으면 null)
         - deployed_at (datetime): 배포 시각
         - deleted_at (datetime): 삭제 시각 (삭제된 경우)
         - error_message (str): 오류 메시지 (실패 시)
@@ -3387,9 +4332,8 @@ def get_deployed_models(
     - **total** (int): 배포된 모델 총 개수
 
     ## Notes
-    - backend_api_url은 첫 번째 배포된 모델 기준으로 생성
-    - 각 모델마다 고유한 service_name과 hostname을 가짐
-    - 배포 상태가 DEPLOYED인 모델만 추론 가능
+    - 요약 필드 `backend_api_url`(루트)는 첫 배포 기준과 동일
+    - 컴포넌트 테스트·RAG/ML 테스트는 워크플로가 ACTIVE이고 해당 배포가 DEPLOYED일 때 가능
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -3402,15 +4346,13 @@ def get_deployed_models(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
     # DB에서 배포된 모델 목록 조회
-    deployed_models = KServeDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
+    deployed_models = ModelWorkflowDeploymentService.get_deployed_models(db, workflow_id, include_component_info=True)
 
-    # backend_api_url 동적 생성
+    # backend_api_url — 첫 배포의 internal_url 기준
     backend_api_url = None
     if deployed_models:
         first_deployment = deployed_models[0]
-        gateway_url = first_deployment.get("gateway_url") or settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.get("sanitized_model_name") or first_deployment.get("model_name")
-        backend_api_url = f"{gateway_url}/v2/models/{model_name}/infer"
+        backend_api_url = first_deployment.get("backend_api_url")
 
     return {
         "workflow_id": workflow_id,
@@ -3421,14 +4363,14 @@ def get_deployed_models(
 
 
 @router.post("/{workflow_id}/cleanup", status_code=status.HTTP_202_ACCEPTED)
-async def cleanup_workflow_resources(
+def cleanup_workflow_resources(
     *, db: Session = SessionDepends, workflow_id: str, current_user: UserSchema = Depends(get_current_user)
 ):
     """
     워크플로우 리소스 정리 시작
 
-    배포된 KServe InferenceService들을 정리합니다.
-    워크플로우 자체는 유지하면서 배포된 리소스만 제거합니다.
+    배포된 **KServe InferenceService**·**Ollama Deployment/Service** 등 워크플로 서빙 리소스를 정리하는
+    Kubeflow 파이프라인을 시작합니다. 워크플로우 레코드 자체는 유지됩니다.
 
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
@@ -3439,7 +4381,7 @@ async def cleanup_workflow_resources(
     - **cleanup_run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 현재 상태 "cleanup_in_progress"
     - **next_step** (str): 다음 단계 API 안내
-        - 형식: "Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion"
+        - 형식: "Call /workflows/{workflow_id}/finalize-cleanup to check completion"
 
     ## Use Cases
     - 비용 절감을 위해 배포된 리소스 정리
@@ -3447,10 +4389,10 @@ async def cleanup_workflow_resources(
     - 워크플로우 구조 변경 전 리소스 정리
 
     ## Process
-    1. KServe InferenceService 삭제 파이프라인 시작
+    1. 정리용 Kubeflow 파이프라인 시작(라벨 `workflow-id` 기준 클러스터 리소스 삭제)
     2. cleanup_run_id 반환
     3. finalize-cleanup API로 완료 확인
-    4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
+    4. 완료 시 `model_workflow_deployments` 정리 및(조건부) 워크플로 DRAFT 전환
 
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리
@@ -3479,7 +4421,7 @@ async def cleanup_workflow_resources(
             "workflow_id": workflow_id,
             "cleanup_run_id": cleanup_run_id,
             "status": "cleanup_in_progress",
-            "next_step": f"Call /workflows/{workflow_id}/finalize-cleanup?run_id={cleanup_run_id} to check completion",
+            "next_step": f"Call /workflows/{workflow_id}/finalize-cleanup to check completion",
         }
 
     except Exception as e:
@@ -3490,177 +4432,233 @@ async def cleanup_workflow_resources(
 
 
 @router.post("/{workflow_id}/finalize-cleanup")
-async def finalize_cleanup(
+def finalize_cleanup(
     *,
     db: Session = SessionDepends,
     workflow_id: str,
-    run_id: str = Query(..., description="Kubeflow Pipeline cleanup run ID"),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     워크플로우 정리 완료 처리
 
-    KServe 리소스 정리가 완료되었는지 확인하고,
-    완료된 경우 워크플로우 상태를 업데이트합니다.
+    Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
+    확인된 경우 워크플로우 상태를 업데이트합니다.
     워크플로우는 삭제되지 않고 리소스만 정리되며, 정리 후 재실행이 가능합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
         - 워크플로우 목록 조회 API(/workflows)에서 확인 가능
 
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - cleanup API에서 반환된 cleanup_run_id 사용
-        - 형식: Kubeflow Pipeline 실행 UUID
-
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
-    - **run_id** (str): 정리 파이프라인 실행 ID
     - **status** (str): 정리 상태
         - "completed": 정리 완료
-            - Pipeline이 성공적으로 완료되어 리소스가 정리됨
+            - Kubernetes 리소스가 실제로 삭제되어 확인됨
             - 워크플로우 상태가 업데이트됨 (ERROR → DRAFT)
         - "in_progress": 아직 진행중
-            - Pipeline이 아직 실행 중임
+            - Kubernetes에 리소스가 아직 존재함
             - 완료될 때까지 대기 후 재호출 필요
         - "failed": 정리 실패
-            - Pipeline 실행이 실패했거나 오류 발생
+            - Kubernetes 리소스 확인 중 오류 발생
             - error_message에 상세 오류 정보 포함
-        - "unknown": 상태 확인 불가
-            - Pipeline 상태 조회에 실패한 경우
-            - Kubeflow 연결 문제 또는 run_id 오류 가능
     - **workflow_updated** (bool): 워크플로우 상태 업데이트 여부
         - true: 워크플로우 상태가 성공적으로 업데이트됨
             - ERROR 상태였던 경우 DRAFT로 변경됨
             - 재실행 가능한 상태로 변경됨
         - false: 워크플로우 상태가 업데이트되지 않음
-            - Pipeline이 아직 진행중이거나 실패한 경우
+            - 리소스가 아직 삭제되지 않았거나 실패한 경우
             - 또는 워크플로우가 이미 DRAFT 상태인 경우
     - **message** (str): 상태 메시지
         - 정리 완료: "Cleanup completed and workflow state updated"
-        - 진행중: "Cleanup pipeline still in progress"
-        - 실패: "Cleanup pipeline failed with status: {status_value}"
-        - 상태 확인 불가: "Failed to check pipeline status: {error}"
+        - 진행중: "Resources still exist in Kubernetes, waiting for cleanup"
+        - 실패: "Failed to check Kubernetes resources: {error}"
 
     ## Process
     1. 워크플로우 존재 여부 확인
-    2. Pipeline 상태 확인 (5초 타임아웃)
-    3. 완료 시:
+    2. Kubernetes 클러스터에서 리소스 직접 조회
+       - InferenceService 조회
+       - Ollama Deployment/Service 조회
+    3. 리소스가 모두 삭제된 경우:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
-       - KServe 배포 데이터(kserve_deployments) 삭제
+       - 워크플로 서빙 배포 데이터(`model_workflow_deployments`) 삭제
        - 재실행 가능한 상태로 업데이트
-    4. 진행중: 진행 상태 반환 (재호출 필요)
-    5. 실패: 오류 메시지 반환
+    4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
+    5. 확인 중 오류 발생: 실패 상태 반환
 
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리됨
     - 정리 완료 후 워크플로우를 재실행할 수 있음
-    - Pipeline 상태 확인은 짧은 타임아웃(5초)으로 즉시 확인
-    - Pipeline이 아직 진행중이면 재호출하여 완료 확인 필요
+    - Kubernetes 리소스 확인은 즉시 수행됨
+    - 리소스가 아직 존재하면 재호출하여 완료 확인 필요
     - ERROR 상태의 워크플로우는 정리 완료 시 DRAFT로 변경됨
     - 이미 DRAFT 상태인 워크플로우는 상태 변경 없음
     - cleanup API 호출 후 이 API를 호출하여 완료 확인 필요
 
     ## Usage Example
     1. cleanup API 호출하여 정리 파이프라인 시작
-    2. cleanup_run_id 받기
-    3. 이 API를 호출하여 완료 확인
-    4. status가 "completed"이고 workflow_updated가 true면 정리 완료
-    5. status가 "in_progress"면 잠시 후 재호출
+    2. 이 API를 호출하여 완료 확인
+    3. status가 "completed"이고 workflow_updated가 true면 정리 완료
+    4. status가 "in_progress"면 잠시 후 재호출
 
     ## Errors
     - 401: 인증되지 않은 사용자
     - 404: 워크플로우를 찾을 수 없음
         - workflow_id가 존재하지 않거나 삭제된 경우
     - 500: 정리 처리 중 오류 발생
-        - Pipeline 상태 확인 실패 또는 워크플로우 상태 업데이트 실패
+        - Kubernetes 리소스 확인 실패 또는 워크플로우 상태 업데이트 실패
     """
+    from core.serving.workflow_serving_volume_lock import get_workflow_serving_volume_lock, workflow_execute_guard_key
+    from db.models.model_workflow_deployment import ModelWorkflowDeployment
+
+    # 정리와 재실행이 겹치면, 재실행이 방금 만든 복제 PVC 를 정리가 회수해 파이프라인이 볼륨을 잃는다.
+    # execute 와 같은 키로 직렬화하고, 락을 잡은 뒤에 정리 대상 배포 행을 확정한다.
+    cleanup_guard = get_workflow_serving_volume_lock()
+    cleanup_guard_key = workflow_execute_guard_key(workflow_id)
+    if not cleanup_guard.try_acquire_nonblocking(cleanup_guard_key):
+        logger.info(f"finalize-cleanup deferred, workflow execute in progress: {workflow_id}")
+        return {
+            "workflow_id": workflow_id,
+            "status": "in_progress",
+            "workflow_updated": False,
+            "message": "Workflow execute in progress, cleanup deferred",
+        }
+
     try:
         # 워크플로우 존재 여부 확인
         workflow = WorkflowService.get_workflow_by_id(db, workflow_id)
         if not workflow:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Workflow {workflow_id} not found")
 
-        # Pipeline 완료 확인
-        success = await _wait_for_pipeline_completion(run_id, max_wait_seconds=5)  # 짧은 timeout으로 즉시 확인
+        # 락을 잡은 시점의 배포 행만 정리 대상으로 삼는다(이후 생기는 행은 새 실행의 것).
+        cleanup_target_ids = [
+            row_id
+            for (row_id,) in db.query(ModelWorkflowDeployment.id)
+            .filter(ModelWorkflowDeployment.workflow_id == workflow_id)
+            .all()
+        ]
 
-        if success:
-            # Pipeline 완료됨 - 워크플로우 상태 업데이트 및 배포 데이터 삭제
+        # Kubernetes 클러스터에서 리소스 직접 조회하여 삭제 여부 확인
+        try:
+            from kubernetes import client
+            from kubernetes import config as k8s_config
+
+            # Kubernetes 설정
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                # 개발 환경에서는 kubeconfig 사용
+                try:
+                    k8s_config.load_kube_config()
+                except Exception as e:
+                    logger.error(f"Failed to load Kubernetes config: {e}")
+                    raise Exception(f"Failed to load Kubernetes config: {str(e)}")
+
+            namespace = settings.KUBEFLOW_NAMESPACE
+            label_selector = f"workflow-id={workflow_id}"
+
+            resources_exist = False
+
+            # 1. InferenceService 확인
+            try:
+                api = client.CustomObjectsApi()
+
+                result = api.list_namespaced_custom_object(
+                    group="serving.kserve.io",
+                    version="v1beta1",
+                    namespace=namespace,
+                    plural="inferenceservices",
+                    label_selector=label_selector,
+                )
+
+                services = result.get("items", [])
+                if len(services) > 0:
+                    logger.info(f"Found {len(services)} InferenceServices still existing for workflow {workflow_id}")
+                    resources_exist = True
+            except Exception as e:
+                logger.warning(f"Error checking InferenceServices: {e}")
+
+            # 2. Ollama Deployment 확인
+            if not resources_exist:
+                try:
+                    apps_v1 = client.AppsV1Api()
+                    deployments = apps_v1.list_namespaced_deployment(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(deployments.items) > 0:
+                        logger.info(
+                            f"Found {len(deployments.items)} Deployments still existing for workflow {workflow_id}"
+                        )
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Deployments: {e}")
+
+            # 3. Ollama Service 확인
+            if not resources_exist:
+                try:
+                    core_v1 = client.CoreV1Api()
+                    services = core_v1.list_namespaced_service(
+                        namespace=namespace,
+                        label_selector=label_selector,
+                    )
+
+                    if len(services.items) > 0:
+                        logger.info(f"Found {len(services.items)} Services still existing for workflow {workflow_id}")
+                        resources_exist = True
+                except Exception as e:
+                    logger.warning(f"Error checking Services: {e}")
+
+            if resources_exist:
+                # 리소스가 아직 존재함 - 진행중
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "in_progress",
+                    "workflow_updated": False,
+                    "message": "Resources still exist in Kubernetes, waiting for cleanup",
+                }
+
+            # 리소스가 모두 삭제됨 - 워크플로우 상태 업데이트 및 배포 데이터 삭제
             logger.info(
-                f"Cleanup pipeline completed for workflow {workflow_id}, \
-                    updating workflow state and cleaning up deployments"
+                f"All resources deleted for workflow {workflow_id}, "
+                f"updating workflow state and cleaning up deployments"
             )
 
-            # 워크플로우 상태를 DRAFT로 변경 (재실행 가능하도록)
-            if workflow.status == WorkflowStatus.ERROR:
+            # KServe 리소스가 모두 삭제됐으므로 워크플로우를 DRAFT 로 되돌린다(재배포 가능 상태).
+            # ACTIVE(정상 배포본) / ERROR 어느 쪽이든 DRAFT 로 전환한다.
+            workflow_updated = False
+            if workflow.status != WorkflowStatus.DRAFT:
                 workflow.status = WorkflowStatus.DRAFT
+                workflow_updated = True
 
-            # KServe 배포 데이터 삭제
-            deleted_count = KServeDeploymentService.delete_workflow_deployments(db, workflow_id)
+            # 워크플로 서빙 배포 레코드(model_workflow_deployments) 삭제
+            deleted_count = ModelWorkflowDeploymentService.delete_workflow_deployments(
+                db, workflow_id, cleanup_target_ids
+            )
             logger.info(f"Deleted {deleted_count} deployment records for workflow {workflow_id}")
 
             db.commit()
 
             return {
                 "workflow_id": workflow_id,
-                "run_id": run_id,
                 "status": "completed",
-                "workflow_updated": True,
+                "workflow_updated": workflow_updated,
                 "message": "Cleanup completed and workflow state updated",
             }
-        else:
-            # 아직 진행중이거나 실패
-            # 실제 상태 확인
-            try:
-                from ..core.kubeflow.kubeflow_manager import KubeflowManager
 
-                kf_manager = KubeflowManager()
-                run = kf_manager.kfp_client.get_run(run_id)
-
-                # 상태 추출
-                status_value = None
-                if hasattr(run, "state"):
-                    status_value = run.state
-                elif hasattr(run, "status"):
-                    status_value = run.status
-                elif hasattr(run, "run"):
-                    if hasattr(run.run, "status"):
-                        status_value = run.run.status
-                    elif hasattr(run.run, "state"):
-                        status_value = run.run.state
-
-                if status_value:
-                    status_upper = str(status_value).upper()
-                    if status_upper in ["FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"]:
-                        return {
-                            "workflow_id": workflow_id,
-                            "run_id": run_id,
-                            "status": "failed",
-                            "workflow_updated": False,
-                            "message": f"Cleanup pipeline failed with status: {status_value}",
-                        }
-
-                # 진행중
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "in_progress",
-                    "workflow_updated": False,
-                    "message": "Cleanup pipeline still in progress",
-                }
-
-            except Exception as e:
-                logger.error(f"Failed to check pipeline status: {e}")
-                return {
-                    "workflow_id": workflow_id,
-                    "run_id": run_id,
-                    "status": "unknown",
-                    "workflow_updated": False,
-                    "message": f"Failed to check pipeline status: {str(e)}",
-                }
-
+        except Exception as k8s_error:
+            logger.error(f"Failed to check Kubernetes resources: {k8s_error}")
+            return {
+                "workflow_id": workflow_id,
+                "status": "failed",
+                "workflow_updated": False,
+                "message": f"Failed to check Kubernetes resources: {str(k8s_error)}",
+            }
     except Exception as e:
         logger.error(f"Failed to finalize cleanup: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to finalize cleanup: {str(e)}"
         )
+
+    finally:
+        cleanup_guard.release(cleanup_guard_key)

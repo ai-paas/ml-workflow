@@ -1,15 +1,29 @@
-from enum import Enum
+import logging
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-current_directory = Path(__file__).parent
-dotenv_path = current_directory / ".env"
-load_dotenv(dotenv_path=dotenv_path)
+logger = logging.getLogger(__name__)
+
+_config_dir = Path(__file__).resolve().parent
+_base_env = _config_dir / ".env"
+load_dotenv(_base_env)
+
+_profile = os.environ.get("ENV", "").strip()
+if _profile:
+    _profile_path = _config_dir / f".env.{_profile}"
+    if _profile_path.is_file():
+        load_dotenv(_profile_path, override=True)
+    else:
+        logger.warning(
+            "ENV=%s 이지만 프로파일 파일이 없습니다: %s — .env 만 사용합니다.",
+            _profile,
+            _profile_path,
+        )
 
 
 class Settings(BaseSettings):
@@ -19,9 +33,9 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        case_sensitive=True,  # 대소문자 구분 허용
-        env_file=".env",  # settings env file name
-        env_file_encoding="utf-8",  # setting env file encoding
+        case_sensitive=True,
+        env_file=None,
+        env_file_encoding="utf-8",
     )
 
     # Kubeflow 설정
@@ -30,6 +44,11 @@ class Settings(BaseSettings):
     KUBEFLOW_PASSWORD: str = Field(..., description="Kubeflow 비밀번호")
     KUBEFLOW_NAMESPACE: str = Field(..., description="Kubeflow 네임스페이스")
     KUBEFLOW_EXPERIMENT_NAME: str = Field(..., description="Kubeflow 실험명")
+    KUBEFLOW_AUTH_SESSION_TTL_SEC: int = Field(
+        900,
+        description="Kubeflow(Dex) 로그인 세션 재사용 TTL(초). 이 시간 동안 세션을 재사용하고 만료·인증오류 시에만 "
+        "재로그인해, 잦은 폴링에서의 Dex 로그인 폭주(세션 churn → 간헐 403/No redirect)를 막는다.",
+    )
 
     TRAIN_IMAGE_URL: str = Field(..., description="학습 이미지 URL")
     INFER_IMAGE_URL: str = Field(..., description="추론 이미지 URL")
@@ -50,31 +69,205 @@ class Settings(BaseSettings):
 
     # MLflow S3 설정
     MLFLOW_S3_ENDPOINT_URL: str = Field(..., description="MLflow S3 엔드포인트 URL")
-    AWS_ACCESS_KEY_ID: str = Field(..., description="AWS 액세스 키 ID")
-    AWS_SECRET_ACCESS_KEY: str = Field(..., description="AWS 시크릿 액세스 키")
+    MLFLOW_S3_ACCESS_KEY_ID: str = Field(..., description="MLflow S3 액세스 키 ID")
+    MLFLOW_S3_SECRET_ACCESS_KEY: str = Field(..., description="MLflow S3 시크릿 액세스 키")
     MLFLOW_S3_BUCKET: str = Field(
         ...,
         description="MLflow 아티팩트 저장용 S3 버킷 이름. \
         모델 파일과 실험 결과를 저장하는 데 사용됩니다.",
     )
 
-    # Innogrid Object Storage 설정
-    INNOGRID_OBJECT_STORAGE_ENDPOINT: str = Field(..., description="Innogrid Object Storage 엔드포인트")
-    INNOGRID_OBJECT_STORAGE_ACCESS_KEY: str = Field(..., description="Innogrid Object Storage 액세스 키")
-    INNOGRID_OBJECT_STORAGE_SECRET_KEY: str = Field(..., description="Innogrid Object Storage 시크릿 키")
-    INNOGRID_OBJECT_STORAGE_BUCKET: str = Field(..., description="Innogrid Object Storage 버킷 이름")
+    # 데이터셋 업로드 설정
+    DATASET_MAX_UPLOAD_SIZE_MB: int = Field(default=500, description="데이터셋 최대 업로드 크기 (MB)")
+
+    # S3 호환 스토리지 설정 (데이터셋 저장용)
+    S3_ENDPOINT: str = Field(..., description="S3 호환 스토리지 엔드포인트 URL")
+    S3_ACCESS_KEY: str = Field(..., description="S3 액세스 키")
+    S3_SECRET_KEY: str = Field(..., description="S3 시크릿 키")
+    S3_BUCKET: str = Field(..., description="S3 버킷 이름")
+
+    # 데이터셋 스토리지 설정
+    DATASET_STORAGE_TYPE: str = Field(
+        default="s3",
+        description="데이터셋 저장소 유형 (s3 | hubconnect)",
+    )
+
+    # Hub-Connect API 설정 (DATASET_STORAGE_TYPE=hubconnect 시 사용)
+    DATALAKE_API_URL: str = Field(default="", description="Hub-Connect API 기본 URL")
+    DATALAKE_API_USERNAME: str = Field(default="", description="Hub-Connect API 인증 사용자명")
+    DATALAKE_API_PASSWORD: str = Field(default="", description="Hub-Connect API 인증 비밀번호")
+    DATALAKE_BUCKET_NAME: str = Field(default="aipaas-datasets", description="데이터레이크 버킷 이름")
 
     # API 및 인증 설정
     REST_API_URL: str = Field(..., description="REST API 기본 URL")
     DEMO_PASSWORD: str = Field(..., description="데모용 비밀번호")
     LOGIN_SECRET_KEY: str = Field(..., description="로그인 세션 암호화 키")
+    INTERNAL_API_KEY: str = Field(
+        default="",
+        description="내부 전용 API 인증에 사용할 키 (KFP 컴포넌트 콜백용). 서버 시작 시 SHA-256 해시로 검증.",
+    )
 
-    # KServe 설정
-    KSERVE_GPU: bool = Field(default=False, description="KServe GPU 사용 여부")
+    # KServe / 워크플로 서빙 공통
+    DEFAULT_TRY_GPU: bool = Field(
+        default=True,
+        description="사전정의 서빙 메타 기준 GPU 경로 우선 시도(임베딩 task는 항상 CPU). "
+        "Ollama·KServe(HF 등) 워크플로 서빙 플래너가 동일하게 참고.",
+    )
+    SERVING_DEFAULT_GPU_VRAM_BYTES: int = Field(
+        default=16 * 1024 * 1024 * 1024,
+        description="노드 라벨·오버라이드 없을 때 GPU 1장당 VRAM 바이트 기본값. 인벤토리 기반 k 산정에도 사용.",
+    )
+    SERVING_NODE_NAMES: str = Field(
+        default="",
+        description="서빙 스케줄러가 볼 노드 화이트리스트(쉼표 구분 metadata.name). 비면 Ready 노드 전체.",
+    )
+    SERVING_INCLUDE_CONTROL_PLANE_NODES: bool = Field(
+        default=False,
+        description="True일 때만 인벤토리에 control-plane/master 역할 노드 포함. "
+        "기본 False — 서빙 자원 집계·노드 선택에서 제외(단일 노드 클러스터 테스트 시에만 True 권장).",
+    )
+    SERVING_NODE_VRAM_OVERRIDES_JSON: str = Field(
+        default="{}",
+        description='노드명→GPU 카드 VRAM GiB 정수 JSON. 예: {"gpu-8g-01":8}',
+    )
+    GPU_POOL_PROFILES_JSON: str = Field(
+        default="[]",
+        description=(
+            "GPU 노드풀 프로파일(JSON 배열, 학습·서빙 공용). 노드 라벨이 match_labels 에 매칭되면 그 노드의 "
+            "학습·서빙 Pod 에 tolerations(taint 통과) + node_selector + 자원키를 주입한다(MIG taint 노드 등). "
+            "빈 배열이면 기존 동작(nvidia.com/gpu, 주입 없음). "
+            "필수키: match_labels + tolerations. "
+            "(node_selector 미지정 시 match_labels 자동, resource_key 미지정 시 nvidia.com/gpu. "
+            "tolerations 는 학습이 노드를 미리 모르므로 자동 생성 불가 → 명시 필요.) "
+            "예/override(node_selector·resource_key·slice_vram_gib) 는 docs/k8s-gpu-allocation 참조."
+        ),
+    )
+    SERVING_PIN_SELECTED_NODE: bool = Field(
+        default=True,
+        description="플래너가 고른 노드를 nodeName/nodeSelector로 고정할지. False면 요청만 두고 스케줄러에 위임.",
+    )
+    SERVING_NODE_CPU_HEADROOM_MILLICORES: int = Field(
+        default=500,
+        description="노드마다 서빙에 쓰지 않고 남겨둘 CPU 밀리코어. 배치 가능 판정에서 잔여 CPU에서 먼저 뺀다. "
+        "kube-reserved/system-reserved가 설정되지 않은 노드에서 시스템 데몬셋·kubelet 몫을 확보하는 용도. "
+        "0이면 잔여 전부를 서빙에 쓴다.",
+    )
     KSERVE_GATEWAY_URL: str = Field(
-        default="http://10.10.30.154:80",
-        description="KServe Istio Gateway URL \
-(외부 접근용)",
+        default="",
+        description="KServe Istio Gateway URL(외부 접근용). 비어 있으면 public_url 미제공.",
+    )
+    REMOTE_SERVING_API_URL: str = Field(
+        default="",
+        description="원격 LLM 서버 베이스 URL(경로 없이 호스트:포트까지). 비어 있으면 모든 원격 판정이 무효가 되어 "
+        "remote_only 모델은 배포 거부, remote_preferred 모델은 로컬로 폴백한다.",
+    )
+    REMOTE_SERVING_MODEL_MAP: str = Field(
+        default="{}",
+        description="플랫폼 model.repo_id(키) → 원격 서버가 아는 모델명(값) JSON. 값은 원격이 요구하는 원문 그대로 "
+        "쓴다(치환 금지). 이 맵에 없는 repo_id 는 remote_only 면 배포 거부, remote_preferred 면 로컬 폴백. "
+        '예: {"deepseek-r1:1.5b":"deepseek-r1:1.5b"}',
+    )
+    REMOTE_SERVING_PROTOCOL: str = Field(
+        default="path_chat",
+        description="원격 LLM 호출 규약. path_chat=GET /model/chat/{model}/{prompt}(응답이 JSON 문자열), "
+        "openai=POST /v1/chat/completions.",
+    )
+    REMOTE_SERVING_TIMEOUT_SEC: float = Field(
+        default=300.0,
+        description="원격 LLM 호출 타임아웃(초). 원격이 요청 시점에 모델을 로드해 첫 응답이 60초를 넘기도 한다.",
+    )
+
+    # Cinder: 노드 zone ↔ SC availability 정합 (기본 OFF)
+    CINDER_ZONE_MATCH_ENABLED: bool = Field(
+        default=False,
+        description="Ollama 워크플로 PVC는 노드 topology zone 과 레지스트리 SC availability 를 맞춤. false면 기존 동작만.",
+    )
+    CINDER_ZONE_TO_STORAGE_CLASS_JSON: str = Field(
+        default="{}",
+        description='node_zone(키)→StorageClass 이름. \
+            동일 availability SC가 복수일 때 강제. 예: {"gpu":"csi-cinder-sc-delete-gpu"}',
+    )
+    CINDER_NODE_TOPOLOGY_KEY: str = Field(
+        default="topology.cinder.csi.openstack.org/zone",
+        description="OpenStack/Cinder CSI 노드 topology 라벨 키.",
+    )
+    CINDER_CSI_PROVISIONER: str = Field(
+        default="cinder.csi.openstack.org",
+        description="storageClass.provisioner 필터에 사용(클러스터에 맞게 변경 가능).",
+    )
+    # 임시: IDC에 Cinder backend AZ(예: gpu) 미구성 시 zone 매칭 SC 대신 NFS Client SC로 클론
+    CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED: bool = Field(
+        default=False,
+        description="임시: 노드 zone≠원본 SC availability 로 클론할 때 Cinder 매칭 대신 "
+        "CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS 를 쓴다. GPU AZ 활성화 후 false 권장.",
+    )
+    CINDER_ZONE_MISMATCH_FALLBACK_STORAGE_CLASS: str = Field(
+        default="nfs-client",
+        description="임시: CINDER_ZONE_MISMATCH_USE_NFS_FALLBACK_ENABLED 일 때 클론 PVC storageClassName.",
+    )
+    # NFS fallback 클론은 CSI volume cloning 미지원이라 빈 PVC 가 만들어짐 → 별도 Job 이 원본을 복사.
+    PVC_DATA_COPY_IMAGE: str = Field(
+        default="busybox:1.36",
+        description="NFS fallback 클론 PVC 데이터 복사 Job 컨테이너 이미지 (cp -a 만 사용).",
+    )
+    PVC_DATA_COPY_TIMEOUT_SEC: int = Field(
+        default=1800,
+        description="데이터 복사 Job 타임아웃(초). 큰 모델은 분 단위 소요 가능.",
+    )
+    # 복사가 끝나지 않은 채 남은 복제본 회수. 배포 행에 한 번도 기록되지 않으면 기존 정리 경로가 못 찾는다.
+    OLLAMA_CLONE_RECLAIM_ENABLED: bool = Field(
+        default=False,
+        description="불완전 복제 PVC를 실제로 삭제한다. false면 삭제 없이 회수 대상만 로그로 남긴다.",
+    )
+    OLLAMA_CLONE_RECLAIM_GRACE_SEC: int = Field(
+        default=3600,
+        description="생성 후 이 시간이 지난 복제본만 회수 대상. 방금 만들어져 아직 복사 Job·Pod가 "
+        "보이지 않는 복제본을 진행 중인 배포에서 빼앗지 않도록 하는 여유 시간.",
+    )
+    # 최적화/경량화 작업 추적. 상태 갱신과 결과 모델 등록을 백그라운드 폴링이 전담하므로,
+    # 조회 API 는 DB 만 읽는다.
+    MODEL_IMPROVEMENT_POLL_INTERVAL_SEC: int = Field(
+        default=5,
+        description="최적화 작업 진행 상태를 최적화 서버에 물어보는 주기(초).",
+    )
+    MODEL_IMPROVEMENT_POLL_TIMEOUT_SEC: int = Field(
+        default=3600,
+        description="최적화 작업 추적 상한(초). 작업 생성 시각 기준으로 재며, 서버가 재시작되어도 "
+        "다시 늘어나지 않는다. 초과하면 마지막으로 한 번 더 확인한 뒤 실패로 종결한다.",
+    )
+    # 학습 메트릭 폴링도 같은 방식으로 종결한다. 상한이 없으면 학습 파드가 사라진 뒤에도
+    # MLflow run 이 RUNNING 으로 남아 폴링이 끝나지 않고, 재기동 때마다 되살아난다.
+    TRAINING_POLL_TIMEOUT_SEC: int = Field(
+        default=86400,
+        description="학습 실험 추적 상한(초). 실험 생성 시각 기준으로 재며, 서버가 재시작되어도 "
+        "다시 늘어나지 않는다. 초과하면 마지막으로 한 번 더 확인한 뒤 실패로 종결한다.",
+    )
+    WORKFLOW_DEPLOY_READINESS_TIMEOUT_SEC: int = Field(
+        default=1800,
+        description="워크플로우 모델 서빙 배포가 Ready 될 때까지 대기하는 상한(초). "
+        "ollama Deployment 경로와 KServe InferenceService 경로가 같은 값을 공유해 경로 간 불일치를 방지한다. "
+        "초과하면 배포를 failed 로 기록하고, 실패 메시지에 이 값이 그대로 표기된다. "
+        "대형 모델의 최초 다운로드·PVC 복사 콜드스타트를 감안해 넉넉히 둔다.",
+    )
+
+    OPTIMIZATION_SERVER_URL: str = Field(
+        ...,
+        description="최적화/경량화 서버 Base URL (필수). 환경변수에 설정되어 있지 않으면 서버 시작 단계에서 ValidationError 로 실패.",
+    )
+    OPTIMIZATION_SERVER_TIMEOUT: int = Field(
+        default=30,
+        description="최적화/경량화 서버 HTTP 타임아웃(초)",
+    )
+
+    SERVICE_MONITORING_RETENTION_DAYS: int = Field(
+        default=30,
+        description="service_monitoring 이벤트 로그 보존 기간(일). 초과분은 cleanup_old_records 가 삭제",
+    )
+
+    KUBEFLOW_IMAGE_PULL_SECRET: str = Field(
+        default="harbor",
+        description="Kubeflow Pipeline에서 사용할 imagePullSecret 이름 \
+(private registry 인증용)",
     )
 
     # Milvus 설정
@@ -84,6 +277,15 @@ class Settings(BaseSettings):
     MILVUS_DB_PASSWORD: str = Field(..., description="Milvus 데이터베이스 비밀번호")
     MILVUS_DB_NAME: str = Field(..., description="Milvus 데이터베이스 이름")
     MILVUS_ADMIN_PORT: str = Field(default="8000", description="Milvus Admin 포트")
+
+    # Harbor 설정
+    HARBOR_URL: str = Field(..., description="Harbor 레지스트리 URL")
+    HARBOR_USERNAME: str = Field(..., description="Harbor 사용자명")
+    HARBOR_PASSWORD: str = Field(..., description="Harbor 비밀번호")
+    HARBOR_REPOSITORY: str = Field(..., description="Harbor 리포지토리명")
+    BACKEND_PROJECT_NAME: str = Field(..., description="Harbor 백엔드 프로젝트명")
+    TRAIN_PROJECT_NAME: str = Field(..., description="Harbor 학습 프로젝트명")
+    INFERENCE_PROJECT_NAME: str = Field(..., description="Harbor 추론 프로젝트명")
 
     # 기타 설정
 

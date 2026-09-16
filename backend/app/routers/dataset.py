@@ -3,10 +3,12 @@ import traceback
 from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
+from config.db.enums import DatasetKindEnum
 from config.settings import get_settings
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from schemas.dataset import (
     DatasetBaseSchema,
+    DatasetKindReadSchema,
     DatasetReadSchema,
     DatasetRegistryBaseSchema,
     DatasetUpdateSchema,
@@ -24,52 +26,94 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _enforce_upload_size_limit(file: UploadFile) -> None:
+    """업로드 파일 크기를 DATASET_MAX_UPLOAD_SIZE_MB 로 제한한다.
+
+    검증 경로도 ZIP 전체를 메모리로 읽고 임시 디렉터리에 풀기 때문에, 등록뿐 아니라
+    검증 요청에도 같은 상한을 걸어야 큰 파일이 그대로 서버 메모리·디스크를 잡는 것을 막을 수 있다.
+    """
+    max_size_bytes = settings.DATASET_MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > max_size_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"업로드 파일 크기({file_size / (1024 * 1024):.1f}MB)가 "
+            f"최대 허용 크기({settings.DATASET_MAX_UPLOAD_SIZE_MB}MB)를 초과했습니다.",
+        )
+
+
+@router.get("/kinds", response_model=list[DatasetKindReadSchema])
+def get_dataset_kinds(current_user: UserSchema = Depends(get_current_user)):
+    """
+    데이터셋 분류(kind) 카탈로그 조회
+
+    UI 의 데이터셋 유형 드롭다운을 채우기 위한 정적 카탈로그를 반환한다.
+    각 분류는 `dataset_kind` 와 동일한 enum 값(name)과, 허용 형식·지원 모델 정보를 갖는다.
+
+    ## Response (List[DatasetKindReadSchema])
+    - **name** (str): 분류 식별자 (`object-detection` / `protein-classification`)
+    - **description** (str): 분류 설명
+    - **accepted_formats** (List[str]): 허용 데이터셋 형식 (구체 ZIP 사양은 별도 가이드에서 확정)
+    - **supported_models** (List[str]): 해당 분류로 학습 가능한 모델 키 목록
+    """
+    return [
+        DatasetKindReadSchema(
+            name=DatasetKindEnum.OBJECT_DETECTION.value,
+            description="객체 감지(YOLOX) 데이터셋",
+            accepted_formats=["coco"],
+            supported_models=["yolox_s", "yolox_m"],
+        ),
+        DatasetKindReadSchema(
+            name=DatasetKindEnum.PROTEIN_CLASSIFICATION.value,
+            description="단백질 서열 분류(ESM2, TCR-Epitope) 데이터셋",
+            accepted_formats=["csv"],
+            supported_models=["facebook/esm2_t6_8M_UR50D"],
+        ),
+    ]
+
+
 @router.post("/validate", response_model=DatasetValidationResponse)
-def validate_dataset_file(
+def validate_dataset(
     *,
     file: UploadFile = File(...),
+    dataset_kind: DatasetKindEnum = Form(...),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     데이터셋 파일 유효성 검증
 
-    업로드된 데이터셋 파일의 형식과 구조를 검증합니다.
-    COCO128 형식의 데이터셋 구조를 기준으로 검증을 수행합니다.
+    업로드된 데이터셋 ZIP 이 요청한 `dataset_kind` 분류의 형식 요구사항을 충족하는지 검증한다.
 
-    ## Request Body
+    ## Request Body (multipart/form-data)
     - **file** (UploadFile, required): 검증할 데이터셋 ZIP 파일
-        - COCO128 형식의 데이터셋이 ZIP으로 압축된 파일
-        - 필수 구조:
-            - annotations/instances_train2017.json
-            - annotations/instances_val2017.json
-            - train2017/ (이미지 폴더)
-            - val2017/ (이미지 폴더)
+    - **dataset_kind** (str enum, required): 검증 대상 분류
+        - `object-detection`: COCO128 구조(annotations/instances_{train,val}2017.json + train2017/val2017)
+        - `protein-classification`: TCR-Epitope CSV(필수 컬럼 epitope/cdr3b/label, label∈{0,1}, 행≥16)
 
     ## Response (DatasetValidationResponse)
     - **is_valid** (bool): 검증 성공 여부
-        - true: 검증 통과
-        - false: 검증 실패
     - **message** (str): 검증 결과 메시지
-        - 성공 시: "데이터셋 파일이 유효합니다."
-        - 실패 시: 오류 원인 설명
-    - **details** (dict, optional): 상세 오류 정보
-        - 검증 실패 시에만 제공
-        - errors (List[str]): 오류 목록
+    - **details** (dict, optional): 검증 실패 시 errors 목록
 
     ## Notes
-    - 파일 검증은 실제 데이터셋 등록 전에 수행하는 것을 권장합니다
-    - 검증 실패 시 details 필드에서 구체적인 오류 원인을 확인할 수 있습니다
-    - ZIP 파일 형식이 아니거나 COCO128 구조를 따르지 않으면 검증이 실패합니다
+    - 출력에는 `dataset_kind` 가 포함되지 않는다(입력으로 이미 분류가 정해져 있음).
+    - 형식 불충족은 200 + `is_valid=false` 로 응답한다.
 
     ## Errors
-    - 400: 파일 형식 오류 또는 데이터셋 구조 검증 실패
     - 401: 인증되지 않은 사용자
+    - 413: 업로드 파일 크기가 허용치를 초과
+    - 422: 알 수 없는 `dataset_kind` 값
     - 500: 서버 내부 오류
     """
-    validation_result = DatasetService.validate_dataset_file(file)
-    if not validation_result.get("is_valid"):
-        logger.warning(f"데이터셋 검증 실패: {validation_result.get('message')}")
-    return DatasetValidationResponse(**validation_result)
+    _enforce_upload_size_limit(file)
+
+    result = DatasetService.validate(file=file, dataset_kind=dataset_kind)
+    if not result.is_valid:
+        logger.warning(f"데이터셋 검증 실패: {result.message}")
+    return result
 
 
 # TODO: 책임 분리 필요.
@@ -79,6 +123,7 @@ def create_dataset(
     db: Session = SessionDepends,
     name: Annotated[str, Form()],
     description: Annotated[Optional[str], Form()] = None,
+    dataset_kind: Annotated[DatasetKindEnum, Form()],
     file: UploadFile = File(...),
     current_user: UserSchema = Depends(get_current_user),
 ):
@@ -127,19 +172,18 @@ def create_dataset(
     - 401: 인증되지 않은 사용자
     - 500: 데이터셋 등록 중 서버 내부 오류
     """
+    _enforce_upload_size_limit(file)
+
     try:
-        # 데이터셋 정보 저장
         dataset_data = DatasetBaseSchema(
             name=name,
             description=description if description else None,
             version=1,
             subversion=1,
-            train_ratio=0.8,
-            validation_ratio=0.1,
-            test_ratio=0.1,
+            kind=dataset_kind,
         )
 
-        # DatasetService를 통해 DB에 저장
+        # DatasetService를 통해 DB에 저장 (ZIP 재검증은 수행하지 않음 — 사전 /validate 통과 전제)
         db_dataset = DatasetService.create(db, obj_in=dataset_data, file=file)
 
         return db_dataset

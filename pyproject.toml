@@ -1,0 +1,54 @@
+[project]
+name = "ml-workflow"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "black==25.9.0",
+    "isort==5.12.0",
+    "flake8==6.0.0",
+    "ruff",
+    "pre-commit>=4.0.0",
+    "ipykernel",
+]
+e2e = [
+    "pytest>=8.0",
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["e2e-test"]
+markers = [
+    "workflow_deploy: 워크플로우 배포 시나리오",
+    "workflow_delete: 워크플로우 삭제 시나리오",
+    "workflow_validation: 워크플로우 정의 검증",
+    "workflow_scenario_deploy: 워크플로 시나리오 배포",
+    "workflow_scenario_delete: 워크플로 시나리오 삭제",
+    "workflow_scenario_lifecycle: 워크플로 시나리오 생명주기",
+    "workflow_template_clone: 워크플로 템플릿 생성 → 복제 → 실행 → 추론 → 정리",
+    "model_improvement: 최적화/경량화 API",
+    "model_improvement_scenario: 최적화/경량화 E2E(작업 생성~성공 폴링)",
+    "training: 통합 학습→등록 파이프라인 E2E(YOLOX/ESM2 공통)",
+    "training_clean: 학습→등록 e2e 산출물(experiment/child model/dataset) 일괄 정리",
+    "model_files: 모델 파일 목록·다운로드 URL API",
+]
+
+[tool.black]
+line-length = 120
+# vendored/ 는 외부 모델 구현을 복사해 둔 것이라 재포맷하지 않는다(원본 대비 diff·재-vendoring 보존).
+extend-exclude = "/vendored/"
+
+[tool.isort]
+profile = "black"
+line_length = 120
+extend_skip_glob = ["*/vendored/*"]
+
+[tool.ruff]
+line-length = 120
+exclude = [".venv", "*/.venv", "YOLOX", "*/vendored/*"]
+
+[tool.ruff.lint]
+ignore = ["E203", "W605", "E712", "E266", "F401", "E402", "F821", "E711", "F403"]

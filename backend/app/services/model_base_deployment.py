@@ -1,5 +1,6 @@
 """모델 기본 배포 관리 Service"""
 
+import json
 import logging
 import os
 import re
@@ -8,6 +9,7 @@ from typing import Any
 
 from config.settings import get_settings
 from core.kubeflow.kubeflow_manager import KubeflowManager
+from core.serving.gpu_placement import parse_gpu_pool_profiles, static_training_placement
 from db.models.model_base_deployment import BaseDeploymentStatus, ModelBaseDeployment
 from kfp import dsl
 from kfp.compiler import Compiler
@@ -254,8 +256,10 @@ class ModelBaseDeploymentService:
             gpu_enabled: bool,
             namespace: str,
             rest_api_url: str,
-            restapi_username: str,
-            restapi_password: str,
+            internal_api_key: str,
+            gpu_resource_key: str = "nvidia.com/gpu",
+            node_selector_json: str = "{}",
+            tolerations_json: str = "[]",
         ) -> str:
             import json  # noqa: F811
             import logging
@@ -330,9 +334,28 @@ class ModelBaseDeploymentService:
                     },
                 )
 
+                ollama_env = [
+                    client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
+                    client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
+                ]
+
+                base_node_selector: dict = {}
+                base_tolerations: list = []
                 if gpu_enabled:
-                    ollama_resources.requests["nvidia.com/gpu"] = "1"
-                    ollama_resources.limits["nvidia.com/gpu"] = "1"
+                    # GPU 노드풀 프로파일은 백엔드에서 계산해 파라미터(JSON 문자열)로 전달받는다.
+                    # (컴포넌트는 격리 컨테이너라 모듈 헬퍼/settings 를 못 본다 — free-variable NameError 방지.)
+                    ollama_resources.requests[gpu_resource_key] = "1"
+                    ollama_resources.limits[gpu_resource_key] = "1"
+                    try:
+                        base_node_selector = json.loads(node_selector_json) or {}
+                    except Exception:
+                        base_node_selector = {}
+                    try:
+                        base_tolerations = [client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])]
+                    except Exception:
+                        base_tolerations = []
+                else:
+                    ollama_env.append(client.V1EnvVar(name="NVIDIA_VISIBLE_DEVICES", value="none"))
 
                 # 2. Deployment 생성
                 deployment = client.V1Deployment(
@@ -371,12 +394,13 @@ class ModelBaseDeploymentService:
                                             client.V1ContainerPort(container_port=11434, name="http", protocol="TCP")
                                         ],
                                         resources=ollama_resources,
-                                        env=[
-                                            client.V1EnvVar(name="MODEL_ID", value=str(model_id)),
-                                            client.V1EnvVar(name="OLLAMA_MODEL", value=ollama_model_name),
-                                        ],
+                                        env=ollama_env,
                                         volume_mounts=[
-                                            client.V1VolumeMount(name="model-data", mount_path="/root/.ollama")
+                                            client.V1VolumeMount(
+                                                name="model-data",
+                                                mount_path="/root/.ollama",
+                                                read_only=True,
+                                            )
                                         ],
                                         readiness_probe=client.V1Probe(
                                             http_get=client.V1HTTPGetAction(path="/api/tags", port=11434),
@@ -389,10 +413,13 @@ class ModelBaseDeploymentService:
                                     client.V1Volume(
                                         name="model-data",
                                         persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
-                                            claim_name=pvc_name
+                                            claim_name=pvc_name,
+                                            read_only=True,
                                         ),
                                     )
                                 ],
+                                node_selector=(base_node_selector or None),
+                                tolerations=(base_tolerations or None),
                             ),
                         ),
                     ),
@@ -475,23 +502,6 @@ class ModelBaseDeploymentService:
                     if not rest_api_url:
                         logger.warning("REST_API_URL not provided, skipping DB update")
                     else:
-                        # 토큰 발급
-                        auth_token = None
-                        if restapi_username and restapi_password:
-                            try:
-                                token_response = requests.post(
-                                    f"{rest_api_url}/api/v1/authentications/token",
-                                    data={"username": restapi_username, "password": restapi_password},
-                                    timeout=10,
-                                )
-                                if token_response.status_code == 200:
-                                    auth_token = token_response.json().get("access_token")
-                                    logger.info("Successfully obtained authentication token")
-                                else:
-                                    logger.warning(f"Failed to get auth token: {token_response.status_code}")
-                            except Exception as token_error:
-                                logger.warning(f"Failed to obtain auth token: {token_error}")
-
                         update_url = f"{rest_api_url}/api/v1/models/base-deployments/{model_id}/status"
 
                         update_payload = {
@@ -502,9 +512,10 @@ class ModelBaseDeploymentService:
                             "error_message": None if deployment_ready else "Deployment not ready after timeout",
                         }
 
-                        headers = {"Content-Type": "application/json"}
-                        if auth_token:
-                            headers["Authorization"] = f"Bearer {auth_token}"
+                        headers = {
+                            "Content-Type": "application/json",
+                            "X-Internal-API-Key": internal_api_key,
+                        }
 
                         logger.info("Updating deployment status via API: %s", update_url)
                         response = requests.put(update_url, json=update_payload, headers=headers, timeout=10)
@@ -539,20 +550,6 @@ class ModelBaseDeploymentService:
                     import requests
 
                     if rest_api_url:
-                        # 토큰 발급
-                        auth_token = None
-                        if restapi_username and restapi_password:
-                            try:
-                                token_response = requests.post(
-                                    f"{rest_api_url}/api/v1/authentications/token",
-                                    data={"username": restapi_username, "password": restapi_password},
-                                    timeout=10,
-                                )
-                                if token_response.status_code == 200:
-                                    auth_token = token_response.json().get("access_token")
-                            except Exception as token_error:
-                                logger.warning(f"Failed to obtain auth token for failure update: {token_error}")
-
                         update_url = f"{rest_api_url}/api/v1/models/base-deployments/{model_id}/status"
 
                         update_payload = {
@@ -563,9 +560,10 @@ class ModelBaseDeploymentService:
                             "error_message": str(e),
                         }
 
-                        headers = {"Content-Type": "application/json"}
-                        if auth_token:
-                            headers["Authorization"] = f"Bearer {auth_token}"
+                        headers = {
+                            "Content-Type": "application/json",
+                            "X-Internal-API-Key": internal_api_key,
+                        }
 
                         requests.put(update_url, json=update_payload, headers=headers, timeout=10)
                 except Exception as db_error:
@@ -579,6 +577,10 @@ class ModelBaseDeploymentService:
                     }
                 )
 
+        # GPU 노드풀 프로파일(정적)을 백엔드에서 계산해 컴포넌트에 문자열 파라미터로 전달.
+        _placement = static_training_placement(
+            parse_gpu_pool_profiles(getattr(settings, "GPU_POOL_PROFILES_JSON", "[]") or "[]")
+        )
         return deploy_ollama_embedding(
             model_id=model_id,
             model_name=model_name,
@@ -588,8 +590,10 @@ class ModelBaseDeploymentService:
             gpu_enabled=gpu_enabled,
             namespace=settings.KUBEFLOW_NAMESPACE,
             rest_api_url=settings.REST_API_URL,
-            restapi_username="surromind",  # 고정 사용자명
-            restapi_password=settings.DEMO_PASSWORD,
+            internal_api_key=settings.INTERNAL_API_KEY,
+            gpu_resource_key=_placement["gpu_resource_key"],
+            node_selector_json=json.dumps(_placement["node_selector"]),
+            tolerations_json=json.dumps(_placement["tolerations"]),
         )
 
     @staticmethod

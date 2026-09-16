@@ -1,9 +1,11 @@
 import tempfile
+import warnings
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 import boto3
+from botocore.config import Config
 from config.settings import get_settings
 from fastapi import UploadFile
 
@@ -19,14 +21,18 @@ class MLFlowS3Manager:
         """
         if not hasattr(self, "initialized"):
             self.endpoint = settings.MLFLOW_S3_ENDPOINT_URL
-            self.access_key = settings.AWS_ACCESS_KEY_ID
-            self.secret_key = settings.AWS_SECRET_ACCESS_KEY
+            self.access_key = settings.MLFLOW_S3_ACCESS_KEY_ID
+            self.secret_key = settings.MLFLOW_S3_SECRET_ACCESS_KEY
             self.bucket = settings.MLFLOW_S3_BUCKET
             self.s3_client = boto3.client(
                 "s3",
                 endpoint_url=self.endpoint,
                 aws_access_key_id=self.access_key,
                 aws_secret_access_key=self.secret_key,
+                # 서명 방식을 명시하지 않으면 presigned URL 이 구식 SigV2 로 만들어진다.
+                # (client.meta.config 조회값은 s3v4 로 보여도 서명은 기본 signer 를 탄다.)
+                # AWS 는 신규 리전에서 SigV2 를 받지 않고, 데이터셋용 S3 클라이언트도 s3v4 를 쓴다.
+                config=Config(signature_version="s3v4"),
                 # verify=False,
             )
             self.initialized = True
@@ -88,6 +94,24 @@ class MLFlowS3Manager:
         except Exception as e:
             raise Exception(f"파일 삭제 중 오류 발생: {str(e)}")
 
+    @staticmethod
+    def s3_path_from_artifact_uri(artifact_uri: Optional[str]) -> Optional[str]:
+        """MLflow artifact_uri 에서 S3 오브젝트 경로(버킷명 제외)를 추출한다. 파싱 불가 시 None.
+
+        delete_folder 에 넘길 prefix 를 얻는 용도. 두 형식을 지원한다:
+          mlflow-artifacts:/0/abc/artifacts                  -> 0/abc/artifacts
+          s3://mlflow/8/abc/artifacts/google-owlv2-base-...  -> 8/abc/artifacts/google-owlv2-base-...
+        """
+        if not artifact_uri:
+            return None
+        if artifact_uri.startswith("mlflow-artifacts:/"):
+            return artifact_uri.replace("mlflow-artifacts:/", "")
+        if artifact_uri.startswith("s3://"):
+            rest = artifact_uri.replace("s3://", "")  # bucket/key...
+            if "/" in rest:
+                return rest.split("/", 1)[1]  # 첫 '/' 이후(버킷명 제거)
+        return None
+
     def delete_folder(self, folder_path: str) -> bool:
         """
         지정된 폴더 경로와 그 안의 모든 파일을 삭제합니다.
@@ -124,13 +148,47 @@ class MLFlowS3Manager:
                     except Exception as delete_error:
                         # 개별 객체 삭제 실패는 로깅만 하고 계속 진행
                         # (이미 삭제된 객체일 수 있음)
-                        import warnings
-
                         warnings.warn(f"S3 객체 삭제 실패 (Key: {key_obj['Key']}): {str(delete_error)}")
 
             return True
         except Exception as e:
             raise Exception(f"폴더 삭제 중 오류 발생: {str(e)}")
+
+    def list_objects(
+        self, prefix: str, limit: int = 1000, cursor: Optional[str] = None
+    ) -> Tuple[List[dict], Optional[str]]:
+        """prefix 아래 오브젝트를 한 쪽 나열한다. 반환 (목록, next_cursor).
+
+        목록 항목: {"key", "size", "last_modified"}. last_modified 는 boto3 가 주는 tz-aware UTC 그대로다.
+        키는 사전순으로 오므로 쪽을 넘어가도 순서가 유지되고 중복·누락이 없다.
+        """
+        kwargs: dict = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": max(1, limit)}
+        if cursor:
+            kwargs["ContinuationToken"] = cursor
+        resp = self.s3_client.list_objects_v2(**kwargs)
+        items = [
+            {"key": o["Key"], "size": o["Size"], "last_modified": o["LastModified"]}
+            for o in (resp.get("Contents") or [])
+            # 디렉터리 표시용 키가 섞여 들어오면 파일이 아니므로 뺀다.
+            if not o["Key"].endswith("/")
+        ]
+        return items, resp.get("NextContinuationToken")
+
+    def object_exists(self, key: str) -> Optional[dict]:
+        """오브젝트가 있으면 {"size", "last_modified"}, 없으면 None."""
+        try:
+            head = self.s3_client.head_object(Bucket=self.bucket, Key=key)
+        except Exception:
+            return None
+        return {"size": head["ContentLength"], "last_modified": head["LastModified"]}
+
+    def presigned_get_url(self, key: str, expires_in: int = 300) -> str:
+        """다운로드용 서명 URL. 인증 없이 접근 가능하므로 로그에 남기지 않는다."""
+        return self.s3_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=max(1, int(expires_in)),
+        )
 
     def get_full_url(self, file_url: str):
         url = f"{self.endpoint}/{self.bucket}/{file_url}"

@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 from config.db.connect import SessionDepends
-from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum
+from config.db.enums import ModelFormatEnum, ModelProviderEnum, ModelTypeEnum, ModelVisibility
+from config.optimization_sources import is_optimization_eligible
 from config.settings import get_settings
 from db.models.model import ModelTaskType
 from db.models.model_base_deployment import BaseDeploymentStatus
@@ -18,9 +19,13 @@ from schemas.model import (
     ModelReadSchema,
     ModelRegistryRequestSchema,
     ModelTypeReadSchema,
+    PredefinedModelKey,
 )
+from schemas.model_file import ModelFileDownloadUrlResponse, ModelFileListResponse
 from schemas.user import UserSchema
 from services.model import (
+    ESMFOLD2_BACKBONE_MODEL_NAME,
+    PREDEFINED_MODEL_CONFIGS,
     CustomModelService,
     HuggingFaceModelService,
     ModelFormatService,
@@ -28,12 +33,12 @@ from services.model import (
     ModelService,
     ModelTypeService,
     OllamaModelService,
-    is_yolox_local_model,
-    is_yolox_remote_model,
+    resolve_recommended_hparams,
 )
 from services.model_base_deployment import ModelBaseDeploymentService
+from services.model_file import ModelFileService
 from sqlalchemy.orm import Session
-from utils.authentication import get_current_user
+from utils.authentication import get_current_user, verify_internal_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +112,9 @@ def create_model(
         - 모델 사용 예제 코드
         - 생략 가능
     - **file** (UploadFile, optional): 모델 파일
-        - 커스텀 모델인 경우 업로드할 모델 파일
+        - 커스텀 모델 직접 등록 시 **모델 디렉토리를 압축한 .zip** 만 허용
+          (config.json/safetensors/tokenizer 등 멀티파일 모델을 통째로 업로드)
+        - zip 은 최상위 단일 폴더로 감싸거나 파일을 루트에 평탄하게 담은 형태 모두 허용
         - 생략 가능
     - **model_registry_schema** (str, optional): 모델 레지스트리 스키마 (JSON 문자열)
         - 내부 시스템에서만 사용하는 파라미터
@@ -149,7 +156,7 @@ def create_model(
     - **ID 값 조회**: `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API(`/providers`, `/types`, `/formats`)
       를 먼저 호출하여 ID 값을 확인한 후 사용해야 합니다
     - HuggingFace 모델인 경우 provider_id가 huggingface의 ID와 일치해야 합니다
-    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, file이 필요합니다
+    - 커스텀 모델인 경우 provider_id가 custom의 ID와 일치해야 하며, **모델 디렉토리를 압축한 .zip** file이 필요합니다
     - YOLOX 모델인 경우에만 자동으로 학습 가능 모델(learning_enable_yn=True)로 설정됩니다
     - **중요**: `parent_model_id`와 `model_registry_schema`는 내부 시스템에서만 사용하는 파라미터입니다. 프론트엔드에서는 이 파라미터들을 전달하지 않아야 합니다.
 
@@ -159,43 +166,22 @@ def create_model(
     - 500: 모델 등록 중 서버 내부 오류
     """
 
-    # task 값 검증 (Enum 사용)
-    if task is not None:
-        try:
-            # 문자열을 Enum으로 변환
-            task_enum = ModelTaskType(task)
-            task = task_enum.value  # Enum 값을 문자열로 변환하여 저장
-        except ValueError:
-            valid_tasks = [e.value for e in ModelTaskType]
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"task는 다음 값 중 하나여야 합니다: {', '.join(valid_tasks)}. 입력된 값: {task}",
-            )
-
+    parsed_registry_schema = None
     try:
         if model_registry_schema:
             model_registry_schema_json = json.loads(model_registry_schema)
             logger.info(model_registry_schema_json)
-            model_registry_schema = ModelRegistryRequestSchema(**model_registry_schema_json)
-            logger.info(model_registry_schema)
+            parsed_registry_schema = ModelRegistryRequestSchema(**model_registry_schema_json)
+            logger.info(parsed_registry_schema)
     except Exception as e:
         logger.error(f"model_registry schema error : {e}")
         logger.error(f"model_registry_schema = {model_registry_schema}")
-        logger.error(f"model_registry_schema_json = {model_registry_schema_json}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="model_registry_schema is unprocessable entity"
         )
-    # YOLOX 모델인지 확인 (repo_id 또는 name으로 확인)
-    is_yolox = False
-    if repo_id:
-        is_yolox = is_yolox_remote_model(repo_id)
-    if not is_yolox:
-        is_yolox = is_yolox_local_model(name)
 
-    # YOLOX 모델인 경우에만 learning_enable_yn을 true로 설정
-    learning_enable_yn = is_yolox
-
-    model = ModelBaseSchema(
+    return ModelService.register_model(
+        db,
         name=name,
         description=description,
         repo_id=repo_id,
@@ -203,104 +189,112 @@ def create_model(
         type_id=type_id,
         format_id=format_id,
         parent_model_id=parent_model_id,
-        learning_enable_yn=learning_enable_yn,
-        version=1,
-        subversion=1,
         task=task,
         parameter=parameter,
         sample_code=sample_code,
+        model_registry_schema=parsed_registry_schema,
+        file=file,
     )
-    custom_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.CUSTOM.value)
-    huggingface_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.HUGGINGFACE.value)
-    ollama_model_provider = ModelProviderService.get_by_name(db, ModelProviderEnum.OLLAMA.value)
-    gguf_format = ModelFormatService.get_by_name(db, ModelFormatEnum.GGUF.value)
-    embedding_type = ModelTypeService.get_by_name(db, ModelTypeEnum.EMBEDDING.value)
 
-    try:
-        # Ollama + GGUF인 경우: 단순히 meta 정보만 DB에 등록
-        if (
-            ollama_model_provider
-            and gguf_format
-            and provider_id == ollama_model_provider.id
-            and format_id == gguf_format.id
-        ):
-            if not repo_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for Ollama models"
-                )
 
-            # 모델과 레지스트리 생성 (MLflow 없이)
-            from repos.model import model_registry_repository, model_repository
-            from schemas.model import ModelRegistryBaseSchema
+@router.post("/auto-generate", response_model=ModelBriefReadSchema)
+def auto_generate_model(
+    *,
+    db: Session = SessionDepends,
+    model_key: PredefinedModelKey = Query(
+        ...,
+        description="등록할 사전 정의 모델 키 (Swagger 드롭다운에서 선택)",
+    ),
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    사전 정의 모델 자동 등록
 
-            model_obj = model_repository.create(db, obj_in=model)
-            model_id = model_obj.id
+    사전 정의된 모델 목록에서 선택하여 자동으로 등록합니다.
+    `POST /api/v1/models`와 동일한 등록 프로세스를 수행하되,
+    모델의 provider, type, format 등의 메타 정보가 자동으로 설정됩니다.
 
-            # Ollama 모델을 PVC에 다운로드하는 파이프라인 실행
-            pvc_name = None
-            try:
-                sanitized_model_name = name.replace("/", "-")
-                pvc_name = OllamaModelService.download_ollama_model_to_pvc(
-                    db=db,
-                    model_id=model_id,
-                    model_name=sanitized_model_name,
-                    repo_id=repo_id,
-                )
-                logger.info(f"Started Ollama model download pipeline for model_id: {model_id}, PVC: {pvc_name}")
-            except Exception as download_error:
-                logger.error(f"Failed to start Ollama model download pipeline: {download_error}")
-                # 다운로드 실패해도 모델 등록은 진행 (비동기이므로)
+    ## Query Parameters
+    - **model_key** (str, required): 등록할 사전 정의 모델 키 (드롭다운 선택)
+        - `hustvl/yolos-tiny`: YOLOS Tiny (object-detection, HuggingFace, pytorch)
+        - `hustvl/yolos-small`: YOLOS Small (object-detection, HuggingFace, pytorch)
+        - `facebook/detr-resnet-50`: DETR ResNet-50 (object-detection, HuggingFace, pytorch)
+        - `facebook/detr-resnet-101`: DETR ResNet-101 (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-large`: RF-DETR Large (object-detection, HuggingFace, pytorch)
+        - `Roboflow/rf-detr-medium`: RF-DETR Medium (object-detection, HuggingFace, pytorch)
+        - `ahmgam/medllama3-v20:latest`: MedLlama3 (text-generation, Ollama, gguf)
+        - `bge-m3`: BGE-M3 Embedding (embedding, Ollama, gguf)
+        - `yolox_s`: YOLOX-S (object-detection, Custom, yolox) — 가중치 자동 다운로드
+        - `yolox_m`: YOLOX-M (object-detection, Custom, yolox) — 가중치 자동 다운로드
+        - `qwq:32b`: QwQ-32B (text-generation, Ollama, gguf)
+        - `gpt-oss:20b`: GPT-OSS-20B (text-generation, Ollama, gguf)
+        - `deepseek-r1:32b`: DeepSeek-R1 32B (text-generation, Ollama, gguf)
+        - `granite4.1:30b`: Granite 4.1 30B (text-generation, Ollama, gguf)
+        - `lfm2:24b`: LFM2 24B (text-generation, Ollama, gguf)
+        - `gemma4:27b`: Gemma 4 27B (vqa, Ollama, gguf)
+        - `qwen3.6:27b`: Qwen3.6 27B (vqa, Ollama, gguf)
+        - `nemotron3:33b`: Nemotron3 33B (vqa, Ollama, gguf)
 
-            # ModelRegistry 생성 (uri는 repo_id 사용, pvc는 다운로드 파이프라인에서 생성된 PVC 이름)
-            model_registry_repository.create(
-                db,
-                obj_in=ModelRegistryBaseSchema(
-                    artifact_path="",  # Ollama는 artifact_path 불필요
-                    uri=repo_id,  # repo_id를 uri로 사용 (예: ahmgam/medllama3-v20)
-                    reference_model_id=model_id,
-                    run_id=None,  # MLflow run_id 없음
-                    pvc=pvc_name,  # PVC 이름 저장
+    ## Response (ModelBriefReadSchema)
+    `POST /api/v1/models`와 동일한 응답 형식
+
+    ## Notes
+    - 각 모델의 provider_id, type_id, format_id는 DB에서 이름으로 자동 조회됩니다
+    - `bge-m3`는 Ollama Embedding 모델로, PVC 다운로드 및 자동 배포가 수행됩니다
+    - `yolox_s`, `yolox_m`은 GitHub에서 가중치 파일(.pth)을 자동 다운로드하여 MLflow에 등록합니다
+
+    ## Errors
+    - 400: 모델 키에 해당하는 provider/type/format을 DB에서 찾을 수 없음
+    - 401: 인증되지 않은 사용자
+    - 409: 이미 등록된 모델명 (중복 등록 방지 — 가중치 다운로드 전에 거부)
+    - 422: 유효하지 않은 model_key
+    - 500: 모델 등록 중 서버 내부 오류 (가중치 다운로드 실패 포함)
+    """
+    model_key = model_key.value
+    config = PREDEFINED_MODEL_CONFIGS.get(model_key)
+    if not config:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"유효하지 않은 model_key: {model_key}",
+        )
+
+    # 구조예측(ESMFold2)은 언어모델 백본 ESMC-6B 가 추론에 필수이며 서빙 시 로컬(MLflow)에서 로드한다.
+    # 백본이 먼저 등록돼 있어야 서빙이 로컬 로드로 붙을 수 있으므로, 미등록이면 등록을 거부한다.
+    if config.get("task") == ModelTaskType.PROTEIN_STRUCTURE_PREDICTION.value:
+        if not ModelService.get_by_name(db, ESMFOLD2_BACKBONE_MODEL_NAME):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"'{model_key}' 등록에는 백본 모델 '{ESMFOLD2_BACKBONE_MODEL_NAME}' 이 먼저 등록돼 있어야 합니다. "
+                    f"'{ESMFOLD2_BACKBONE_MODEL_NAME}' 을 먼저 등록한 뒤 다시 시도하세요."
                 ),
             )
-            db.commit()
 
-            # Embedding 타입이고 Ollama인 경우 자동 배포
-            if embedding_type and type_id == embedding_type.id:
-                logger.info(f"Auto-deploying Ollama embedding model: {model_id} (repo_id: {repo_id})")
-                try:
-                    sanitized_model_name = name.replace("/", "-")
-                    ModelBaseDeploymentService.deploy_ollama_embedding_model(
-                        db=db,
-                        model_id=model_id,
-                        model_name=sanitized_model_name,
-                        repo_id=repo_id,
-                        gpu_enabled=False,  # 기본값, 필요시 파라미터로 받을 수 있음
-                    )
-                    logger.info(f"Successfully initiated deployment for embedding model: {model_id}")
-                except Exception as deploy_error:
-                    logger.error(f"Failed to deploy embedding model {model_id}: {deploy_error}")
-                    # 배포 실패해도 모델 등록은 성공으로 처리 (비동기 배포이므로)
+    # 가중치 다운로드 전 모델명 중복 사전 체크(조기 종료) — 단일 가드 메서드 재사용.
+    # (register_model 도 같은 메서드를 호출해 동시성/타 경로까지 최종 보장한다.)
+    ModelService.assert_model_name_available(db, config["name"])
 
-            return model_repository.get(db, model_id)
-        elif provider_id == huggingface_model_provider.id:  # HuggingFace
-            if not repo_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, detail="repo_id is required for HuggingFace models"
-                )
-            return HuggingFaceModelService().create(db, model_schema=model)
-        elif provider_id == custom_model_provider.id:  # Custom
-            return CustomModelService().create(
-                db, model_schema=model, model_registry_schema=model_registry_schema, file=file
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported provider_id: {provider_id}"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise e
+    ids = ModelService.resolve_predefined_model_ids(db, config)
+
+    file = None
+    if "weight_url" in config:
+        file = ModelService.download_weight_file(config["weight_url"], config["weight_filename"])
+
+    try:
+        return ModelService.register_model(
+            db,
+            name=config["name"],
+            description=config["description"],
+            repo_id=config.get("repo_id"),
+            provider_id=ids["provider_id"],
+            type_id=ids["type_id"],
+            format_id=ids["format_id"],
+            task=config["task"],
+            file=file,
+        )
+    finally:
+        if file and hasattr(file, "file"):
+            file.file.close()
 
 
 @router.get("/types", response_model=list[ModelTypeReadSchema] | ModelTypeReadSchema)
@@ -475,14 +469,18 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     - **child_models** (List[ModelReadChildSchema], optional): 자식 모델 목록
         - id (int): 자식 모델 ID
         - name (str): 자식 모델 이름
-        - description (str): 자식 모델 설명
+        - description (str, optional): 자식 모델 설명
         - child_models (List[ModelReadChildSchema], optional): 하위 자식 모델 (재귀적)
+    - **learning_enable_yn** (bool): 학습 파이프라인에 소스로 쓸 수 있는지(카탈로그/권한 기준)
+    - **opt_enable_yn** (bool): `POST /model-improvements` 최적화/경량화 **task**의 소스로 쓸 수 있는지
+    - **visibility** (str): 목록/상세 공통 — `CATALOG` (초기 카탈로그·학습·최적화 제약) / `CUSTOM` (파생·학습·최적화 가능 모델)
     - **created_at** (datetime): 모델 생성 시각
     - **updated_at** (datetime): 모델 수정 시각
 
     ## Notes
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환합니다
     - 부모/자식 모델 관계는 재귀적으로 조회됩니다
+    - `visibility`는 `parent_model_id` 또는 `opt_enable_yn`에 따라 `CUSTOM`이 됨(목록과 동일 규칙)
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -492,7 +490,98 @@ def read_model(model_id: int, db: Session = SessionDepends, current_user: UserSc
     db_model = ModelService().get(db, model_id)
     if db_model is None:
         raise HTTPException(status_code=404, detail="Model not found")
+    db_model.recommended_hparams = resolve_recommended_hparams(db, db_model)
     return db_model
+
+
+@router.get("/{model_id}/files", response_model=ModelFileListResponse)
+def list_model_files(
+    model_id: int,
+    cursor: Optional[str] = Query(None, description="이어받기 토큰. 첫 요청에는 넣지 않는다"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 목록 조회
+
+    모델이 실제로 보관하는 파일을 조회합니다.
+    파일 목록과 다운로드를 제공하는 것은 MLflow 아티팩트를 쓰는 모델(huggingface, custom 등)뿐이며,
+    Ollama·원격 서빙 전용 모델은 빈 목록에 사유만 담아 응답합니다.
+
+    ## Path Parameters
+    - **model_id** (int): 조회할 모델 ID
+
+    ## Query Parameters
+    - **cursor** (str, optional): 이어받기 토큰
+        - 첫 요청에는 넣지 않습니다
+        - 응답의 `next_cursor` 를 그대로 넣어 다음 쪽을 받습니다
+        - 서버가 준 값을 그대로 돌려보내는 불투명한 문자열이며, 형식을 해석하지 않습니다
+
+    ## Response (ModelFileListResponse)
+    - **model_id** (int): 모델 ID
+    - **model_name** (str): 모델 이름
+    - **storage_type** (str): `MLFLOW`(파일 제공) | `OLLAMA`(미제공) | `NONE`(파일 없음)
+    - **location** (str, optional): MLFLOW 는 S3 prefix, OLLAMA 는 볼륨 이름, NONE 은 null
+    - **files** (list): 파일 목록. 없으면 빈 배열이며 null 이 되지 않습니다
+        - name (str): location 기준 상대 경로
+        - size_bytes (int): 파일 크기(바이트)
+        - last_modified (str): 마지막 수정 시각 (ISO8601, UTC)
+        - download_url (str): 다운로드 URL 을 발급받을 API 경로. 파일을 바로 주는 링크가 아닙니다
+    - **next_cursor** (str, optional): 다음 쪽이 있으면 토큰, 없으면 null
+    - **message** (str, optional): files 가 빈 사유. 목록이 있으면 null
+
+    ## Notes
+    - `files` 가 비어 있으면 `message` 를 그대로 화면에 노출하면 됩니다
+    - `.cache` 디렉터리 아래 파일(모델 다운로드 과정의 캐시 부산물)은 목록에서 제외됩니다
+    - 폴더는 항목으로 나오지 않습니다. 계층이 필요하면 `name` 을 `/` 로 나눠 구성합니다
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델을 찾을 수 없음
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.list_files(db, model_id, cursor)
+
+
+@router.get("/{model_id}/files/download-url", response_model=ModelFileDownloadUrlResponse)
+def issue_model_file_download_url(
+    model_id: int,
+    name: str = Query(..., description="목록 응답의 files[].name"),
+    db: Session = SessionDepends,
+    current_user: UserSchema = Depends(get_current_user),
+):
+    """
+    모델 파일 다운로드 URL 발급
+
+    파일 하나에 대한 스토리지 서명 URL 을 그 시점에 발급합니다.
+    목록 응답에 서명 URL 을 미리 담지 않는 이유는, 목록을 열어 둔 채 시간이 지나면 URL 이 만료되어
+    사용자가 스토리지의 오류 문서를 보게 되기 때문입니다.
+
+    ## Path Parameters
+    - **model_id** (int): 모델 ID
+
+    ## Query Parameters
+    - **name** (str, required): 목록 응답의 `files[].name` (location 기준 상대 경로)
+
+    ## Response (ModelFileDownloadUrlResponse)
+    - **model_id** (int): 모델 ID
+    - **name** (str): 파일 상대 경로
+    - **size_bytes** (int): 파일 크기(바이트)
+    - **download_url** (str): 스토리지 서명 URL
+    - **expires_at** (str): 만료 시각 (ISO8601, UTC). 유효기간 5분
+
+    ## Notes
+    - 발급된 URL 은 인증 없이 접근 가능하므로 공유에 주의합니다
+    - 브라우저에서는 이 API 를 `fetch` 로 호출해 `download_url` 을 받은 뒤 이동시킵니다
+      (링크 이동으로는 인증 헤더가 실리지 않습니다)
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 모델이 없거나 해당 파일이 없음
+    - 409: 파일 다운로드를 제공하지 않는 모델(Ollama·원격 서빙 전용)
+    - 503: 파일 저장소 조회 실패
+    """
+    return ModelFileService.issue_download_url(db, model_id, name)
 
 
 @router.get("", response_model=list[ModelBriefReadSchema])
@@ -524,14 +613,17 @@ def read_models(
         default=None,
         description="모델 포맷 ID로 필터링",
     ),
+    visibility: Optional[str] = Query(
+        default=None,
+        description="목록 구분 필터: 'catalog' 또는 'custom'",
+    ),
     current_user: UserSchema = Depends(get_current_user),
 ):
     """
     모델 목록 조회
 
     등록된 모델들의 목록을 페이지네이션하여 조회합니다.
-    model_type_id, model_provider_id, model_format_id를 사용하여 필터링할 수 있습니다.
-    특히 embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요.
+    model_type_id, model_provider_id, model_format_id, visibility를 사용하여 필터링할 수 있습니다.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작)
@@ -541,59 +633,50 @@ def read_models(
         - 생략 시: 전체 데이터 조회
         - 범위: 1-1000
     - **model_type_id** (int, optional): 모델 타입 ID로 필터링
-        - 예: Embedding 모델만 조회하려면 Embedding 타입의 ID 사용
         - `GET /api/v1/models/types` API로 타입 목록 조회 가능
     - **model_provider_id** (int, optional): 모델 제공자 ID로 필터링
         - `GET /api/v1/models/providers` API로 제공자 목록 조회 가능
     - **model_format_id** (int, optional): 모델 포맷 ID로 필터링
         - `GET /api/v1/models/formats` API로 포맷 목록 조회 가능
+    - **visibility** (str, optional): 목록 구분 필터
+        - `catalog`: 카탈로그 모델만 반환 (초기 등록 모델, 최적화 비대상)
+        - `custom`: 커스텀 모델만 반환 (최적화 가능/완료, 학습 완료 모델)
+        - 생략 시: 전체 모델 반환
 
     ## Response (List[ModelBriefReadSchema])
-    - **items** (List[ModelBriefReadSchema]): 모델 목록
-        각 항목은 다음 정보를 포함:
-        - id (int): 모델 고유 ID
-        - name (str): 모델 이름
-        - description (str, optional): 모델 설명
-        - repo_id (str): 모델 저장소 ID
-        - provider_info (ModelProviderReadSchema): 모델 제공자 정보
-            - id (int): 제공자 ID
-            - name (str): 제공자 이름
-            - description (str): 제공자 설명
-        - type_info (ModelTypeReadSchema): 모델 타입 정보
-            - id (int): 타입 ID
-            - name (str): 타입 이름
-            - description (str): 타입 설명
-        - format_info (ModelFormatReadSchema): 모델 포맷 정보
-            - id (int): 포맷 ID
-            - name (str): 포맷 이름
-            - description (str): 포맷 설명
-        - parent_model_id (int, optional): 부모 모델 ID
-        - task (str, optional): 모델 태스크
-        - parameter (str, optional): 모델 파라미터
-        - sample_code (str, optional): 샘플 코드
-        - registry (ModelRegistryReadSchema): 모델 레지스트리 정보
-            - id (int): 레지스트리 ID
-            - artifact_path (str): 아티팩트 경로
-            - uri (str): 모델 URI
-            - run_id (str, optional): MLflow 실행 ID
-            - reference_model_id (int): 참조 모델 ID
-            - created_at (datetime): 생성 시각
-            - updated_at (datetime): 수정 시각
-        - created_at (datetime): 모델 생성 시각
-        - updated_at (datetime): 모델 수정 시각
+    각 항목은 다음 정보를 포함:
+    - **id** (int): 모델 고유 ID
+    - **name** (str): 모델 이름
+    - **description** (str, optional): 모델 설명
+    - **repo_id** (str, optional): 모델 저장소 ID
+    - **provider_info** (ModelProviderReadSchema): 모델 제공자 정보
+        - id, name, description
+    - **type_info** (ModelTypeReadSchema): 모델 타입 정보
+        - id, name, description
+    - **format_info** (ModelFormatReadSchema): 모델 포맷 정보
+        - id, name, description
+    - **parent_model_id** (int, optional): 부모 모델 ID
+    - **task** (str, optional): 모델 태스크
+    - **parameter** (str, optional): 모델 파라미터
+    - **sample_code** (str, optional): 샘플 코드
+    - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
+        - id, artifact_path, uri, run_id, reference_model_id, created_at, updated_at
+    - **learning_enable_yn** (bool): 학습 파이프라인 사용 가능 여부
+    - **opt_enable_yn** (bool): 최적화/경량화 대상 여부
+    - **visibility** (str): 모델 분류 (`CATALOG` 또는 `CUSTOM`)
+    - **created_at** (datetime): 모델 생성 시각
+    - **updated_at** (datetime): 모델 수정 시각
 
     ## Notes
-    - page와 page_size를 모두 생략하면 전체 데이터를 조회 (최대 10000개)
+    - page와 page_size를 모두 생략하면 전체 데이터를 조회합니다 (최대 10000개)
     - page와 page_size 중 하나라도 생략하면 전체 데이터를 조회합니다
-    - 페이지네이션 사용 시 page와 page_size를 모두 제공해야 합니다
-    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id)는 함께 사용할 수 있습니다
-    - Embedding 모델만 조회하려면 model_type_id에 Embedding 타입의 ID를 사용하세요
+    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id, visibility)는 함께 사용할 수 있습니다
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: visibility 값이 유효하지 않음 ('catalog' 또는 'custom'만 허용)
     - 500: 서버 내부 오류
     """
-    # 필터링 조건 구성
     filters = {}
     if model_type_id is not None:
         filters["type_id"] = model_type_id
@@ -602,20 +685,34 @@ def read_models(
     if model_format_id is not None:
         filters["format_id"] = model_format_id
 
-    # 필터가 있는 경우 filter 메서드 사용, 없는 경우 get_multi 사용
-    if filters:
-        # 페이지네이션 파라미터가 없는 경우 전체 데이터 조회
+    visibility_filter = None
+    if visibility is not None:
+        visibility_upper = visibility.upper()
+        if visibility_upper not in (ModelVisibility.CATALOG.value, ModelVisibility.CUSTOM.value):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"visibility는 'catalog' 또는 'custom'이어야 합니다. 입력 값: {visibility}",
+            )
+        visibility_filter = visibility_upper
+
+    if filters or visibility_filter:
         if page is None or page_size is None:
-            return ModelService().filter_all(db, filters=filters)
-        # 페이지네이션 적용
-        skip = page_size * (page - 1)
-        return ModelService().filter(db, filters=filters, skip=skip, limit=page_size)
+            models = ModelService().filter_all(db, filters=filters, visibility=visibility_filter)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().filter(
+                db, filters=filters, skip=skip, limit=page_size, visibility=visibility_filter
+            )
     else:
-        # 필터가 없는 경우 기존 로직 사용
         if page is None or page_size is None:
-            return ModelService().get_multi(db, skip=0, limit=10000)
-        skip = page_size * (page - 1)
-        return ModelService().get_multi(db, skip=skip, limit=page_size)
+            models = ModelService().get_multi(db, skip=0, limit=10000)
+        else:
+            skip = page_size * (page - 1)
+            models = ModelService().get_multi(db, skip=skip, limit=page_size)
+
+    for m in models:
+        m.recommended_hparams = resolve_recommended_hparams(db, m)
+    return models
 
 
 @router.delete("/{model_id}")
@@ -663,7 +760,7 @@ def delete_model(model_id: int, db: Session = SessionDepends, current_user: User
         raise HTTPException(status_code=500, detail=f"모델 삭제 중 오류가 발생했습니다: {str(e)}")
 
 
-@router.put("/base-deployments/{model_id}/status")
+@router.put("/base-deployments/{model_id}/status", dependencies=[Depends(verify_internal_api_key)])
 def update_model_base_deployment_status(
     *,
     db: Session = SessionDepends,
@@ -673,7 +770,6 @@ def update_model_base_deployment_status(
     internal_url: Optional[str] = Body(None),
     status: str = Body(...),
     error_message: Optional[str] = Body(None),
-    current_user: UserSchema = Depends(get_current_user),
 ):
     """
     모델 기본 배포 상태 업데이트 (백엔드 서버 내부 전용 API)

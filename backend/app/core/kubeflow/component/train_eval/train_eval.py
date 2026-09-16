@@ -21,19 +21,33 @@ def container_train_eval_component(
     aws_access_key_id: str,
     aws_secret_access_key: str,
     mlflow_experiment_name: str,
-    dataset_artifact_uri: str,
+    dataset_download_ref: str,
+    dataset_storage_type: str,
+    dataset_s3_endpoint_url: str,
+    dataset_s3_access_key: str,
+    dataset_s3_secret_key: str,
+    dataset_s3_bucket: str,
+    datalake_api_url: str,
+    datalake_api_username: str,
+    datalake_api_password: str,
+    datalake_bucket_name: str,
     restapi_url: str,
     restapi_username: str,
     restapi_password: str,
+    internal_api_key: str,
     gpu_limit: str,
     batch_size: str,
     epochs: str,
     save_period: str,
     weight_decay: str,
-    lr0: str,
-    lrf: str,
+    learning_rate: str,
+    model_kind: str,
     namespace: str,
     train_image_url: str,
+    image_pull_secret_name: str = "harbor",
+    gpu_resource_key: str = "nvidia.com/gpu",
+    node_selector_json: str = "{}",
+    tolerations_json: str = "[]",
 ) -> str:
     import json
     import logging
@@ -51,17 +65,27 @@ def container_train_eval_component(
 
         logger.info(f"Creating training job for model_id: {model_id}, experiment_id: {experiment_id}")
 
-        # 리소스 설정 (Pod YAML 형식과 유사)
+        # 리소스 설정 (Pod YAML 형식과 유사). GPU 노드풀 프로파일(MIG taint 등)에 따라 자원키가 달라질 수 있음.
         resources = client.V1ResourceRequirements(
             requests={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
             limits={
-                "nvidia.com/gpu": gpu_limit,
+                gpu_resource_key: gpu_limit,
             },
         )
 
-        logger.info(f"GPU resources added: {gpu_limit} GPU(s) (fixed to: {gpu_limit})")
+        # 노드풀 프로파일: taint 통과용 toleration + nodeSelector (학습은 플래너 미경유 → 정적 주입)
+        try:
+            train_node_selector = json.loads(node_selector_json) or {}
+        except Exception:
+            train_node_selector = {}
+        try:
+            train_tolerations = [client.V1Toleration(**t) for t in (json.loads(tolerations_json) or [])]
+        except Exception:
+            train_tolerations = []
+
+        logger.info(f"GPU resources added: {gpu_limit} x {gpu_resource_key}")
 
         # Job 생성
         job_name = f"train-eval-{model_id}-{experiment_id}-{int(time.time())}"
@@ -88,14 +112,34 @@ def container_train_eval_component(
             aws_access_key_id,
             "--aws_secret_access_key",
             aws_secret_access_key,
-            "--dataset_artifact_uri",
-            dataset_artifact_uri,
+            "--dataset_download_ref",
+            dataset_download_ref,
+            "--dataset_storage_type",
+            dataset_storage_type,
+            "--dataset_s3_endpoint_url",
+            dataset_s3_endpoint_url,
+            "--dataset_s3_access_key",
+            dataset_s3_access_key,
+            "--dataset_s3_secret_key",
+            dataset_s3_secret_key,
+            "--dataset_s3_bucket",
+            dataset_s3_bucket,
+            "--datalake_api_url",
+            datalake_api_url,
+            "--datalake_api_username",
+            datalake_api_username,
+            "--datalake_api_password",
+            datalake_api_password,
+            "--datalake_bucket_name",
+            datalake_bucket_name,
             "--restapi_url",
             restapi_url,
             "--restapi_username",
             restapi_username,
             "--restapi_password",
             restapi_password,
+            "--internal_api_key",
+            internal_api_key,
             "--gpu_limit",
             gpu_limit,
             "--batch_size",
@@ -106,10 +150,10 @@ def container_train_eval_component(
             save_period,
             "--weight_decay",
             weight_decay,
-            "--lr0",
-            lr0,
-            "--lrf",
-            lrf,
+            "--learning_rate",
+            learning_rate,
+            "--model_kind",
+            model_kind,
         ]
 
         job = client.V1Job(
@@ -143,11 +187,24 @@ def container_train_eval_component(
                                 command=["python", "-m", "app.train_eval"],
                                 args=container_args,
                                 resources=resources,
+                                volume_mounts=[client.V1VolumeMount(name="dshm", mount_path="/dev/shm")],
                             )
                         ],
+                        volumes=[
+                            client.V1Volume(
+                                name="dshm", empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="4Gi")
+                            )
+                        ],
+                        image_pull_secrets=(
+                            [client.V1LocalObjectReference(name=image_pull_secret_name)]
+                            if image_pull_secret_name
+                            else []
+                        ),
+                        node_selector=(train_node_selector or None),
+                        tolerations=(train_tolerations or None),
                     ),
                 ),
-                backoff_limit=3,
+                backoff_limit=0,
                 ttl_seconds_after_finished=1800,  # Job 완료 후 30분 뒤 자동 삭제
             ),
         )
@@ -157,11 +214,9 @@ def container_train_eval_component(
         batch_v1.create_namespaced_job(namespace=namespace, body=job)
         logger.info(f"Created Job: {job_name}")
 
-        # Job 완료 대기 (최대 2시간)
-        max_wait = 7200  # 120분
-        wait_interval = 15  # 15초 간격
+        max_wait = 7200
+        wait_interval = 15
         elapsed = 0
-        job_completed = False
 
         while elapsed < max_wait:
             try:
@@ -169,36 +224,20 @@ def container_train_eval_component(
 
                 if job_status.status.succeeded:
                     logger.info(f"Job {job_name} completed successfully")
-                    job_completed = True
-                    break
-                elif job_status.status.failed:
-                    logger.error(f"Job {job_name} failed")
-                    raise RuntimeError(f"Job {job_name} failed")
+                    return json.dumps({"job_name": job_name, "status": "completed"})
 
-                time.sleep(wait_interval)
-                elapsed += wait_interval
+                if job_status.status.failed:
+                    logger.error(f"Job {job_name} failed (failed pod count: {job_status.status.failed})")
+                    return json.dumps({"status": "failed", "error": f"Job {job_name} failed"})
 
             except client.exceptions.ApiException as e:
-                # Job이 삭제된 경우 (404) - ttlSecondsAfterFinished에 의해 자동 삭제된 것으로 간주
-                if e.status == 404:
-                    logger.info(
-                        f"Job {job_name} not found (likely deleted after completion by ttlSecondsAfterFinished)"
-                    )
-                    job_completed = True
-                    break
-                else:
-                    logger.warning(f"Error checking job status: {e.status} - {e.reason}")
-                    time.sleep(wait_interval)
-                    elapsed += wait_interval
-            except Exception as e:
-                logger.warning(f"Error checking job status: {e}")
-                time.sleep(wait_interval)
-                elapsed += wait_interval
+                logger.warning(f"K8s API error while checking job {job_name}: {e.status} - {e.reason}")
 
-        if not job_completed:
-            raise RuntimeError(f"Job {job_name} did not complete within {max_wait} seconds")
+            time.sleep(wait_interval)
+            elapsed += wait_interval
 
-        return json.dumps({"job_name": job_name, "status": "completed"})
+        logger.error(f"Job {job_name} did not complete within {max_wait} seconds")
+        return json.dumps({"status": "failed", "error": f"Job {job_name} timed out"})
 
     except Exception as e:
         logger.error(f"Failed to create training job: {str(e)}")

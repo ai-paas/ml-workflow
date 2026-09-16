@@ -5,12 +5,14 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from config.settings import get_settings
+from core.serving.serving_workflow_deployment_policy import backend_api_url_from_internal, kserve_public_infer_url
+from db.models.model_workflow_deployment import WorkflowServingDeploymentType
 from db.models.service import ComponentType
 from pydantic import BaseModel, Field, computed_field, model_serializer
 from schemas.base import TimeStampSchemaMixin
-from schemas.kserve_deployment import KServeDeploymentReadSchema
 from schemas.model import ModelBriefReadSchema
-from schemas.user import UserSchema
+from schemas.model_workflow_deployment import ModelWorkflowDeploymentReadSchema
+from schemas.user import UserBriefSchema
 
 if TYPE_CHECKING:
     from db.models.service import ComponentConnection
@@ -39,21 +41,16 @@ class ComponentTypeInfo(BaseModel):
 class ComponentCreateRequest(BaseModel):
     """컴포넌트 생성 요청"""
 
+    ref_id: str = Field(..., description="프론트 생성 임시 참조 ID")
     name: str
     type: ComponentType
+    description: Optional[str] = Field(None, description="설명")
     model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
     knowledge_base_id: Optional[int] = Field(None, description="Knowledge Base 컴포넌트인 경우 Knowledge Base ID")
     prompt_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 프롬프트 ID")
-
-
-class ComponentUpdateRequest(BaseModel):
-    """컴포넌트 수정 요청 (config 제외)"""
-
-    name: str
-    type: ComponentType
-    model_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 모델 ID")
-    knowledge_base_id: Optional[int] = Field(None, description="Knowledge Base 컴포넌트인 경우 Knowledge Base ID")
-    prompt_id: Optional[int] = Field(None, description="모델 컴포넌트인 경우 프롬프트 ID")
+    config: Optional[Dict[str, Any]] = Field(None, description="컴포넌트별 세부 설정")
+    x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
+    y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
 
 
 class ComponentReadSchema(TimeStampSchemaMixin):
@@ -63,10 +60,14 @@ class ComponentReadSchema(TimeStampSchemaMixin):
     workflow_id: str
     name: str
     type: ComponentType
+    description: Optional[str] = None
     model_id: Optional[int] = None
     model: Optional[ModelBriefReadSchema] = None
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+    x: Optional[int] = None
+    y: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -74,17 +75,10 @@ class ComponentReadSchema(TimeStampSchemaMixin):
 
 # ============= Connection 스키마 =============
 class ConnectionCreateRequest(BaseModel):
-    """컴포넌트 연결 생성 요청"""
+    """컴포넌트 연결 생성 요청 (ref_id 기반)"""
 
-    source_component_type: ComponentType = Field(..., description="소스 컴포넌트 타입")
-    target_component_type: ComponentType = Field(..., description="타겟 컴포넌트 타입")
-
-
-class ConnectionUpdateRequest(BaseModel):
-    """컴포넌트 연결 수정 요청 (connection_type, config 제외)"""
-
-    source_component_type: ComponentType = Field(..., description="소스 컴포넌트 타입")
-    target_component_type: ComponentType = Field(..., description="타겟 컴포넌트 타입")
+    source_ref_id: str = Field(..., description="소스 컴포넌트 ref_id")
+    target_ref_id: str = Field(..., description="타겟 컴포넌트 ref_id")
 
 
 class ConnectionReadSchema(BaseModel):
@@ -104,17 +98,10 @@ class ConnectionReadSchema(BaseModel):
 
 # ============= Workflow Definition 스키마 =============
 class WorkflowDefinition(BaseModel):
-    """워크플로우 정의 (컴포넌트와 연결 정보)"""
+    """워크플로우 정의 (컴포넌트와 연결 정보) — ref_id 기반"""
 
     components: List[ComponentCreateRequest]
     connections: List[ConnectionCreateRequest]
-
-
-class WorkflowUpdateDefinition(BaseModel):
-    """워크플로우 수정 정의 (components의 config, connections의 connection_type/config 제외)"""
-
-    components: List[ComponentUpdateRequest]
-    connections: List[ConnectionUpdateRequest]
 
 
 # ============= Workflow 스키마 =============
@@ -149,7 +136,7 @@ class WorkflowUpdateRequest(BaseModel):
     category: Optional[str] = None
     status: Optional[WorkflowStatus] = None
     service_id: Optional[str] = None
-    workflow_definition: Optional[WorkflowUpdateDefinition] = None
+    workflow_definition: Optional[WorkflowDefinition] = None
 
 
 class WorkflowTemplateUpdateRequest(BaseModel):
@@ -159,7 +146,7 @@ class WorkflowTemplateUpdateRequest(BaseModel):
     description: Optional[str] = None
     category: Optional[str] = None
     status: Optional[WorkflowStatus] = None
-    workflow_definition: Optional[WorkflowUpdateDefinition] = None
+    workflow_definition: Optional[WorkflowDefinition] = None
 
 
 class WorkflowUpdateInternal(BaseModel):
@@ -192,11 +179,11 @@ class WorkflowBaseSchema(TimeStampSchemaMixin):
 class WorkflowReadSchema(WorkflowBaseSchema):
     """워크플로우 상세 조회 응답"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     kubeflow_run_id: Optional[str] = None
     components: List[ComponentReadSchema] = Field(default_factory=list)
     component_connections: List[ConnectionReadSchema] = Field(default_factory=list)
-    kserve_deployments: List[KServeDeploymentReadSchema] = Field(default_factory=list, exclude=True)
+    model_deployments: List[ModelWorkflowDeploymentReadSchema] = Field(default_factory=list, exclude=True)
     service: Optional[Any] = Field(None, exclude=True)  # Service 관계 객체 (직접 접근용, 응답에서 제외)
     template: Optional[Any] = Field(None, exclude=True)  # Workflow 관계 객체 (직접 접근용, 응답에서 제외)
 
@@ -219,34 +206,25 @@ class WorkflowReadSchema(WorkflowBaseSchema):
     @computed_field
     @property
     def public_url(self) -> Optional[str]:
-        """KServe 배포 정보를 기반으로 동적으로 생성된 공개 URL"""
-        if not self.kserve_deployments:
+        """KSERVE + KSERVE_GATEWAY_URL 설정 시에만 공개 추론 URL."""
+        if not self.model_deployments:
             return None
 
-        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
-        first_deployment = self.kserve_deployments[0]
+        first_deployment = self.model_deployments[0]
+        if first_deployment.deployment_type != WorkflowServingDeploymentType.KSERVE:
+            return None
         settings = get_settings()
-        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.model_name
-
-        # KServe V2 Protocol inference 엔드포인트
-        return f"{gateway_url}/v2/models/{model_name}/infer"
+        return kserve_public_infer_url(settings.KSERVE_GATEWAY_URL or "", first_deployment.model_name)
 
     @computed_field
     @property
     def backend_api_url(self) -> Optional[str]:
-        """KServe 배포 정보를 기반으로 동적으로 생성된 백엔드 API URL"""
-        if not self.kserve_deployments:
+        """배포 레코드의 internal_url 기준."""
+        if not self.model_deployments:
             return None
 
-        # 첫 번째 배포된 모델의 정보를 사용하여 URL 생성
-        first_deployment = self.kserve_deployments[0]
-        settings = get_settings()
-        gateway_url = settings.KSERVE_GATEWAY_URL or "http://10.10.30.154:80"
-        model_name = first_deployment.model_name
-
-        # KServe V2 Protocol inference 엔드포인트
-        return f"{gateway_url}/v2/models/{model_name}/infer"
+        first_deployment = self.model_deployments[0]
+        return backend_api_url_from_internal(first_deployment.internal_url)
 
     class Config:
         from_attributes = True
@@ -274,7 +252,7 @@ class WorkflowTemplateCreateRequest(BaseModel):
 class WorkflowTemplateBriefSchema(WorkflowBaseSchema):
     """워크플로우 템플릿 목록 조회용 간략 정보"""
 
-    creator: UserSchema
+    creator: UserBriefSchema
     usage_count: int = Field(0, description="템플릿 사용 횟수")
 
     class Config:
@@ -298,17 +276,12 @@ class WorkflowTemplateReadSchema(WorkflowReadSchema):
 
 
 # ============= Execution 스키마 =============
-class WorkflowExecuteRequest(BaseModel):
-    """워크플로우 실행 요청"""
-
-    parameters: Dict[str, Any] = Field(default_factory=dict)
-
-
 class WorkflowExecuteResponse(BaseModel):
     """워크플로우 실행 응답"""
 
     workflow_id: str
-    kubeflow_run_id: str
+    # 원격 서빙 전용 워크플로는 파이프라인을 제출하지 않으므로 run ID 가 없다.
+    kubeflow_run_id: Optional[str] = None
     status: str
     message: str
 
@@ -336,13 +309,35 @@ class ModelLLMTestResult(BaseModel):
     full_response: Optional[Dict[str, Any]] = Field(None, description="전체 응답 (Ollama API 응답)")
 
 
+class ModelProteinClassificationTestResult(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="추론 결과 목록 (label/score/probabilities)")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (epitope/cdr3b)")
+
+
+class ModelFillMaskTestResult(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="마스크 위치별 top-k 토큰 예측 목록")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (sequence/top_k)")
+
+
+class ModelStructurePredictionTestResult(BaseModel):
+    """protein-structure-prediction(ESMFold2) 모델 테스트 결과"""
+
+    predictions: List[Dict[str, Any]] = Field(..., description="예측 구조 목록 (pdb/plddt_mean/ptm/iptm)")
+    input_info: Optional[Dict[str, Any]] = Field(None, description="입력 정보 (sequence/num_loops/num_sampling_steps)")
+
+
 class ComponentTestResultBase(BaseModel):
     """컴포넌트 테스트 결과 기본"""
 
     component_id: str
     component_name: str
     component_type: str  # KNOWLEDGE_BASE 또는 MODEL
-    model_type: str  # embedding, ODM, LLM
+    model_type: str  # coarse: embedding, ODM, LLM, BFM
+    task: Optional[str] = None  # fine: object-detection/text-generation/protein-classification 등 (라우팅 키)
 
 
 class KnowledgeBaseComponentTestResult(ComponentTestResultBase):
@@ -357,8 +352,14 @@ class ModelComponentTestResult(ComponentTestResultBase):
     """모델 컴포넌트 테스트 결과"""
 
     component_type: str = Field(default="MODEL", description="컴포넌트 타입")
-    model_type: str  # ODM 또는 LLM
-    result: Union[ModelODMTestResult, ModelLLMTestResult]
+    model_type: str  # ODM, LLM, 또는 BFM
+    result: Union[
+        ModelODMTestResult,
+        ModelLLMTestResult,
+        ModelProteinClassificationTestResult,
+        ModelFillMaskTestResult,
+        ModelStructurePredictionTestResult,
+    ]
 
 
 class ComponentTestErrorResult(BaseModel):
@@ -392,3 +393,51 @@ class WorkflowMLTestResponse(BaseModel):
     final_result: Optional[str] = Field(
         None, description="최종 결과 이미지 (bbox와 label이 그려진 이미지를 base64로 인코딩한 문자열)"
     )
+
+
+class WorkflowProteinClassificationTestResponse(BaseModel):
+    """protein-classification(파인튜닝 ESM2/ESMC) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+class WorkflowFillMaskTestResponse(BaseModel):
+    """fill-mask(base BFM: ESM2/ESMC/RNA-FM/MoLFormer) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+class WorkflowProteinStructurePredictionTestResponse(BaseModel):
+    """protein-structure-prediction(ESMFold2) 워크플로우 테스트 응답"""
+
+    workflow_id: str
+    execution_order: List[str]
+    results: List[ComponentTestResult]
+
+
+# ============= Workflow Validation 스키마 =============
+
+
+class WorkflowValidateRequest(BaseModel):
+    """워크플로우 정의 사전 검증 요청"""
+
+    workflow_definition: WorkflowDefinition
+
+
+class ValidationCheckResponse(BaseModel):
+    """검증 항목별 결과"""
+
+    rule: str
+    passed: bool
+    message: Optional[str] = None
+
+
+class WorkflowValidateResponse(BaseModel):
+    """워크플로우 정의 사전 검증 응답"""
+
+    valid: bool
+    checks: List[ValidationCheckResponse]

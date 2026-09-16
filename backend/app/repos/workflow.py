@@ -8,9 +8,7 @@ from schemas.workflow import (
     ComponentCreateRequest,
     ConnectionCreateRequest,
     WorkflowCreateInternal,
-    WorkflowCreateRequest,
     WorkflowUpdateInternal,
-    WorkflowUpdateRequest,
 )
 from sqlalchemy.orm import Session, joinedload
 
@@ -28,7 +26,7 @@ class WorkflowRepository(CRUDBase[Workflow, WorkflowCreateInternal, WorkflowUpda
                 joinedload(Workflow.template),
                 joinedload(Workflow.components).joinedload(WorkflowComponent.model),
                 joinedload(Workflow.component_connections),
-                joinedload(Workflow.kserve_deployments),
+                joinedload(Workflow.model_deployments),
             )
             .filter(Workflow.id == workflow_id)
             .first()
@@ -150,15 +148,18 @@ class WorkflowComponentRepository(CRUDBase[WorkflowComponent, ComponentCreateReq
     def create_component(
         self, db: Session, workflow_id: str, component_data: ComponentCreateRequest
     ) -> WorkflowComponent:
-        """워크플로우 컴포넌트 생성 - base의 create 활용 가능하지만 특별한 로직 있어 유지"""
+        """워크플로우 컴포넌트 생성"""
         component = WorkflowComponent(
             workflow_id=workflow_id,
             name=component_data.name,
             type=ComponentType(component_data.type),
-            config=None,  # config는 사용하지 않음
+            description=component_data.description,
+            config=component_data.config,
             model_id=component_data.model_id,
             knowledge_base_id=component_data.knowledge_base_id,
-            prompt_id=component_data.prompt_id,
+            prompt_id=getattr(component_data, "prompt_id", None),
+            x=component_data.x,
+            y=component_data.y,
         )
         db.add(component)
         db.flush()

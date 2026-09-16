@@ -1,0 +1,43 @@
+[project]
+name = "ml-workflow-predictor"
+version = "0.1.0"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "transformers==5.13.0",
+    "peft==0.19.1",
+    "accelerate>=1.0",
+    "kserve==0.13.1",
+    "mlflow==2.17.0",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "pillow==10.4.0",
+    "scipy==1.14.1",
+    "boto3",
+    "onnxruntime==1.22.1",
+    "timm==1.0.19",
+    "opencv-python==4.11.0.86",
+    "onnx==1.17.0",
+    "onnx-simplifier==0.4.10",
+    "loguru==0.7.3",
+    "tqdm",
+    "ninja",
+    "tabulate",
+    "thop",
+    "psutil",
+    "pycocotools==2.0.10",
+    "multimolecule>=0.2.0",
+    "datasets>=2.19",
+]
+
+[tool.uv]
+# torch/torchvision 은 CUDA 12.8(cu128) 빌드로 설치한다. 기본 PyPI wheel(cu121)은 지원 아키텍처가
+# sm_90(Hopper)까지여서 Blackwell(sm_120) GPU 의 추론 forward 에서 "no kernel image" 로 실패한다.
+# cu128 빌드는 sm_86(RTX 3090)·sm_120(RTX PRO 6000 Blackwell)을 모두 포함한다.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

@@ -51,11 +51,10 @@ def create_service(
     - **creator_id** (int): 서비스 생성자 ID
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 최종 수정 시각
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -135,11 +134,10 @@ def list_services(
         - creator_id (int): 생성자 ID
         - created_at (datetime): 생성 시각
         - updated_at (datetime): 최종 수정 시각
-        - creator (UserSchema): 생성자 상세 정보
+        - creator (UserBriefSchema): 생성자 상세 정보
             - id (int): 사용자 ID
             - username (str): 사용자명
             - name (str): 사용자 이름
-            - password (str): 비밀번호 (해시된 값)
             - created_at (datetime): 계정 생성 시각
             - updated_at (datetime): 계정 정보 수정 시각
             - created_by (str, optional): 계정 생성자
@@ -207,7 +205,7 @@ def get_service_detail(
     서비스 상세정보 조회
 
     특정 서비스의 상세 정보를 조회합니다.
-    연결된 모든 워크플로우 정보와 최근 1시간의 모니터링 메트릭을 포함합니다.
+    연결된 모든 워크플로우 정보와 최근 1시간/1일/1주일의 기간별 모니터링 메트릭을 포함합니다.
 
     ## Path Parameters
     - **service_id** (str): 조회할 서비스의 고유 ID (UUID)
@@ -220,11 +218,10 @@ def get_service_detail(
     - **creator_id** (int): 생성자 ID
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 최종 수정 시각
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -245,21 +242,21 @@ def get_service_detail(
         - created_at (datetime): 생성 시각
         - updated_at (datetime): 수정 시각
     - **monitoring_data** (ServiceMonitoringData): 모니터링 데이터
-        - total_metrics (MonitoringMetrics): 전체 서비스 메트릭
-            - message_count (int): 최근 1시간 총 메시지 수
-            - active_users (int): 최근 1시간 활성 사용자 수
-            - token_usage (int): 최근 1시간 토큰 사용량
-            - avg_interaction_count (float): 최근 1시간 평균 사용자 상호작용 수
-            - response_time_ms (float): 평균 응답 시간(ms)
-            - error_count (int): 최근 1시간 오류 수
-            - success_rate (float): 최근 1시간 성공률(%)
-        - workflow_metrics (List[WorkflowMonitoring]): 워크플로우별 메트릭
+        - total_metrics (MonitoringMetrics): 전체 서비스 기간별 메트릭
+            - 1h / 1d / 1w (PeriodMetrics): 최근 1시간 / 1일 / 1주일 집계
+                - message_count (int): 총 메시지 수
+                - active_users (int): 활성 사용자 수
+                - token_usage (int): 토큰 사용량
+                - avg_interaction_count (float): 평균 사용자 상호작용 수
+                - response_time_ms (float | null): 평균 응답 시간(ms). 요청 없으면 null
+                - error_count (int): 오류 수
+                - success_rate (float | null): 성공률(%). 요청 없으면 null
+        - workflow_metrics (List[WorkflowMonitoring]): 워크플로우별 기간별 메트릭
             - workflow_id (str): 워크플로우 ID
             - workflow_name (str): 워크플로우 이름
-            - metrics (MonitoringMetrics): 해당 워크플로우의 메트릭
-            - last_updated (datetime): 마지막 업데이트 시각
-        - period_start (datetime): 집계 시작 시간
-        - period_end (datetime): 집계 종료 시간
+            - metrics (MonitoringMetrics): 해당 워크플로우의 1h/1d/1w 메트릭
+            - last_updated (datetime): 집계 기준 시각
+        - aggregated_at (datetime): 집계 기준 시각(UTC)
 
     ## Errors
     - 401: 인증되지 않은 사용자
@@ -322,11 +319,10 @@ def update_service(
     - **creator_id** (int): 생성자 ID (변경 불가)
     - **created_at** (datetime): 생성 시각 (변경 불가)
     - **updated_at** (datetime): 수정 시각 (현재 시각으로 자동 갱신)
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -379,7 +375,7 @@ def delete_service(
 
     ## Side Effects
     - 서비스와 연결된 모든 워크플로우의 service_id가 null로 설정됨
-    - 서비스 관련 모니터링 데이터는 보존됨 (향후 분석용)
+    - 서비스 관련 모니터링 데이터(service_monitoring)는 함께 삭제됨
     - 서비스 정보는 데이터베이스에서 완전히 삭제됨
 
     ## Notes
@@ -416,15 +412,15 @@ def get_service_resource_usages(
     - **service_id** (str): 서비스 고유 ID (UUID)
     - **service_name** (str): 서비스 이름
     - **deployments** (List[DeploymentResourceUsage]): 배포별 리소스 사용량 목록
-        - **deployment_id** (str): KServe 배포 ID
-        - **service_name** (str): 서비스 이름
+        - **deployment_id** (str): `model_workflow_deployments` 레코드 ID
+        - **service_name** (str): Kubernetes 서비스·InferenceService 이름
         - **workflow_id** (str): 워크플로우 ID
         - **component_id** (str): 컴포넌트 ID
         - **model_name** (str): 모델 이름
         - **pods** (List[PodResourceUsage]): Pod별 리소스 사용량 목록
             - **pod_name** (str): Pod 이름
             - **namespace** (str): 네임스페이스
-            - **deployment_type** (str): 배포 타입 (inferenceservice 또는 service)
+            - **deployment_type** (str): `inferenceservice`(KServe) 또는 `service`(Ollama 등 일반 Service)
             - **resource_usage** (ResourceUsage): 리소스 사용량
                 - **cpu_usage_millicores** (float, optional): CPU 사용량 (밀리코어 단위)
                 - **cpu_request_millicores** (float, optional): CPU 요청량 (밀리코어 단위)
@@ -443,6 +439,7 @@ def get_service_resource_usages(
     - Metrics Server가 설치되어 있어야 실제 사용량을 조회할 수 있습니다.
     - Metrics Server가 없는 경우 리소스 요청/제한 정보만 반환됩니다.
     - GPU 사용량은 별도의 메트릭 수집기(dcgm-exporter 등)가 필요합니다.
+    - 클러스터에 대응 Pod가 없는 배포(REMOTE 등)는 집계 목록에서 생략될 수 있습니다.
 
     ## Errors
     - 401: 인증되지 않은 사용자

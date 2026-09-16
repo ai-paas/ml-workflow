@@ -1,8 +1,11 @@
+import warnings
+from typing import Optional
+
 from config.settings import get_settings
 from core.kubeflow.s3.mlflow_s3_manager import MLFlowS3Manager
 from db.models.experiment import ExperimentModel
 from mlflow import MlflowClient
-from repos.experiment import experiment_repository, hyperparameter_repository, hyperparameter_type_repository
+from repos.experiment import experiment_repository, hyperparameter_repository
 from schemas.experiment import (
     ExperimentBaseSchema,
     ExperimentInternalUpdateRequest,
@@ -10,8 +13,6 @@ from schemas.experiment import (
     ExperimentUpdateRequest,
     HyperparameterBaseSchema,
     HyperparameterReadSchema,
-    HyperparameterTypeBaseSchema,
-    HyperparameterTypeReadSchema,
 )
 from sqlalchemy.orm import Session
 from utils.model_registry import ModelRegistry
@@ -23,6 +24,11 @@ class ExperimentService:
         experiment_db_obj = experiment_repository.create(db, obj_in=obj_in)
         db.commit()
         return experiment_db_obj
+
+    @staticmethod
+    def get_by_name(db: Session, name: str) -> Optional[ExperimentModel]:
+        """이름으로 실험 1건 조회(실험명 중복 거부용). 없으면 None."""
+        return experiment_repository.get_by_name(db, name)
 
     @staticmethod
     def get(db: Session, pk: int) -> ExperimentReadSchema:
@@ -43,7 +49,6 @@ class ExperimentService:
     def update_internal(db: Session, *, experiment_id: int, obj_in: ExperimentInternalUpdateRequest):
         """내부 통신 전용 실험 업데이트 메서드"""
         db_obj = experiment_repository.get(db, experiment_id)
-        # 내부 업데이트는 status, mlflow_run_id, kubeflow_run_id만 업데이트 가능
         update_data = {}
         if obj_in.status is not None:
             update_data["status"] = obj_in.status
@@ -51,6 +56,8 @@ class ExperimentService:
             update_data["mlflow_run_id"] = obj_in.mlflow_run_id
         if obj_in.kubeflow_run_id is not None:
             update_data["kubeflow_run_id"] = obj_in.kubeflow_run_id
+        if obj_in.registration_kubeflow_run_id is not None:
+            update_data["registration_kubeflow_run_id"] = obj_in.registration_kubeflow_run_id
 
         if update_data:
             for key, value in update_data.items():
@@ -102,29 +109,13 @@ class ExperimentService:
                     run_info = client.get_run(run_id)
                     artifact_uri = run_info.info.artifact_uri
 
-                    # artifact_uri에서 S3 경로 추출
-                    # 형식 1: mlflow-artifacts:/0/abc123/artifacts
-                    # 형식 2: s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/google-owlv2-base-patch16
-                    s3_artifact_path = None
-                    if artifact_uri.startswith("mlflow-artifacts:/"):
-                        s3_artifact_path = artifact_uri.replace("mlflow-artifacts:/", "")
-                    elif artifact_uri.startswith("s3://"):
-                        # s3://bucket/path 형식에서 버킷 이름 제거
-                        # s3://mlflow/8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                        # -> 8/09efe716fc234f3c87d760c91030b7e6/artifacts/...
-                        uri_without_protocol = artifact_uri.replace("s3://", "")
-                        # 첫 번째 '/' 이후의 경로만 추출 (버킷 이름 제거)
-                        if "/" in uri_without_protocol:
-                            s3_artifact_path = uri_without_protocol.split("/", 1)[1]
-
+                    s3_artifact_path = MLFlowS3Manager.s3_path_from_artifact_uri(artifact_uri)
                     if s3_artifact_path:
                         MLFlowS3Manager.get_instance().delete_folder(s3_artifact_path)
                 except Exception as s3_error:
                     # S3 삭제 실패 처리
                     # MLflow가 이미 삭제되었다면 복구 불가능하므로 경고만 하고 진행
                     if mlflow_deleted:
-                        import warnings
-
                         warnings.warn(f"S3 폴더 삭제 실패 (MLflow는 이미 삭제됨): {str(s3_error)}")
                         # S3만 실패한 경우 DB는 커밋 (MLflow는 이미 삭제되었으므로)
                     else:
@@ -160,21 +151,3 @@ class HyperparameterService:
     @staticmethod
     def get_multi(db: Session, skip: int = 0, limit: int = 100) -> list[HyperparameterReadSchema]:
         return hyperparameter_repository.get_multi(db, skip=skip, limit=limit)
-
-
-class HyperparameterTypeService:
-    @staticmethod
-    def create(db: Session, *, obj_in: HyperparameterTypeBaseSchema):
-        return hyperparameter_type_repository.create(db, obj_in=obj_in)
-
-    @staticmethod
-    def get(db: Session, pk: int) -> HyperparameterTypeReadSchema:
-        return hyperparameter_type_repository.get(db, pk)
-
-    @staticmethod
-    def get_by_param_name(db: Session, param_name: str) -> HyperparameterTypeReadSchema:
-        return hyperparameter_type_repository.get_by_param_name(db, param_name)
-
-    @staticmethod
-    def update(db: Session, *, obj_in: ExperimentUpdateRequest):
-        return experiment_repository.update(db, obj_in=obj_in)

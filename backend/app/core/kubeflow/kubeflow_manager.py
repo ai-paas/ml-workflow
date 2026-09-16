@@ -1,11 +1,10 @@
 import logging
 import os
-import uuid
-from typing import Any
+import threading
+import time
 
 import kfp
 from config.settings import get_settings
-from kfp import dsl
 from kfp.compiler import Compiler
 from utils.istio_authentication import get_istio_auth_session
 
@@ -15,32 +14,75 @@ logger = logging.getLogger(__name__)
 
 
 class KubeflowManager:
+    """Kubeflow(Istio+Dex) 접근 매니저. 프로세스 단위 싱글톤이며 Dex 로그인 세션을 TTL 동안 재사용한다.
+
+    과거처럼 인스턴스 생성(=호출)마다 Dex 로그인하면, 배포 상태 폴링처럼 잦은 호출에서 로그인이 폭주해
+    세션 churn 으로 Dex 가 간헐적으로 "No redirect after POST"/403 을 반환한다. 여기서는 세션을
+    settings.KUBEFLOW_AUTH_SESSION_TTL_SEC 동안 재사용하고, 만료·강제(refresh) 시에만 재로그인한다.
+    kfp_client·auth_session 은 접근 시 세션 유효성을 보장하는 property 라, 기존 호출부는 수정 없이 그대로 쓴다.
+    """
+
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    inst = super().__new__(cls)
+                    inst._configure()
+                    cls._instance = inst
+        return cls._instance
+
     def __init__(self):
+        # 초기화는 __new__ 의 _configure 에서 1회만 수행한다(싱글톤 재-init 방지).
+        pass
+
+    def _configure(self):
         self.endpoint = settings.KUBEFLOW_ENDPOINT
         self.username = settings.KUBEFLOW_USERNAME
         self.password = settings.KUBEFLOW_PASSWORD
         self.namespace = settings.KUBEFLOW_NAMESPACE
-        self.auth_session = self._get_istio_auth_session()
-        self.kfp_client = self._create_kfp_client()
+        self._ttl_sec = int(settings.KUBEFLOW_AUTH_SESSION_TTL_SEC)
+        self._auth_session = None
+        self._kfp_client = None
+        self._logged_in_at = 0.0
+        self._login_lock = threading.Lock()
 
-    def _get_istio_auth_session(self):
-        return get_istio_auth_session(url=self.endpoint, username=self.username, password=self.password)
-
-    def _create_kfp_client(self):
-        client = kfp.Client(
+    def _login(self):
+        logger.info("Kubeflow Dex 로그인(세션 신규/갱신)")
+        self._auth_session = get_istio_auth_session(url=self.endpoint, username=self.username, password=self.password)
+        self._kfp_client = kfp.Client(
             host=f"{self.endpoint}/pipeline",
             namespace=self.namespace,
-            cookies=self.auth_session.session_cookie,
+            cookies=self._auth_session.session_cookie,
         )
-        # client = kfp.Client(
-        #     host=f"{self.endpoint}/pipeline"
-        # )
-        # client._job_api.api_client.cookie = f"authservice_session={self.auth_session.session_cookie}"
-        return client
+        self._logged_in_at = time.monotonic()
 
-    # def get_session_cookie(self):
-    #     cookie = self.auth_session.session_cookie.split("=")[-1]
-    #     return cookie
+    def _ensure_session(self, force: bool = False):
+        def _fresh():
+            return self._auth_session is not None and (time.monotonic() - self._logged_in_at) < self._ttl_sec
+
+        if _fresh() and not force:
+            return
+        with self._login_lock:
+            # 락 획득 후 재확인(다른 스레드가 이미 갱신했을 수 있음).
+            if force or not _fresh():
+                self._login()
+
+    def refresh(self):
+        """인증/세션 오류(403·No redirect 등) 발생 시 강제 재로그인한다."""
+        self._ensure_session(force=True)
+
+    @property
+    def auth_session(self):
+        self._ensure_session()
+        return self._auth_session
+
+    @property
+    def kfp_client(self):
+        self._ensure_session()
+        return self._kfp_client
 
     def get_kfp_client(self):
         return self.kfp_client

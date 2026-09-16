@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 # Copyright (c) Megvii, Inc. and its affiliates.
+#
+# Modified by Surromind, 2024-2026
+# Changes: Lint formatting fix (trailing comma).
 
 import random
 
@@ -50,7 +53,7 @@ class MosaicDetection(Dataset):
         enable_mixup=True,
         mosaic_prob=1.0,
         mixup_prob=1.0,
-        *args
+        *args,
     ):
         """
 

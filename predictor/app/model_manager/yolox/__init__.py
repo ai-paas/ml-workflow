@@ -1,3 +1,3 @@
-from .custom_model import YoloxModelManager
+from .manager import YoloxModelManager
 
 __all__ = ["YoloxModelManager"]
